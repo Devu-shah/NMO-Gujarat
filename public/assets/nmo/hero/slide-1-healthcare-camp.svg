@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 1080" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bg-grad-1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0a2540" />
+      <stop offset="50%" stop-color="#0c3559" />
+      <stop offset="100%" stop-color="#081c30" />
+    </linearGradient>
+    <radialGradient id="glow-1" cx="30%" cy="40%" r="50%">
+      <stop offset="0%" stop-color="#1976D2" stop-opacity="0.35" />
+      <stop offset="100%" stop-color="#0a2540" stop-opacity="0" />
+    </radialGradient>
+    <pattern id="grid-pattern" width="80" height="80" patternUnits="userSpaceOnUse">
+      <path d="M 80 0 L 0 0 0 80" fill="none" stroke="rgba(255,255,255,0.03)" stroke-width="1"/>
+    </pattern>
+  </defs>
+  
+  <rect width="1920" height="1080" fill="url(#bg-grad-1)"/>
+  <rect width="1920" height="1080" fill="url(#glow-1)"/>
+  <rect width="1920" height="1080" fill="url(#grid-pattern)"/>
+  
+  <!-- Subtle Medical ECG wave in background -->
+  <path d="M 0,650 L 500,650 L 540,600 L 580,720 L 620,530 L 660,700 L 700,650 L 1920,650" fill="none" stroke="#2563EB" stroke-width="3" opacity="0.25"/>
+  
+  <!-- Doctors silhouettes & Medical Camp Graphic -->
+  <g opacity="0.2" transform="translate(1000, 300)">
+    <circle cx="200" cy="150" r="100" fill="#3B82F6"/>
+    <path d="M 50,450 C 50,300 120,250 200,250 C 280,250 350,300 350,450 Z" fill="#3B82F6"/>
+    <!-- Stethoscope -->
+    <path d="M 170,270 C 170,360 230,360 230,270" fill="none" stroke="#93C5FD" stroke-width="8"/>
+    <circle cx="200" cy="380" r="20" fill="#93C5FD"/>
+  </g>
+</svg>

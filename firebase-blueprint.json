@@ -1,0 +1,104 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "NMO Gujarat Master User Record indexed by unique Membership Number",
+      "type": "object",
+      "properties": {
+        "membershipNumber": { "type": "string", "maxLength": 64 },
+        "name": { "type": "string", "maxLength": 150 },
+        "bloodGroup": { "type": "string", "maxLength": 10 },
+        "medicalCollege": { "type": "string", "maxLength": 200 },
+        "dob": { "type": "string", "maxLength": 30 },
+        "email": { "type": "string", "maxLength": 120 },
+        "gender": { "type": "string", "maxLength": 20 },
+        "memberOn": { "type": "string", "maxLength": 30 },
+        "studentMembershipValidTill": { "type": "string", "maxLength": 30 },
+        "address": { "type": "string", "maxLength": 500 },
+        "pincode": { "type": "string", "maxLength": 20 },
+        "nmoState": { "type": "string", "maxLength": 100 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "prant": { "type": "string", "enum": ["Gujarat", "Saurashtra"] },
+        "qualifications": { "type": "string", "maxLength": 200 },
+        "refMembershipNumber": { "type": "string", "maxLength": 64 },
+        "refPerson": { "type": "string", "maxLength": 150 },
+        "refPersonPhone": { "type": "string", "maxLength": 40 },
+        "registrationNumber": { "type": "string", "maxLength": 100 },
+        "specialization": { "type": "string", "maxLength": 150 },
+        "stateSecretaryEmail": { "type": "string", "maxLength": 120 },
+        "applicationFee": { "type": "string", "maxLength": 40 },
+        "uid": { "type": "string", "maxLength": 128 },
+        "role": { "type": "string", "enum": ["member", "prant_admin", "state_admin", "super_admin"] },
+        "accountStatus": { "type": "string", "enum": ["Active", "Inactive", "Pending"] },
+        "profilePhoto": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "maxLength": 40 },
+        "updatedAt": { "type": "string", "maxLength": 40 },
+        "lastLogin": { "type": "string", "maxLength": 40 }
+      },
+      "required": ["membershipNumber", "name", "email", "prant", "role", "accountStatus"]
+    },
+    "Event": {
+      "title": "Event",
+      "description": "NMO Gujarat conferences, camps, and CMEs with embedded participants array",
+      "type": "object",
+      "properties": {
+        "eventId": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 4000 },
+        "eventImage": { "type": "string", "maxLength": 500 },
+        "date": { "type": "string", "maxLength": 40 },
+        "startTime": { "type": "string", "maxLength": 30 },
+        "endTime": { "type": "string", "maxLength": 30 },
+        "venue": { "type": "string", "maxLength": 200 },
+        "city": { "type": "string", "maxLength": 100 },
+        "state": { "type": "string", "maxLength": 100 },
+        "prant": { "type": "string", "enum": ["Gujarat", "Saurashtra", "All"] },
+        "registrationStart": { "type": "string", "maxLength": 40 },
+        "registrationEnd": { "type": "string", "maxLength": 40 },
+        "maximumParticipants": { "type": "number" },
+        "registrationRequired": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["Draft", "Published", "Registration Open", "Registration Closed", "Completed", "Cancelled"] },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "maxLength": 40 },
+        "updatedAt": { "type": "string", "maxLength": 40 },
+        "participants": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "membershipNumber": { "type": "string" },
+              "uid": { "type": "string" },
+              "name": { "type": "string" },
+              "email": { "type": "string" },
+              "phone": { "type": "string" },
+              "medicalCollege": { "type": "string" },
+              "prant": { "type": "string", "enum": ["Gujarat", "Saurashtra", "All"] },
+              "registrationDate": { "type": "string" },
+              "approvalStatus": { "type": "string", "enum": ["Pending", "Approved", "Rejected", "Cancelled"] },
+              "attendanceStatus": { "type": "string", "enum": ["Attended", "Not Attended", "Pending"] },
+              "approvedBy": { "type": "string" },
+              "approvedAt": { "type": "string" },
+              "attendanceMarkedBy": { "type": "string" },
+              "attendanceMarkedAt": { "type": "string" }
+            },
+            "required": ["membershipNumber", "name", "email", "registrationDate", "approvalStatus", "attendanceStatus"]
+          }
+        },
+        "isDynamicMemberField": { "type": "boolean" },
+        "fieldDisplayName": { "type": "string", "maxLength": 100 },
+        "fieldType": { "type": "string" }
+      },
+      "required": ["eventId", "title", "date", "venue", "city", "prant", "status", "participants"]
+    }
+  },
+  "firestore": {
+    "/Users/{membershipNumber}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "Master Users collection keyed by unique Membership Number"
+    },
+    "/Events/{eventId}": {
+      "schema": { "$ref": "#/entities/Event" },
+      "description": "Events collection containing event details and embedded participants array"
+    }
+  }
+}

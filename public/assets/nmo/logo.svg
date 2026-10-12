@@ -1,0 +1,127 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500" width="500" height="500">
+  <defs>
+    <!-- Circular text paths -->
+    <path id="top-arc" d="M 60,250 A 190,190 0 1,1 440,250" fill="none" />
+    <path id="bottom-arc" d="M 440,250 A 190,190 0 0,1 60,250" fill="none" />
+    
+    <radialGradient id="disc-grad" cx="50%" cy="40%" r="50%">
+      <stop offset="0%" stop-color="#2D72D2" />
+      <stop offset="100%" stop-color="#14468C" />
+    </radialGradient>
+    <radialGradient id="halo-grad" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#FFE885" stop-opacity="0.9" />
+      <stop offset="100%" stop-color="#FFB300" stop-opacity="0" />
+    </radialGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+
+  <!-- Outer Red Ring -->
+  <circle cx="250" cy="250" r="240" fill="#DA251D" stroke="#B01812" stroke-width="4"/>
+  <circle cx="250" cy="250" r="236" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-dasharray="8 6" opacity="0.4"/>
+
+  <!-- Top Text: NATIONAL MEDICOS ORGANISATION -->
+  <text fill="#FFFFFF" font-family="'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="28.5" font-weight="900" letter-spacing="2.5">
+    <textPath href="#top-arc" startOffset="50%" text-anchor="middle">
+      NATIONAL MEDICOS ORGANISATION
+    </textPath>
+  </text>
+
+  <!-- Left and Right Stars -->
+  <text x="65" y="260" fill="#FFFFFF" font-size="26" text-anchor="middle">★</text>
+  <text x="435" y="260" fill="#FFFFFF" font-size="26" text-anchor="middle">★</text>
+
+  <!-- Bottom Text: प्राणिनाम् आर्तिनाशनम् -->
+  <text fill="#FFFFFF" font-family="'Tiro Devanagari Hindi', 'Noto Sans Devanagari', 'Mangal', sans-serif" font-size="32" font-weight="bold" letter-spacing="3">
+    <textPath href="#bottom-arc" startOffset="50%" text-anchor="middle">
+      प्राणिनाम् आर्तिनाशनम्
+    </textPath>
+  </text>
+
+  <!-- Inner Blue Circular Field with Map and Deity -->
+  <circle cx="250" cy="250" r="172" fill="url(#disc-grad)" stroke="#FFFFFF" stroke-width="4"/>
+
+  <!-- India Map Outline Silhouette (stylized) -->
+  <path d="M 245,130 
+           C 255,125 260,135 265,142 
+           C 275,145 285,150 295,152
+           C 310,158 335,160 345,170
+           C 348,175 330,185 320,188
+           C 315,195 305,200 300,205
+           C 305,215 315,225 318,235
+           C 320,248 312,260 308,270
+           C 300,290 288,310 278,328
+           C 268,345 258,365 252,382
+           C 250,388 246,388 245,382
+           C 238,362 230,342 222,322
+           C 212,300 200,285 190,268
+           C 182,255 175,248 180,240
+           C 188,235 200,240 205,230
+           C 198,220 188,210 185,198
+           C 182,185 195,180 205,175
+           C 215,168 225,160 230,150
+           Z" 
+        fill="#FFFFFF" opacity="0.95" filter="url(#shadow)" />
+
+  <!-- Lord Dhanvantari Iconography -->
+  <!-- Divine Golden Halo -->
+  <circle cx="250" cy="180" r="42" fill="url(#halo-grad)" />
+  <circle cx="250" cy="180" r="32" fill="#FFD54F" stroke="#FFA000" stroke-width="2"/>
+
+  <!-- Crown / Mukut -->
+  <path d="M 238,158 L 250,140 L 262,158 L 256,162 L 250,158 L 244,162 Z" fill="#FFB300" stroke="#E65100" stroke-width="1.5"/>
+  <circle cx="250" cy="148" r="3" fill="#E91E63"/>
+
+  <!-- Face & Shoulders -->
+  <ellipse cx="250" cy="175" rx="14" ry="17" fill="#FAD09E" stroke="#D7A15C" stroke-width="1"/>
+  <!-- Tilak -->
+  <path d="M 249,165 L 251,165 L 250,173 Z" fill="#D32F2F"/>
+  <circle cx="250" cy="174" r="1.5" fill="#FFEB3B"/>
+
+  <!-- Garland / Vanamala -->
+  <path d="M 232,192 C 230,225 240,250 250,260 C 260,250 270,225 268,192" fill="none" stroke="#E91E63" stroke-width="3" stroke-dasharray="4 2"/>
+  <path d="M 234,195 C 232,228 242,252 250,262 C 258,252 268,228 266,195" fill="none" stroke="#FFC107" stroke-width="2.5"/>
+
+  <!-- Torso & Arms (Chaturbhuja - 4 Arms) -->
+  <path d="M 236,190 L 264,190 L 260,230 L 240,230 Z" fill="#FAD09E" stroke="#D7A15C" stroke-width="1"/>
+  
+  <!-- Upper Left Arm holding Amrit Kalash (Golden pot of nectar) -->
+  <path d="M 264,192 Q 285,188 288,205" fill="none" stroke="#FAD09E" stroke-width="6" stroke-linecap="round"/>
+  <!-- Amrit Kalash -->
+  <g transform="translate(285, 192)">
+    <path d="M 0,10 C 0,5 5,0 12,0 C 19,0 24,5 24,10 C 24,18 18,22 12,22 C 6,22 0,18 0,10 Z" fill="#FFC107" stroke="#E65100" stroke-width="1.5"/>
+    <ellipse cx="12" cy="3" rx="7" ry="2.5" fill="#FFE082"/>
+    <path d="M 12,-3 L 15,2 L 9,2 Z" fill="#4CAF50"/>
+  </g>
+
+  <!-- Upper Right Arm holding Shankh / Conch & Herbs (Jalauka / Leech / Medicinal Herbs) -->
+  <path d="M 236,192 Q 215,188 212,205" fill="none" stroke="#FAD09E" stroke-width="6" stroke-linecap="round"/>
+  <!-- Herbs & Conch -->
+  <g transform="translate(202, 192)">
+    <path d="M 10,18 C 5,14 2,8 5,3 C 7,-1 13,0 15,5 C 16,9 13,15 10,18 Z" fill="#FFFFFF" stroke="#9E9E9E" stroke-width="1.2"/>
+    <!-- Medicinal Herb Leaf -->
+    <path d="M 14,2 C 18,-4 25,-2 24,5 C 23,9 17,7 14,2 Z" fill="#4CAF50"/>
+  </g>
+
+  <!-- Lower Arms holding Scriptures (Ayurveda texts) -->
+  <path d="M 238,215 Q 220,230 216,245" fill="none" stroke="#FAD09E" stroke-width="5" stroke-linecap="round"/>
+  <rect x="206" y="240" width="16" height="10" rx="2" fill="#FFF8E1" stroke="#8D6E63" stroke-width="1.5" transform="rotate(-15 214 245)"/>
+
+  <path d="M 262,215 Q 275,230 270,248" fill="none" stroke="#FAD09E" stroke-width="5" stroke-linecap="round"/>
+  <circle cx="270" cy="248" r="4" fill="#FAD09E"/>
+
+  <!-- Yellow Dhoti / Peetambar -->
+  <path d="M 240,230 L 260,230 L 264,285 L 252,282 L 250,250 L 248,282 L 236,285 Z" fill="#FBC02D" stroke="#F57F17" stroke-width="1.5"/>
+  <path d="M 245,230 L 255,230 L 253,275 L 247,275 Z" fill="#E65100" opacity="0.3"/>
+  
+  <!-- Red Patka (Shawl) folds -->
+  <path d="M 234,195 Q 225,230 228,265" fill="none" stroke="#C2185B" stroke-width="5" stroke-linecap="round"/>
+  <path d="M 266,195 Q 275,230 272,265" fill="none" stroke="#C2185B" stroke-width="5" stroke-linecap="round"/>
+
+  <!-- Legs & Lotus Pedestal -->
+  <path d="M 243,285 L 243,308 M 257,285 L 257,308" stroke="#FAD09E" stroke-width="4.5" stroke-linecap="round"/>
+  <!-- Lotus Petals Base -->
+  <path d="M 230,314 C 235,308 245,308 250,312 C 255,308 265,308 270,314 C 265,320 235,320 230,314 Z" fill="#F06292" stroke="#C2185B" stroke-width="1.5"/>
+  <ellipse cx="250" cy="316" rx="28" ry="4" fill="#AD1457" opacity="0.4"/>
+</svg>

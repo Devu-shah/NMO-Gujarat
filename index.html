@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NMO Gujarat - National Medicos Organisation</title>
+    <link rel="icon" type="image/png" href="https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcTYhbKvL5-7H3hS8j3gaP1Jsgu4cf-4m0YMpg&s" />
+    <meta name="description" content="Official portal and membership management system of National Medicos Organisation (NMO) Gujarat." />
+    <meta property="og:title" content="NMO Gujarat - National Medicos Organisation" />
+    <meta property="og:description" content="Official portal and membership management system of National Medicos Organisation (NMO) Gujarat." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <script>
+      // Suppress benign WebSocket/HMR disconnect errors in iframe preview
+      window.addEventListener('unhandledrejection', function(e) {
+        if (e.reason && (e.reason.message?.includes('WebSocket') || String(e.reason).includes('WebSocket'))) {
+          e.preventDefault();
+        }
+      });
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

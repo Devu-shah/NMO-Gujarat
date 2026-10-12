@@ -1,0 +1,60 @@
+@import "tailwindcss";
+
+@keyframes floatSlow {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-8px);
+  }
+}
+
+@keyframes pulseGlow {
+  0%, 100% {
+    opacity: 0.7;
+    filter: drop-shadow(0 0 12px rgba(220, 38, 38, 0.25));
+  }
+  50% {
+    opacity: 1;
+    filter: drop-shadow(0 0 20px rgba(220, 38, 38, 0.45));
+  }
+}
+
+@keyframes shimmerWave {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+@keyframes subtleGradient {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+.animate-float-slow {
+  animation: floatSlow 5s ease-in-out infinite;
+}
+
+.animate-pulse-glow {
+  animation: pulseGlow 3.5s ease-in-out infinite;
+}
+
+.animate-shimmer-wave {
+  background-size: 200% 100%;
+  animation: shimmerWave 3s infinite linear;
+}
+
+.animate-gradient-shift {
+  background-size: 200% 200%;
+  animation: subtleGradient 8s ease infinite;
+}
