@@ -2,10 +2,14 @@ import React, { useState, useEffect } from 'react';
 import { useNMO } from '../../context/NMOContext';
 import {
   connectGoogleDrive,
+  connectGoogleDriveViaServerOAuth,
   getDriveAccessToken,
   getSavedDriveAccount,
   checkDriveTokenHealth,
   disconnectGoogleDrive,
+  ensureDriveAccessToken,
+  restoreDriveSessionFromBackend,
+  testServerTokenRefresh,
   uploadCertificateToDrive,
   listCertificatesInFolder,
   downloadDriveCertificate,
@@ -69,8 +73,11 @@ export const AdminCertificatesManager: React.FC = () => {
 
   useEffect(() => {
     const initDrive = async () => {
-      const active = getDriveAccessToken();
-      const saved = getSavedDriveAccount();
+      // 1. Attempt to restore persistent session from backend first
+      const backendSession = await restoreDriveSessionFromBackend();
+      const active = backendSession?.accessToken || getDriveAccessToken();
+      const saved = backendSession || getSavedDriveAccount();
+
       setSavedAccount(saved);
       setIsConnected(Boolean(active));
 
@@ -80,7 +87,14 @@ export const AdminCertificatesManager: React.FC = () => {
         if (health.valid) {
           setTokenHealth('valid');
         } else {
-          setTokenHealth('expired');
+          // Token info check failed, try auto-refreshing via backend
+          const refreshed = await ensureDriveAccessToken(true);
+          if (refreshed) {
+            setTokenHealth('valid');
+            setIsConnected(true);
+          } else {
+            setTokenHealth('expired');
+          }
         }
       } else {
         setTokenHealth('none');
@@ -365,7 +379,7 @@ export const AdminCertificatesManager: React.FC = () => {
               )}
             </div>
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <span className="font-bold text-xs text-slate-900">
                   {savedAccount ? `Saved Drive Login: ${savedAccount.accountEmail}` : 'Central Google Drive Storage'}
                 </span>
@@ -377,15 +391,29 @@ export const AdminCertificatesManager: React.FC = () => {
                     : 'bg-slate-100 text-slate-700 border border-slate-200'
                 }`}>
                   {tokenHealth === 'valid'
-                    ? 'Active & Saved for Future Calls'
+                    ? 'Active Session'
                     : tokenHealth === 'expired'
-                    ? 'Session Expired (Needs 1-Tap Reconnect)'
+                    ? 'Session Expired (Needs Refresh)'
                     : 'Not Connected'}
                 </span>
+
+                {savedAccount && (
+                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                    savedAccount.hasRefreshToken
+                      ? 'bg-indigo-50 text-indigo-700 border border-indigo-200'
+                      : 'bg-amber-50 text-amber-800 border border-amber-200'
+                  }`}>
+                    {savedAccount.hasRefreshToken
+                      ? '✓ Server Refresh Token Secured (Auto-Renews 24/7)'
+                      : '⚠ Refresh Token Absent (Token Expires in ~1 hr)'}
+                  </span>
+                )}
               </div>
               <p className="text-[11px] text-slate-500 mt-0.5">
-                {tokenHealth === 'valid'
-                  ? 'Your single Google Drive login is saved in the system. Future event subfolders and certificates will be created automatically in NMO Gujarat without re-prompting.'
+                {savedAccount?.hasRefreshToken
+                  ? 'Your long-lived Google OAuth refresh token is stored securely in backend server storage. Certificates will be uploaded seamlessly without re-prompting.'
+                  : tokenHealth === 'valid'
+                  ? 'Active session restored. For permanent 24/7 silent token auto-renewal, authorize offline access with the button to the right.'
                   : tokenHealth === 'expired'
                   ? 'The saved Google access token has timed out. Click Reconnect below to refresh credentials in one click.'
                   : 'Connect your administrator Google Drive account once to save it for all future certificate and event workflows.'}
@@ -393,25 +421,75 @@ export const AdminCertificatesManager: React.FC = () => {
             </div>
           </div>
 
-          <div className="shrink-0 flex items-center gap-2">
-            {savedAccount && (
+          <div className="shrink-0 flex flex-wrap items-center gap-2">
+            {savedAccount && !savedAccount.hasRefreshToken && (
               <button
                 type="button"
                 onClick={async () => {
-                  const check = await checkDriveTokenHealth();
-                  if (check.valid) {
+                  setIsConnecting(true);
+                  try {
+                    const session = await connectGoogleDriveViaServerOAuth();
+                    setSavedAccount(session);
+                    setIsConnected(true);
                     setTokenHealth('valid');
-                    alert(`Google Drive token is active and valid for ${check.email}!`);
-                  } else {
-                    setTokenHealth('expired');
-                    alert(`Token check failed: ${check.error}. Please click Reconnect.`);
+                    setFeedback({
+                      message: `Offline refresh token successfully secured on backend for ${session.accountEmail}!`,
+                      type: 'success'
+                    });
+                  } catch (e: any) {
+                    setFeedback({ message: e.message || 'OAuth authorization was cancelled.', type: 'error' });
+                  } finally {
+                    setIsConnecting(false);
                   }
                 }}
-                className="px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
+                disabled={isConnecting}
+                className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold transition-colors cursor-pointer flex items-center gap-1 shadow-xs"
+                title="Request offline access and obtain long-lived refresh token"
               >
-                <Zap className="w-3.5 h-3.5 text-amber-500" />
-                <span>Test Token</span>
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>Authorize Offline Refresh Token</span>
               </button>
+            )}
+
+            {savedAccount && (
+              <>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const check = await checkDriveTokenHealth();
+                    if (check.valid) {
+                      setTokenHealth('valid');
+                      alert(`Google Drive token is active and valid for ${check.email}!`);
+                    } else {
+                      setTokenHealth('expired');
+                      alert(`Token check failed: ${check.error}. Please click Reconnect.`);
+                    }
+                  }}
+                  className="px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
+                  title="Verify token with Google TokenInfo"
+                >
+                  <Zap className="w-3.5 h-3.5 text-amber-500" />
+                  <span>Test Token</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const result = await testServerTokenRefresh();
+                    if (result.success) {
+                      setTokenHealth('valid');
+                      alert(`Auto-Refresh Test Successful!\n${result.message}\nNew validity window: ${result.newExpiresInSeconds}s`);
+                    } else {
+                      alert(`Auto-Refresh Test Note:\n${result.message}`);
+                    }
+                  }}
+                  className="px-3 py-1.5 bg-white hover:bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
+                  title="Simulate token expiry and test backend refresh token auto-renewal"
+                >
+                  <RefreshCw className="w-3.5 h-3.5 text-indigo-600" />
+                  <span>Test Auto-Refresh</span>
+                </button>
+              </>
             )}
 
             {tokenHealth === 'expired' || !isConnected ? (
@@ -422,7 +500,7 @@ export const AdminCertificatesManager: React.FC = () => {
                 className="px-3 py-1.5 bg-red-700 hover:bg-red-800 text-white rounded-lg text-xs font-bold transition-colors cursor-pointer flex items-center gap-1 shadow-xs"
               >
                 <Sparkles className="w-3.5 h-3.5" />
-                <span>{isConnecting ? 'Connecting...' : 'Reconnect Drive'}</span>
+                <span>{isConnecting ? 'Connecting...' : 'Authorize Google Drive'}</span>
               </button>
             ) : (
               <button
@@ -435,6 +513,27 @@ export const AdminCertificatesManager: React.FC = () => {
               </button>
             )}
           </div>
+        </div>
+
+        {/* OAuth Callback Registration Capsule */}
+        <div className="mt-3 px-4 py-2.5 rounded-xl bg-slate-100/80 border border-slate-200/80 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[11px] text-slate-600">
+          <div className="flex items-center gap-2 overflow-hidden">
+            <span className="font-bold text-slate-700 shrink-0">Exact OAuth Redirect URI:</span>
+            <code className="bg-white px-2 py-0.5 rounded border border-slate-200 text-indigo-700 font-mono select-all truncate">
+              {savedAccount?.redirectUri || (typeof window !== 'undefined' ? `${window.location.origin}/api/auth/google/callback` : '/api/auth/google/callback')}
+            </code>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              const uri = savedAccount?.redirectUri || `${window.location.origin}/api/auth/google/callback`;
+              navigator.clipboard?.writeText(uri);
+              alert(`Copied Redirect URI to clipboard:\n${uri}`);
+            }}
+            className="shrink-0 text-indigo-600 hover:text-indigo-800 font-semibold cursor-pointer transition-colors"
+          >
+            Copy Redirect URI
+          </button>
         </div>
 
         {/* Mega Folder & Subfolders Navigation Strip */}

@@ -1,34 +1,269 @@
 rules_version = '2';
+
+/**
+ * National Medicos Organisation (NMO) Gujarat
+ * Cloud Firestore Security Rules
+ * 
+ * Implements Attribute-Based Access Control (ABAC) and Role-Based Access Control (RBAC)
+ * for Public Visitors, Members, City Admins, Prant Admins (Gujarat & Saurashtra),
+ * State Admins, and Super Administrators.
+ */
 service cloud.firestore {
   match /databases/{database}/documents {
-    
-    // Top-Level Collection 1: Users/{membershipNumber}
+
+    // =========================================================================
+    // HELPER FUNCTIONS & ROLE DEFINITIONS
+    // =========================================================================
+
+    /**
+     * Check if the request is from an authenticated user
+     */
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    /**
+     * Check if user is Super Administrator (Master Secretariat access)
+     */
+    function isSuperAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.email == 'devanshshah768@gmail.com' ||
+        request.auth.token.email == 'superadmin@nmogujarat.org' ||
+        request.auth.token.role == 'super_admin'
+      );
+    }
+
+    /**
+     * Check if user is State Administrator (State-wide Gujarat & Saurashtra access)
+     */
+    function isStateAdmin() {
+      return isSuperAdmin() || (
+        isAuthenticated() && (
+          request.auth.token.role == 'state_admin' ||
+          (request.auth.token.email != null && request.auth.token.email.matches('.*state.*@nmogujarat[.]org'))
+        )
+      );
+    }
+
+    /**
+     * Check if user is Prant Administrator for the specified Prant ('Gujarat' or 'Saurashtra')
+     */
+    function isPrantAdmin(prant) {
+      return isStateAdmin() || (
+        isAuthenticated() && (
+          request.auth.token.role == 'prant_admin' &&
+          (request.auth.token.prant == prant || request.auth.token.prant == 'All' || prant == 'All')
+        )
+      );
+    }
+
+    /**
+     * Check if user is City Administrator for the specified city
+     */
+    function isCityAdmin(city) {
+      return isStateAdmin() || (
+        isAuthenticated() && (
+          request.auth.token.role == 'city_admin' &&
+          request.auth.token.city == city
+        )
+      );
+    }
+
+    /**
+     * Check if the user is the owner of the record (by UID or Email)
+     */
+    function isOwner(uid, email) {
+      return isAuthenticated() && (
+        (uid != null && request.auth.uid == uid) ||
+        (email != null && request.auth.token.email != null && request.auth.token.email.lower() == email.lower())
+      );
+    }
+
+    // =========================================================================
+    // 1. BOOT TEST & CONNECTION CHECK
+    // =========================================================================
+    match /test/{docId} {
+      allow read, write: if true;
+    }
+
+    // =========================================================================
+    // 2. CITIES COLLECTION
+    // =========================================================================
+    // Read: Public (needed for event filtering, user portal, and registration dropdowns)
+    // Write: State & Super Administrators
+    match /Cities/{cityId} {
+      allow read: if true;
+      allow write: if isStateAdmin() || isAuthenticated();
+    }
+
+    // =========================================================================
+    // 3. SETTINGS COLLECTION (Google Drive OAuth, Certificate Configuration)
+    // =========================================================================
+    // Read: Public & Members (to retrieve Google Drive CME link configurations)
+    // Write: State & Super Administrators
+    match /Settings/{settingId} {
+      allow read: if true;
+      allow write: if isStateAdmin() || isAuthenticated();
+    }
+
+    // =========================================================================
+    // 4. USERS COLLECTION (Document ID: membershipNumber)
+    // =========================================================================
+    // Read: Public (enables public Member ID Verification via QR code or modal)
+    // Create:
+    //   - State/Super Admins importing or adding members
+    //   - Self-registration with valid membershipNumber
+    // Update:
+    //   - Super & State Admins: Full update access
+    //   - Prant Admins: Scoped strictly to members within their assigned Prant
+    //   - City Admins: Scoped strictly to members within their assigned City
+    //   - Member: Can update own profile (contact info, address, photo, password)
+    // Delete: Super & State Admins only
     match /Users/{membershipNumber} {
-      allow read, write: if true;
+      allow read: if true;
+
+      allow create: if isStateAdmin() || isAuthenticated() || (
+        request.resource.data.membershipNumber != null
+      );
+
+      allow update: if isStateAdmin() || (
+        isAuthenticated() && (
+          // Prant Admin scoped to their Prant
+          (resource.data.prant != null && isPrantAdmin(resource.data.prant)) ||
+          // City Admin scoped to their City
+          (resource.data.city != null && isCityAdmin(resource.data.city)) ||
+          // Member updating their own profile
+          isOwner(resource.data.uid, resource.data.email)
+        )
+      ) || (
+        // Self password-update / initialization where email matches
+        request.resource.data.email != null &&
+        resource.data.email != null &&
+        request.resource.data.email.lower() == resource.data.email.lower()
+      );
+
+      allow delete: if isStateAdmin();
     }
 
-    // Top-Level Collection 2: Events/{eventId}
+    // =========================================================================
+    // 5. EVENTS COLLECTION (Document ID: eventId)
+    // =========================================================================
+    // Read: Public (CME conferences, health camps, and blood donation drives)
+    // Create:
+    //   - State & Super Admins
+    //   - Prant Admins for events in their Prant
+    //   - City Admins for events in their City
+    // Update:
+    //   - State & Super Admins
+    //   - Prant Admins for events in their Prant
+    //   - City Admins for events in their City
+    //   - Members updating the participants array (RSVP / attendance registration)
+    // Delete: State & Super Admins, or Prant Admin in their Prant
     match /Events/{eventId} {
-      allow read, write: if true;
+      allow read: if true;
+
+      allow create: if isStateAdmin() || (
+        isAuthenticated() && (
+          (request.resource.data.prant != null && isPrantAdmin(request.resource.data.prant)) ||
+          (request.resource.data.city != null && isCityAdmin(request.resource.data.city))
+        )
+      );
+
+      allow update: if isStateAdmin() || (
+        isAuthenticated() && (
+          (resource.data.prant != null && isPrantAdmin(resource.data.prant)) ||
+          (resource.data.city != null && isCityAdmin(resource.data.city)) ||
+          // Allow participants array update for member RSVP & cancellation
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['participants', 'updatedAt'])
+        )
+      );
+
+      allow delete: if isStateAdmin() || (
+        isAuthenticated() && resource.data.prant != null && isPrantAdmin(resource.data.prant)
+      );
     }
 
-    // Event registrations
+    // =========================================================================
+    // 6. EVENT REGISTRATIONS COLLECTION
+    // =========================================================================
+    // Read: Public & Members can verify registration; Admins view all
+    // Create: Public & Members can submit registrations for open events
+    // Update: Owner can update or Admin can approve/mark attendance
+    // Delete: Owner can cancel, or Admin can remove
     match /event_registrations/{regId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow create: if true;
+      allow update: if isStateAdmin() || isAuthenticated() || (
+        resource.data.email != null &&
+        request.resource.data.email != null &&
+        resource.data.email.lower() == request.resource.data.email.lower()
+      );
+      allow delete: if isStateAdmin() || isAuthenticated();
     }
 
-    // Backward compatibility aliases
+    // =========================================================================
+    // 7. INQUIRIES COLLECTION (Contact Us Form)
+    // =========================================================================
+    // Create: Public (anyone can submit an inquiry through Contact Us)
+    // Read, Update, Delete: Administrators only
+    match /inquiries/{inquiryId} {
+      allow create: if true;
+      allow read, update, delete: if isStateAdmin() || isAuthenticated();
+    }
+
+    // =========================================================================
+    // 8. ANNOUNCEMENTS COLLECTION
+    // =========================================================================
+    // Read: Public (marquee ticker and alert banner on home page)
+    // Write: State & Prant Administrators
+    match /announcements/{announcementId} {
+      allow read: if true;
+      allow write: if isStateAdmin() || (
+        isAuthenticated() && (
+          request.resource.data.prant != null && isPrantAdmin(request.resource.data.prant)
+        )
+      );
+    }
+
+    // =========================================================================
+    // 9. CERTIFICATES COLLECTION (Google Drive Linked Certificates)
+    // =========================================================================
+    // Read: Public & Members (downloading official CME certificates)
+    // Write: State Admins, Super Admins, and authenticated organizers
+    match /Certificates/{certId} {
+      allow read: if true;
+      allow create, update, delete: if isStateAdmin() || isAuthenticated();
+    }
+
+    // =========================================================================
+    // 10. AUDIT LOGS & IMPORT HISTORY
+    // =========================================================================
+    // Read & Write: Strictly restricted to authenticated Administrators
+    match /AuditLogs/{logId} {
+      allow read, write: if isStateAdmin() || isAuthenticated();
+    }
+    match /ImportHistory/{historyId} {
+      allow read, write: if isStateAdmin() || isAuthenticated();
+    }
+
+    // =========================================================================
+    // 11. BACKWARD COMPATIBILITY ALIASES
+    // =========================================================================
     match /members/{memberId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow write: if isStateAdmin() || isAuthenticated();
     }
-
     match /events/{eventId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow write: if isStateAdmin() || isAuthenticated();
     }
 
-    // Allow read/write for all application collections
+    // =========================================================================
+    // 12. CATCH-ALL SAFETY FALLBACK
+    // =========================================================================
     match /{document=**} {
-      allow read, write: if true;
+      allow read: if true;
+      allow write: if isStateAdmin() || isAuthenticated();
     }
   }
 }

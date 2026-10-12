@@ -4,7 +4,7 @@
  * Motto: "प्राणिनाम् आर्तिनाशनम्"
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { NMOProvider, useNMO } from './context/NMOContext';
 import { Navbar } from './components/Navbar';
 import { HeroSlider } from './components/HeroSlider';
@@ -140,28 +140,91 @@ function MainLayout() {
     }
   }, [currentRoute, currentUser, currentMember, isLoadingAuth]);
 
+  // Determine active tab for common Navbar (Must be called before any early return)
+  const currentActiveNavTab = useMemo(() => {
+    if (currentRoute === '/contact') return 'contact';
+    if (currentRoute === '/login') return 'login';
+    if (currentRoute.startsWith('/admin')) return 'admin-portal';
+    if (currentRoute.startsWith('/dashboard')) {
+      if (memberActiveTab === 'id-card' || memberActiveTab === 'certificates') {
+        return memberActiveTab;
+      }
+      return 'member-portal';
+    }
+    return activeTab;
+  }, [currentRoute, activeTab, memberActiveTab]);
+
   if (isLoadingAuth) {
     return <LoadingScreen />;
   }
 
-  // --- VIEW 1: SINGLE UNIFIED LOGIN PAGE (/login) ---
+  // Unified tab & link navigation handler common to all pages
+  const handleNavigate = (tab: string) => {
+    if (tab === 'home') {
+      setActiveTab('home');
+      if (currentRoute === '/') {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      } else {
+        navigate('/');
+      }
+    } else if (tab === 'contact') {
+      setActiveTab('contact');
+      navigate('/contact');
+    } else if (tab === 'login') {
+      navigate('/login');
+    } else if (tab === 'admin-portal') {
+      if (currentUser && currentUser.role !== 'member') {
+        navigate(getRedirectRouteForUser(currentUser.role, currentUser.prant));
+      } else {
+        navigate('/login');
+      }
+    } else if (tab === 'member-portal' || tab === 'dashboard') {
+      if (currentUser || currentMember) {
+        setMemberActiveTab('dashboard');
+        navigate('/dashboard');
+      } else {
+        navigate('/login');
+      }
+    } else if (['id-card', 'profile', 'certificates', 'events', 'history', 'alerts'].includes(tab)) {
+      if (currentUser || currentMember) {
+        setMemberActiveTab(tab as any);
+        navigate('/dashboard');
+      } else {
+        navigate('/login');
+      }
+    } else if (['about', 'events', 'gallery', 'activities'].includes(tab)) {
+      setActiveTab(tab);
+      if (currentRoute === '/') {
+        const el = document.getElementById(tab);
+        if (el) el.scrollIntoView({ behavior: 'smooth' });
+      } else {
+        navigate('/');
+        setTimeout(() => {
+          const el = document.getElementById(tab);
+          if (el) el.scrollIntoView({ behavior: 'smooth' });
+        }, 120);
+      }
+    } else {
+      navigate('/');
+    }
+  };
+
+  // --- ROUTE 1: UNIFIED LOGIN PAGE (/login) ---
   if (currentRoute === '/login') {
     return (
-      <>
+      <div className="min-h-screen flex flex-col">
         {unauthorizedMessage && (
-          <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 max-w-lg w-full px-4">
-            <div className="p-3.5 rounded-xl bg-amber-500 text-slate-950 font-bold text-xs flex items-center justify-between shadow-xl border border-amber-600">
-              <div className="flex items-center gap-2">
-                <AlertTriangle className="w-4 h-4 shrink-0" />
-                <span>{unauthorizedMessage}</span>
-              </div>
-              <button
-                onClick={() => setUnauthorizedMessage(null)}
-                className="p-1 hover:bg-amber-600/30 rounded-md cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
+          <div className="bg-amber-100 border-b border-amber-300 text-amber-950 px-4 py-2.5 text-xs flex items-center justify-between sticky top-0 z-50">
+            <div className="flex items-center gap-2 max-w-5xl mx-auto w-full">
+              <AlertTriangle className="w-4 h-4 text-amber-800 shrink-0" />
+              <span className="font-semibold">{unauthorizedMessage}</span>
             </div>
+            <button
+              onClick={() => setUnauthorizedMessage(null)}
+              className="text-amber-900 font-bold p-1 cursor-pointer"
+            >
+              ✕
+            </button>
           </div>
         )}
         <LoginPage
@@ -171,82 +234,42 @@ function MainLayout() {
           }}
           onNavigateHome={() => navigate('/')}
         />
-      </>
+      </div>
     );
   }
 
-  // --- VIEW 2: SUPER ADMIN DASHBOARD (/admin/super) ---
+  // --- ROUTE 2-6: DEDICATED ADMIN PORTALS (/admin/*) ---
   if (currentRoute === '/admin/super') {
-    return (
-      <>
-        <AdminPortal portalScope="super" onBackToSite={() => navigate('/')} />
-      </>
-    );
+    return <AdminPortal portalScope="super" onBackToSite={() => navigate('/')} />;
   }
 
-  // --- VIEW 3: STATE ADMIN DASHBOARD (/admin/state) ---
   if (currentRoute === '/admin/state') {
-    return (
-      <>
-        <AdminPortal portalScope="state" onBackToSite={() => navigate('/')} />
-      </>
-    );
+    return <AdminPortal portalScope="state" onBackToSite={() => navigate('/')} />;
   }
 
-  // --- VIEW 4: GUJARAT PRANT ADMIN (/admin/prant/gujarat) ---
   if (currentRoute === '/admin/prant/gujarat') {
-    return (
-      <>
-        <AdminPortal portalScope="prant/gujarat" onBackToSite={() => navigate('/')} />
-      </>
-    );
+    return <AdminPortal portalScope="prant/gujarat" onBackToSite={() => navigate('/')} />;
   }
 
-  // --- VIEW 5: SAURASHTRA PRANT ADMIN (/admin/prant/saurashtra) ---
   if (currentRoute === '/admin/prant/saurashtra') {
-    return (
-      <>
-        <AdminPortal portalScope="prant/saurashtra" onBackToSite={() => navigate('/')} />
-      </>
-    );
+    return <AdminPortal portalScope="prant/saurashtra" onBackToSite={() => navigate('/')} />;
   }
 
-  // --- VIEW 6: CITY ADMIN (/admin/city) ---
   if (currentRoute === '/admin/city' || currentRoute.startsWith('/admin/city/')) {
-    return (
-      <>
-        <AdminPortal portalScope="city" onBackToSite={() => navigate('/')} />
-      </>
-    );
+    return <AdminPortal portalScope="city" onBackToSite={() => navigate('/')} />;
   }
 
-  // --- VIEW 6: MEMBER DASHBOARD (/dashboard) ---
-  if (currentRoute === '/dashboard') {
+  if (currentRoute.startsWith('/admin')) {
+    return <AdminPortal onBackToSite={() => navigate('/')} />;
+  }
+
+  // --- ROUTE 7: MEMBER DASHBOARD (/dashboard) ---
+  if (currentRoute.startsWith('/dashboard')) {
     return (
-      <div className="min-h-screen flex flex-col bg-slate-50">
+      <div className="min-h-screen bg-slate-50 flex flex-col font-sans">
         <Navbar
-          activeTab={memberActiveTab === 'dashboard' ? 'member-portal' : memberActiveTab}
-          setActiveTab={(tab) => {
-            if (tab === 'home') {
-              navigate('/');
-            } else if (tab === 'contact') {
-              navigate('/contact');
-            } else if (tab === 'admin-portal') {
-              navigate(getRedirectRouteForUser(currentUser?.role, currentUser?.prant));
-            } else if (['about', 'events', 'gallery', 'activities'].includes(tab)) {
-              navigate('/');
-              setTimeout(() => {
-                const el = document.getElementById(tab);
-                if (el) el.scrollIntoView({ behavior: 'smooth' });
-              }, 120);
-            } else if (tab === 'member-portal' || tab === 'dashboard') {
-              setMemberActiveTab('dashboard');
-              window.scrollTo({ top: 0, behavior: 'smooth' });
-            } else if (['id-card', 'profile', 'certificates', 'history', 'alerts'].includes(tab)) {
-              setMemberActiveTab(tab as any);
-              window.scrollTo({ top: 0, behavior: 'smooth' });
-            }
-          }}
+          activeTab={currentActiveNavTab}
+          setActiveTab={handleNavigate}
           onOpenAuth={() => navigate('/login')}
           onOpenVerify={() => setIsVerifyOpen(true)}
         />
@@ -257,17 +280,7 @@ function MainLayout() {
           />
         </main>
         <Footer
-          onNavigate={(tab) => {
-            if (tab === 'home') navigate('/');
-            else if (tab === 'contact') navigate('/contact');
-            else {
-              navigate('/');
-              setTimeout(() => {
-                const el = document.getElementById(tab);
-                if (el) el.scrollIntoView({ behavior: 'smooth' });
-              }, 100);
-            }
-          }}
+          onNavigate={handleNavigate}
           onOpenVerify={() => setIsVerifyOpen(true)}
           onOpenAuth={() => navigate('/login')}
         />
@@ -279,32 +292,13 @@ function MainLayout() {
     );
   }
 
-  // --- VIEW 7: CONTACT US PAGE (/contact) ---
+  // --- ROUTE 8: CONTACT US PAGE (/contact) ---
   if (currentRoute === '/contact' || activeTab === 'contact') {
     return (
-      <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900 selection:bg-red-700 selection:text-white">
+      <div className="min-h-screen bg-slate-50 flex flex-col font-sans">
         <Navbar
           activeTab="contact"
-          setActiveTab={(tab) => {
-            if (tab === 'contact') {
-              navigate('/contact');
-            } else if (tab === 'home') {
-              setActiveTab('home');
-              navigate('/');
-            } else if (tab === 'member-portal' || ['id-card', 'certificates', 'profile', 'history', 'alerts'].includes(tab)) {
-              setMemberActiveTab(tab === 'member-portal' ? 'dashboard' : (tab as any));
-              navigate('/dashboard');
-            } else if (tab === 'admin-portal') {
-              navigate(getRedirectRouteForUser(currentUser?.role, currentUser?.prant));
-            } else {
-              setActiveTab(tab);
-              navigate('/');
-              setTimeout(() => {
-                const el = document.getElementById(tab);
-                if (el) el.scrollIntoView({ behavior: 'smooth' });
-              }, 120);
-            }
-          }}
+          setActiveTab={handleNavigate}
           onOpenAuth={() => navigate('/login')}
           onOpenVerify={() => setIsVerifyOpen(true)}
         />
@@ -314,39 +308,11 @@ function MainLayout() {
               setActiveTab('home');
               navigate('/');
             }}
-            onNavigate={(tab) => {
-              if (tab === 'home') {
-                setActiveTab('home');
-                navigate('/');
-              } else if (tab === 'contact') {
-                navigate('/contact');
-              } else {
-                setActiveTab(tab);
-                navigate('/');
-                setTimeout(() => {
-                  const el = document.getElementById(tab);
-                  if (el) el.scrollIntoView({ behavior: 'smooth' });
-                }, 120);
-              }
-            }}
+            onNavigate={handleNavigate}
           />
         </main>
         <Footer
-          onNavigate={(tab) => {
-            if (tab === 'home') {
-              setActiveTab('home');
-              navigate('/');
-            } else if (tab === 'contact') {
-              navigate('/contact');
-            } else {
-              setActiveTab(tab);
-              navigate('/');
-              setTimeout(() => {
-                const el = document.getElementById(tab);
-                if (el) el.scrollIntoView({ behavior: 'smooth' });
-              }, 120);
-            }
-          }}
+          onNavigate={handleNavigate}
           onOpenVerify={() => setIsVerifyOpen(true)}
           onOpenAuth={() => navigate('/login')}
         />
@@ -358,12 +324,12 @@ function MainLayout() {
     );
   }
 
-  // --- VIEW 8: PUBLIC WEBSITE (/) ---
+  // --- ROUTE 9: MAIN PUBLIC WEBSITE (/) ---
   return (
     <div className="min-h-screen flex flex-col bg-white text-slate-900 selection:bg-red-700 selection:text-white">
       {/* Route Protection Notice (if redirected) */}
       {unauthorizedMessage && (
-        <div className="bg-amber-100 border-b border-amber-300 text-amber-950 px-4 py-2.5 text-xs flex items-center justify-between">
+        <div className="bg-amber-100 border-b border-amber-300 text-amber-950 px-4 py-2.5 text-xs flex items-center justify-between sticky top-0 z-50">
           <div className="flex items-center gap-2 max-w-5xl mx-auto w-full">
             <AlertTriangle className="w-4 h-4 text-amber-800 shrink-0" />
             <span className="font-semibold">{unauthorizedMessage}</span>
@@ -377,32 +343,14 @@ function MainLayout() {
         </div>
       )}
 
-      {/* Top Navbar */}
+      {/* Main Public Website Header & Navigation */}
       <Navbar
         activeTab={activeTab}
-        setActiveTab={(tab) => {
-          if (tab === 'contact') {
-            navigate('/contact');
-          } else if (tab === 'member-portal' || ['id-card', 'certificates', 'profile', 'history', 'alerts'].includes(tab)) {
-            setMemberActiveTab(tab === 'member-portal' ? 'dashboard' : (tab as any));
-            navigate('/dashboard');
-          } else if (tab === 'admin-portal') {
-            navigate(getRedirectRouteForUser(currentUser?.role, currentUser?.prant));
-          } else {
-            setActiveTab(tab);
-            if (['about', 'events', 'gallery', 'activities'].includes(tab)) {
-              const el = document.getElementById(tab);
-              if (el) el.scrollIntoView({ behavior: 'smooth' });
-            } else {
-              window.scrollTo({ top: 0, behavior: 'smooth' });
-            }
-          }
-        }}
+        setActiveTab={handleNavigate}
         onOpenAuth={() => navigate('/login')}
         onOpenVerify={() => setIsVerifyOpen(true)}
       />
 
-      {/* Main Public Content */}
       <main className="flex-1">
         {/* Active Announcements / Alerts from Firestore */}
         <AnnouncementsTicker />
@@ -434,20 +382,9 @@ function MainLayout() {
         <GallerySection />
       </main>
 
-      {/* Footer */}
+      {/* Main Public Website Footer */}
       <Footer
-        onNavigate={(tab) => {
-          if (tab === 'home') {
-            window.scrollTo({ top: 0, behavior: 'smooth' });
-          } else if (tab === 'contact') {
-            navigate('/contact');
-          } else {
-            const el = document.getElementById(tab);
-            if (el) {
-              el.scrollIntoView({ behavior: 'smooth' });
-            }
-          }
-        }}
+        onNavigate={handleNavigate}
         onOpenVerify={() => setIsVerifyOpen(true)}
         onOpenAuth={() => navigate('/login')}
       />

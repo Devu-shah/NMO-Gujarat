@@ -99,6 +99,30 @@
     "/Events/{eventId}": {
       "schema": { "$ref": "#/entities/Event" },
       "description": "Events collection containing event details and embedded participants array"
+    },
+    "/Cities/{cityId}": {
+      "schema": { "type": "object" },
+      "description": "Gujarat cities list used for filtering and location targeting"
+    },
+    "/Settings/{settingId}": {
+      "schema": { "type": "object" },
+      "description": "Global application configuration including Google Drive session config"
+    },
+    "/inquiries/{inquiryId}": {
+      "schema": { "type": "object" },
+      "description": "Public Contact Us inquiries dispatched to secretariat"
+    },
+    "/announcements/{announcementId}": {
+      "schema": { "type": "object" },
+      "description": "Public and member-wide alert announcements"
+    },
+    "/event_registrations/{regId}": {
+      "schema": { "type": "object" },
+      "description": "Individual event participant registrations"
+    },
+    "/Certificates/{certId}": {
+      "schema": { "type": "object" },
+      "description": "Digital CME certificates linked to Google Drive"
     }
   }
 }

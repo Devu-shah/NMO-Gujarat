@@ -565,8 +565,7 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const emailLower = user.email.toLowerCase();
         const isSuperAdminEmail =
           emailLower === 'devanshshah768@gmail.com' ||
-          emailLower === 'superadmin@nmogujarat.org' ||
-          emailLower.includes('admin');
+          emailLower === 'superadmin@nmogujarat.org';
 
         // Look for matching user in the Users collection
         let matched = users.find(
@@ -636,7 +635,7 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
 
     // If not in local state yet, query Firestore Users directly
-    if (!matched && !isSuperAdminEmail) {
+    if (!matched) {
       try {
         const directDoc = await getDoc(doc(db, 'Users', cleanId.toUpperCase()));
         if (directDoc.exists()) {
@@ -653,36 +652,81 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     }
 
-    // 2. Handle Master Super Admin Login
-    if (isSuperAdminEmail) {
-      let authUid = 'super-admin-uid';
-      try {
-        const cred = await signInWithEmailAndPassword(auth, cleanIdLower, cleanPass);
-        authUid = cred.user.uid;
-      } catch (err: any) {
-        try {
-          const cred = await createUserWithEmailAndPassword(auth, cleanIdLower, cleanPass);
-          authUid = cred.user.uid;
-        } catch {}
+    // 2. Handle Super Administrator Authentication
+    // Super Admin credentials MUST be verified by Firebase Authentication without bypass, mock login, or fallback
+    const isSuperAdminLogin =
+      isSuperAdminEmail ||
+      cleanId.toUpperCase() === 'NMO-ADMIN-001' ||
+      (matched && matched.role === 'super_admin');
+
+    if (isSuperAdminLogin) {
+      const targetAdminEmail = cleanIdLower.includes('@')
+        ? cleanIdLower
+        : (matched?.email?.trim().toLowerCase() || 'devanshshah768@gmail.com');
+
+      // Verify the password through Firebase Authentication first (no bypass, no mock fallback)
+      const cred = await signInWithEmailAndPassword(auth, targetAdminEmail, cleanPass);
+      const authUser = cred.user;
+
+      // Validate the authenticated user's trusted role/UID against configured Super Admin identity
+      const authenticatedEmail = (authUser.email || targetAdminEmail).toLowerCase();
+      const isAuthorizedSuperAdmin =
+        authenticatedEmail === 'devanshshah768@gmail.com' ||
+        authenticatedEmail === 'superadmin@nmogujarat.org' ||
+        matched?.role === 'super_admin';
+
+      if (!isAuthorizedSuperAdmin) {
+        throw new Error('Access denied: User is not authorized as Super Administrator.');
       }
 
-      const masterAdmin: NMOUserRecord = {
-        membershipNumber: 'NMO-ADMIN-001',
-        name: 'Dr. Devansh Shah',
-        email: cleanIdLower,
+      // Check account status if matched record exists
+      if (matched && matched.accountStatus === 'Inactive') {
+        throw new Error('This account has been deactivated. Please contact the administrator.');
+      }
+
+      // Locate or construct the Super Admin record using the real Firebase Auth UID
+      const officialMemNo = matched?.membershipNumber || 'NMO-ADMIN-001';
+      const verifiedAdmin: NMOUserRecord = {
+        membershipNumber: officialMemNo,
+        name: matched?.name || authUser.displayName || 'Dr. Devansh Shah',
+        email: authenticatedEmail,
         role: 'super_admin',
         accountStatus: 'Active',
         status: 'Active',
-        prant: 'All',
-        nmoState: 'Gujarat',
-        uid: authUid,
-        createdAt: new Date().toISOString(),
+        prant: matched?.prant || 'All',
+        nmoState: matched?.nmoState || 'Gujarat',
+        uid: authUser.uid,
+        createdAt: matched?.createdAt || new Date().toISOString(),
         lastLogin: new Date().toISOString()
       };
-      setCurrentUser(masterAdmin);
+
+      setCurrentUser(verifiedAdmin);
+
       try {
-        await setDoc(doc(db, 'Users', masterAdmin.membershipNumber), masterAdmin, { merge: true });
-      } catch {}
+        const safeData = cleanDocForFirestore(verifiedAdmin);
+        await setDoc(doc(db, 'Users', officialMemNo), safeData, { merge: true });
+      } catch (err) {
+        console.warn('Notice saving verified super admin login:', err);
+      }
+
+      setUsers((prev) => {
+        const next = prev.map((u) => (u.membershipNumber === officialMemNo ? verifiedAdmin : u));
+        if (!next.some((u) => u.membershipNumber === officialMemNo)) {
+          next.push(verifiedAdmin);
+        }
+        try {
+          localStorage.setItem(LOCAL_STORAGE_USERS_KEY, JSON.stringify(next));
+        } catch {}
+        return next;
+      });
+
+      await logAudit(
+        'USER_LOGIN',
+        'ADMIN',
+        officialMemNo,
+        `Super Admin ${verifiedAdmin.name} (${officialMemNo}) logged in successfully with verified Firebase credentials`
+      );
+
       return 'super_admin';
     }
 

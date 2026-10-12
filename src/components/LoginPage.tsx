@@ -61,9 +61,9 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onSuccessRedirect, onNavig
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-950 to-slate-900 text-white flex flex-col justify-between py-10 px-4 sm:px-6 lg:px-8">
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-950 to-slate-900 text-white flex flex-col justify-center items-center py-12 px-4 sm:px-6 lg:px-8 w-full">
       {/* Top Bar with Return Home */}
-      <div className="max-w-md w-full mx-auto flex items-center justify-between">
+      <div className="max-w-md w-full mx-auto mb-4 flex items-center justify-between">
         <button
           type="button"
           onClick={onNavigateHome}
@@ -73,12 +73,12 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onSuccessRedirect, onNavig
           <span>Return to Official Website</span>
         </button>
         <span className="text-[11px] text-amber-400/90 font-mono tracking-wider font-semibold">
-          NMO GUJARAT
+          SECURE PORTAL LOGIN
         </span>
       </div>
 
       {/* Main Login Card */}
-      <div className="max-w-md w-full mx-auto my-auto bg-white rounded-3xl p-8 sm:p-10 text-slate-900 shadow-2xl border border-slate-100">
+      <div className="max-w-md w-full mx-auto bg-white rounded-3xl p-8 sm:p-10 text-slate-900 shadow-2xl border border-slate-100">
         {/* Logo & Portal Branding */}
         <div className="text-center mb-8">
           <NmoLogo size="lg" className="mx-auto mb-4" />
@@ -209,11 +209,6 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onSuccessRedirect, onNavig
             Your permissions are determined directly by your verified <strong>Users</strong> profile in Cloud Firestore. Role selection is strictly server-governed.
           </p>
         </div>
-      </div>
-
-      {/* Footer info */}
-      <div className="text-center text-slate-500 text-xs py-4">
-        <span>National Medicos Organisation Gujarat · प्राणिनाम् आर्तिनाशनम्</span>
       </div>
     </div>
   );

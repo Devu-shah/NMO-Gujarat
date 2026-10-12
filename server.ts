@@ -1,5 +1,6 @@
 import express from 'express';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import nodemailer from 'nodemailer';
@@ -363,6 +364,785 @@ Recipient:        ${RECIPIENT_EMAIL}
         success: false,
         error: 'An internal error occurred while processing your inquiry. Please try again.'
       });
+    }
+  });
+
+  // =========================================================================
+  // Google Drive Secure Persistent Session & Auto-Refresh Backend Service
+  // =========================================================================
+  const SECURE_CREDENTIALS_DIR = path.resolve(__dirname, '.credentials');
+  const SECURE_CREDENTIALS_FILE = path.join(SECURE_CREDENTIALS_DIR, 'drive_session_secure.json');
+
+  interface SecureDriveSessionRecord {
+    refreshToken?: string;
+    accessToken?: string;
+    expiresAt: number; // Unix epoch ms
+    accountEmail: string;
+    accountName?: string;
+    accountPhoto?: string;
+    folderId: string;
+    folderName: string;
+    folderUrl: string;
+    status: 'active' | 'expired' | 'disconnected';
+    updatedAt: string;
+    lastRefreshedAt?: string;
+  }
+
+  function readSecureDriveSession(): SecureDriveSessionRecord | null {
+    try {
+      if (!fs.existsSync(SECURE_CREDENTIALS_FILE)) {
+        return null;
+      }
+      const raw = fs.readFileSync(SECURE_CREDENTIALS_FILE, 'utf-8');
+      const data = JSON.parse(raw) as SecureDriveSessionRecord;
+      return data;
+    } catch (err) {
+      console.warn('[Drive Auth] Notice reading secure session file:', err);
+      return null;
+    }
+  }
+
+  function writeSecureDriveSession(session: SecureDriveSessionRecord) {
+    try {
+      if (!fs.existsSync(SECURE_CREDENTIALS_DIR)) {
+        fs.mkdirSync(SECURE_CREDENTIALS_DIR, { recursive: true, mode: 0o700 });
+      }
+      fs.writeFileSync(SECURE_CREDENTIALS_FILE, JSON.stringify(session, null, 2), {
+        mode: 0o600
+      });
+    } catch (err) {
+      console.error('[Drive Auth] Error writing secure session file:', err);
+    }
+  }
+
+  async function refreshAccessTokenWithGoogle(
+    refreshToken: string
+  ): Promise<{ accessToken: string; expiresIn: number } | null> {
+    const clientId =
+      process.env.GOOGLE_DRIVE_CLIENT_ID ||
+      process.env.GOOGLE_CLIENT_ID;
+    const clientSecret =
+      process.env.GOOGLE_DRIVE_CLIENT_SECRET ||
+      process.env.GOOGLE_CLIENT_SECRET;
+
+    if (!clientId || !clientSecret) {
+      console.warn('[Drive Auth] Cannot refresh token: GOOGLE_DRIVE_CLIENT_ID or GOOGLE_DRIVE_CLIENT_SECRET is missing from environment.');
+      return null;
+    }
+
+    try {
+      console.log('[Drive Auth] Initiating server-side Google OAuth token refresh...');
+      const tokenUrl = 'https://oauth2.googleapis.com/token';
+      const bodyParams = new URLSearchParams({
+        client_id: clientId,
+        client_secret: clientSecret,
+        refresh_token: refreshToken,
+        grant_type: 'refresh_token'
+      });
+
+      const resp = await fetch(tokenUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: bodyParams.toString()
+      });
+
+      if (!resp.ok) {
+        const errorData = await resp.json().catch(() => ({}));
+        console.error('[Drive Auth] Google token refresh failed:', resp.status, errorData);
+        return null;
+      }
+
+      const data = (await resp.json()) as { access_token: string; expires_in: number };
+      console.log('[Drive Auth] Successfully refreshed Google access token from refresh token!');
+      return {
+        accessToken: data.access_token,
+        expiresIn: data.expires_in || 3600
+      };
+    } catch (err: any) {
+      console.error('[Drive Auth] Exception refreshing Google access token:', err);
+      return null;
+    }
+  }
+
+  function escapeHtml(str: string): string {
+    return str
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  }
+
+  function getOAuthRedirectUri(req: express.Request): string {
+    if (process.env.GOOGLE_DRIVE_REDIRECT_URI) {
+      return process.env.GOOGLE_DRIVE_REDIRECT_URI;
+    }
+    const forwardedProto = (req.headers['x-forwarded-proto'] as string)?.split(',')[0]?.trim() || req.protocol;
+    const forwardedHost = (req.headers['x-forwarded-host'] as string)?.split(',')[0]?.trim() || req.headers.host;
+
+    if (forwardedHost) {
+      return `${forwardedProto}://${forwardedHost}/api/auth/google/callback`;
+    }
+    if (process.env.APP_URL) {
+      const base = process.env.APP_URL.replace(/\/+$/, '');
+      return `${base}/api/auth/google/callback`;
+    }
+    return 'http://localhost:3000/api/auth/google/callback';
+  }
+
+  const oauthStates = new Map<string, number>();
+  function cleanOauthStates() {
+    const now = Date.now();
+    for (const [state, timestamp] of oauthStates.entries()) {
+      if (now - timestamp > 15 * 60 * 1000) {
+        oauthStates.delete(state);
+      }
+    }
+  }
+  setInterval(cleanOauthStates, 5 * 60 * 1000);
+
+  /**
+   * GET /api/auth/google/url
+   * Generates the Google OAuth 2.0 authorization URL with offline access and forced consent prompt.
+   */
+  app.get('/api/auth/google/url', (req, res) => {
+    const clientId = process.env.GOOGLE_DRIVE_CLIENT_ID || process.env.GOOGLE_CLIENT_ID;
+    const redirectUri = getOAuthRedirectUri(req);
+
+    if (!clientId) {
+      return res.status(400).json({
+        error: 'missing_client_id',
+        message: 'GOOGLE_DRIVE_CLIENT_ID is not configured in server environment.',
+        redirectUri
+      });
+    }
+
+    const state = Math.random().toString(36).substring(2) + Date.now().toString(36);
+    oauthStates.set(state, Date.now());
+
+    const params = new URLSearchParams({
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      response_type: 'code',
+      scope: 'https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile',
+      access_type: 'offline',
+      prompt: 'consent',
+      state: state,
+      include_granted_scopes: 'true'
+    });
+
+    const url = `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
+    return res.json({
+      url,
+      redirectUri,
+      configured: true
+    });
+  });
+
+  /**
+   * GET /api/auth/google/login
+   * Direct redirect endpoint to launch Google OAuth 2.0 flow with offline access.
+   */
+  app.get('/api/auth/google/login', (req, res) => {
+    const clientId = process.env.GOOGLE_DRIVE_CLIENT_ID || process.env.GOOGLE_CLIENT_ID;
+    const redirectUri = getOAuthRedirectUri(req);
+
+    if (!clientId) {
+      return res.status(400).send(`
+        <!DOCTYPE html>
+        <html>
+          <head><title>Google Drive Setup Notice</title></head>
+          <body style="font-family: system-ui, sans-serif; padding: 40px; text-align: center; background: #0f172a; color: #f8fafc;">
+            <div style="max-width: 500px; margin: 0 auto; background: #1e293b; padding: 32px; border-radius: 16px; border: 1px solid #334155;">
+              <h2 style="color: #f87171; margin-top: 0;">GOOGLE_DRIVE_CLIENT_ID Missing</h2>
+              <p style="color: #94a3b8; font-size: 14px;">Please configure <code>GOOGLE_DRIVE_CLIENT_ID</code> and <code>GOOGLE_DRIVE_CLIENT_SECRET</code> in your server environment.</p>
+              <p style="color: #cbd5e1; font-size: 12px; margin-top: 20px;">Exact Redirect URI to register in Google Cloud Console:</p>
+              <code style="background: #0f172a; padding: 8px 12px; border-radius: 6px; color: #38bdf8; display: block; word-break: break-all;">${redirectUri}</code>
+            </div>
+          </body>
+        </html>
+      `);
+    }
+
+    const state = Math.random().toString(36).substring(2) + Date.now().toString(36);
+    oauthStates.set(state, Date.now());
+
+    const params = new URLSearchParams({
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      response_type: 'code',
+      scope: 'https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile',
+      access_type: 'offline',
+      prompt: 'consent',
+      state: state,
+      include_granted_scopes: 'true'
+    });
+
+    res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`);
+  });
+
+  /**
+   * GET /api/auth/google/callback
+   * OAuth 2.0 authorization code callback. Exchanges code for offline tokens,
+   * stores refresh_token strictly on the server in .credentials/drive_session_secure.json,
+   * and notifies the client.
+   */
+  app.get('/api/auth/google/callback', async (req, res) => {
+    const code = req.query.code as string;
+    const oauthError = req.query.error as string;
+
+    if (oauthError) {
+      console.warn('[Google OAuth Callback] Authorization returned error:', oauthError);
+      res.setHeader('Content-Type', 'text/html');
+      return res.status(400).send(`
+        <!DOCTYPE html>
+        <html>
+          <head><title>Authentication Cancelled</title></head>
+          <body style="font-family: system-ui, sans-serif; padding: 40px; text-align: center; background: #0f172a; color: #f8fafc;">
+            <div style="max-width: 440px; margin: 0 auto; background: #1e293b; padding: 32px; border-radius: 16px; border: 1px solid #334155;">
+              <h3 style="color: #f87171; margin-top: 0;">Authorization Error</h3>
+              <p style="color: #94a3b8; font-size: 13px;">${escapeHtml(oauthError)}</p>
+              <p style="font-size: 12px; color: #64748b;">Closing window...</p>
+            </div>
+            <script>
+              try {
+                if (window.opener && !window.opener.closed) {
+                  window.opener.postMessage({ type: 'GOOGLE_DRIVE_AUTH_ERROR', error: '${escapeHtml(oauthError)}' }, '*');
+                  setTimeout(() => window.close(), 1500);
+                } else {
+                  setTimeout(() => window.location.href = '/admin/super', 2000);
+                }
+              } catch(e) {}
+            </script>
+          </body>
+        </html>
+      `);
+    }
+
+    if (!code) {
+      return res.status(400).send('Authorization code missing in request.');
+    }
+
+    const clientId = process.env.GOOGLE_DRIVE_CLIENT_ID || process.env.GOOGLE_CLIENT_ID;
+    const clientSecret = process.env.GOOGLE_DRIVE_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET;
+
+    if (!clientId || !clientSecret) {
+      return res.status(500).send('Server configuration missing GOOGLE_DRIVE_CLIENT_ID or GOOGLE_DRIVE_CLIENT_SECRET.');
+    }
+
+    try {
+      const redirectUri = getOAuthRedirectUri(req);
+      console.log('[Google OAuth Callback] Exchanging authorization code with Google...');
+
+      const tokenResp = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          code,
+          client_id: clientId,
+          client_secret: clientSecret,
+          redirect_uri: redirectUri,
+          grant_type: 'authorization_code'
+        }).toString()
+      });
+
+      if (!tokenResp.ok) {
+        const errJson = await tokenResp.json().catch(() => ({}));
+        console.error('[Google OAuth Callback] Token exchange failed:', tokenResp.status, errJson);
+        res.setHeader('Content-Type', 'text/html');
+        return res.status(tokenResp.status).send(`
+          <!DOCTYPE html>
+          <html>
+            <head><title>OAuth Exchange Failed</title></head>
+            <body style="font-family: system-ui, sans-serif; padding: 40px; text-align: center; background: #0f172a; color: #f8fafc;">
+              <div style="max-width: 480px; margin: 0 auto; background: #1e293b; padding: 32px; border-radius: 16px; border: 1px solid #334155;">
+                <h3 style="color: #f87171; margin-top: 0;">Code Exchange Failed</h3>
+                <p style="color: #94a3b8; font-size: 13px;">Google error: ${escapeHtml(JSON.stringify(errJson))}</p>
+                <p style="font-size: 12px; color: #64748b;">Ensure redirect URI matches: <code>${escapeHtml(redirectUri)}</code></p>
+              </div>
+            </body>
+          </html>
+        `);
+      }
+
+      const tokenData = (await tokenResp.json()) as {
+        access_token: string;
+        refresh_token?: string;
+        expires_in: number;
+      };
+
+      // Fetch user profile info
+      let accountEmail = process.env.VITE_SUPER_ADMIN_EMAIL || 'devanshshah768@gmail.com';
+      let accountName = 'NMO Gujarat Administrator';
+      let accountPhoto: string | undefined;
+
+      try {
+        const profileResp = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+          headers: { Authorization: `Bearer ${tokenData.access_token}` }
+        });
+        if (profileResp.ok) {
+          const profile = await profileResp.json();
+          accountEmail = profile.email || accountEmail;
+          accountName = profile.name || accountName;
+          accountPhoto = profile.picture;
+        }
+      } catch (e) {
+        console.warn('[Google OAuth Callback] Profile lookup notice:', e);
+      }
+
+      // Read existing record to preserve any existing refresh token if omitted in this exchange
+      const existing = readSecureDriveSession();
+      const effectiveRefreshToken = tokenData.refresh_token || existing?.refreshToken;
+
+      const updatedSession: SecureDriveSessionRecord = {
+        refreshToken: effectiveRefreshToken,
+        accessToken: tokenData.access_token,
+        expiresAt: Date.now() + (tokenData.expires_in || 3600) * 1000,
+        accountEmail,
+        accountName,
+        accountPhoto,
+        folderId: existing?.folderId || '1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2',
+        folderName: existing?.folderName || 'NMO Gujarat',
+        folderUrl: existing?.folderUrl || 'https://drive.google.com/drive/folders/1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2',
+        status: 'active',
+        updatedAt: new Date().toISOString(),
+        lastRefreshedAt: new Date().toISOString()
+      };
+
+      writeSecureDriveSession(updatedSession);
+      console.log(`[Google OAuth Callback] Session persisted securely on server for ${accountEmail}. Has refresh token: ${Boolean(effectiveRefreshToken)}`);
+
+      res.setHeader('Content-Type', 'text/html');
+      return res.send(`
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <meta charset="utf-8" />
+            <title>Google Drive Connected - NMO Gujarat</title>
+            <style>
+              body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+              .card { background: #1e293b; border: 1px solid #334155; border-radius: 20px; padding: 32px; max-width: 440px; text-align: center; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5); }
+              .badge { display: inline-block; background: #064e3b; color: #6ee7b7; padding: 4px 12px; border-radius: 9999px; font-size: 11px; font-weight: 700; text-transform: uppercase; margin-bottom: 16px; }
+              h2 { margin: 0 0 8px 0; font-size: 20px; }
+              p { color: #94a3b8; font-size: 13px; line-height: 1.5; margin: 0 0 20px 0; }
+              .email { color: #38bdf8; font-weight: 600; font-family: monospace; }
+            </style>
+          </head>
+          <body>
+            <div class="card">
+              <div class="badge">✓ Offline Access Authorized</div>
+              <h2>Google Drive Connected</h2>
+              <p>Successfully established secure backend session with refresh token for <span class="email">${escapeHtml(accountEmail)}</span>.</p>
+              <p style="font-size: 11px; color: #64748b;">Closing this window and returning to NMO Gujarat Admin...</p>
+            </div>
+            <script>
+              try {
+                if (window.opener && !window.opener.closed) {
+                  window.opener.postMessage({
+                    type: 'GOOGLE_DRIVE_AUTH_SUCCESS',
+                    email: '${escapeHtml(accountEmail)}',
+                    hasRefreshToken: ${Boolean(effectiveRefreshToken)}
+                  }, '*');
+                  setTimeout(() => { window.close(); }, 1200);
+                } else {
+                  setTimeout(() => { window.location.href = '/admin/super'; }, 1800);
+                }
+              } catch (e) {
+                setTimeout(() => { window.location.href = '/admin/super'; }, 1800);
+              }
+            </script>
+          </body>
+        </html>
+      `);
+    } catch (err: any) {
+      console.error('[Google OAuth Callback] Exception:', err);
+      return res.status(500).send(`Server error: ${err.message || 'OAuth exchange failed'}`);
+    }
+  });
+
+  /**
+   * GET /api/drive/status
+   * Reads persistent server session without exposing any refresh token.
+   * Auto-refreshes expired access token if refresh token is available.
+   */
+  app.get('/api/drive/status', async (req, res) => {
+    try {
+      let session = readSecureDriveSession();
+      const redirectUri = getOAuthRedirectUri(req);
+
+      // Check environment fallback refresh token if no file session exists
+      const envRefreshToken = process.env.GOOGLE_DRIVE_REFRESH_TOKEN;
+      if (!session && envRefreshToken) {
+        session = {
+          refreshToken: envRefreshToken,
+          expiresAt: 0,
+          accountEmail: process.env.VITE_SUPER_ADMIN_EMAIL || 'devanshshah768@gmail.com',
+          accountName: 'NMO Gujarat Admin',
+          folderId: '1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2',
+          folderName: 'NMO Gujarat',
+          folderUrl: 'https://drive.google.com/drive/folders/1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2',
+          status: 'active',
+          updatedAt: new Date().toISOString()
+        };
+      }
+
+      if (!session || session.status === 'disconnected') {
+        return res.json({
+          connected: false,
+          status: 'disconnected',
+          hasRefreshToken: false,
+          oauthConfigured: Boolean(process.env.GOOGLE_DRIVE_CLIENT_ID && process.env.GOOGLE_DRIVE_CLIENT_SECRET)
+        });
+      }
+
+      const now = Date.now();
+      const isExpiringSoon = session.expiresAt < now + 5 * 60 * 1000; // less than 5 min left or expired
+
+      // If token is expiring soon or expired and we have a refresh token, auto-renew now!
+      if (isExpiringSoon && session.refreshToken) {
+        const refreshed = await refreshAccessTokenWithGoogle(session.refreshToken);
+        if (refreshed) {
+          session.accessToken = refreshed.accessToken;
+          session.expiresAt = now + refreshed.expiresIn * 1000;
+          session.lastRefreshedAt = new Date().toISOString();
+          session.status = 'active';
+          writeSecureDriveSession(session);
+        } else if (session.expiresAt < now) {
+          session.status = 'expired';
+          writeSecureDriveSession(session);
+        }
+      }
+
+      return res.json({
+        connected: Boolean(session.accessToken && session.status === 'active'),
+        status: session.status,
+        accountEmail: session.accountEmail,
+        accountName: session.accountName,
+        accountPhoto: session.accountPhoto,
+        expiresAt: session.expiresAt,
+        folderId: session.folderId,
+        folderName: session.folderName,
+        folderUrl: session.folderUrl,
+        hasRefreshToken: Boolean(session.refreshToken),
+        accessToken: session.accessToken, // Returned for client-side Drive API uploads
+        oauthConfigured: Boolean(process.env.GOOGLE_DRIVE_CLIENT_ID && process.env.GOOGLE_DRIVE_CLIENT_SECRET),
+        lastRefreshedAt: session.lastRefreshedAt
+      });
+    } catch (err: any) {
+      console.error('[Drive Auth] Error reading status:', err);
+      return res.status(500).json({ error: 'Failed to retrieve Google Drive status' });
+    }
+  });
+
+  /**
+   * GET /api/drive/token
+   * Returns a valid access token for API operations, refreshing automatically if expired.
+   */
+  app.get('/api/drive/token', async (req, res) => {
+    try {
+      const forceRefresh = req.query.forceRefresh === 'true';
+      let session = readSecureDriveSession();
+
+      if (!session && process.env.GOOGLE_DRIVE_REFRESH_TOKEN) {
+        session = {
+          refreshToken: process.env.GOOGLE_DRIVE_REFRESH_TOKEN,
+          expiresAt: 0,
+          accountEmail: process.env.VITE_SUPER_ADMIN_EMAIL || 'devanshshah768@gmail.com',
+          accountName: 'NMO Gujarat Admin',
+          folderId: '1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2',
+          folderName: 'NMO Gujarat',
+          folderUrl: 'https://drive.google.com/drive/folders/1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2',
+          status: 'active',
+          updatedAt: new Date().toISOString()
+        };
+      }
+
+      if (!session || session.status === 'disconnected') {
+        return res.status(401).json({
+          error: 'not_connected',
+          message: 'Google Drive is not connected. Please connect with Google Drive first.'
+        });
+      }
+
+      const now = Date.now();
+      const needsRefresh = forceRefresh || !session.accessToken || session.expiresAt < now + 60 * 1000;
+
+      if (needsRefresh) {
+        if (!session.refreshToken) {
+          if (session.accessToken && session.expiresAt > now) {
+            // Still temporarily valid
+            return res.json({
+              accessToken: session.accessToken,
+              expiresAt: session.expiresAt,
+              refreshed: false
+            });
+          }
+          return res.status(401).json({
+            error: 'token_expired_no_refresh',
+            message: 'Access token expired and no server-side refresh token is configured. Re-authentication required.'
+          });
+        }
+
+        const refreshed = await refreshAccessTokenWithGoogle(session.refreshToken);
+        if (!refreshed) {
+          session.status = 'expired';
+          writeSecureDriveSession(session);
+          return res.status(401).json({
+            error: 'refresh_failed',
+            message: 'Failed to refresh Google Drive access token. Please re-authenticate.'
+          });
+        }
+
+        session.accessToken = refreshed.accessToken;
+        session.expiresAt = now + refreshed.expiresIn * 1000;
+        session.lastRefreshedAt = new Date().toISOString();
+        session.status = 'active';
+        writeSecureDriveSession(session);
+
+        return res.json({
+          accessToken: session.accessToken,
+          expiresAt: session.expiresAt,
+          refreshed: true
+        });
+      }
+
+      return res.json({
+        accessToken: session.accessToken,
+        expiresAt: session.expiresAt,
+        refreshed: false
+      });
+    } catch (err: any) {
+      console.error('[Drive Auth] Error providing token:', err);
+      return res.status(500).json({ error: 'Failed to fetch access token' });
+    }
+  });
+
+  /**
+   * POST /api/drive/exchange-code
+   * Exchanges an authorization code from Google OAuth 2.0 offline access flow.
+   * Stores the refresh_token securely on the server!
+   */
+  app.post('/api/drive/exchange-code', async (req, res) => {
+    try {
+      const { code, redirectUri, folderId, folderName, folderUrl } = req.body;
+      if (!code) {
+        return res.status(400).json({ error: 'Authorization code is required' });
+      }
+
+      const clientId = process.env.GOOGLE_DRIVE_CLIENT_ID || process.env.GOOGLE_CLIENT_ID;
+      const clientSecret = process.env.GOOGLE_DRIVE_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET;
+
+      if (!clientId || !clientSecret) {
+        return res.status(400).json({
+          error: 'server_misconfigured',
+          message: 'GOOGLE_DRIVE_CLIENT_ID or GOOGLE_DRIVE_CLIENT_SECRET is missing on the server.'
+        });
+      }
+
+      console.log('[Drive Auth] Exchanging authorization code with Google for offline tokens...');
+      const tokenResp = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          code,
+          client_id: clientId,
+          client_secret: clientSecret,
+          redirect_uri: redirectUri || 'postmessage',
+          grant_type: 'authorization_code'
+        }).toString()
+      });
+
+      if (!tokenResp.ok) {
+        const errorJson = await tokenResp.json().catch(() => ({}));
+        console.error('[Drive Auth] Code exchange failed:', tokenResp.status, errorJson);
+        return res.status(tokenResp.status).json({
+          error: 'exchange_failed',
+          details: errorJson
+        });
+      }
+
+      const tokenData = (await tokenResp.json()) as {
+        access_token: string;
+        refresh_token?: string;
+        expires_in: number;
+        id_token?: string;
+      };
+
+      // Retrieve user profile using new access token
+      let userEmail = 'admin@nmogujarat.org';
+      let userName = 'NMO Gujarat Administrator';
+      let userPhoto: string | undefined;
+
+      try {
+        const profileResp = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+          headers: { Authorization: `Bearer ${tokenData.access_token}` }
+        });
+        if (profileResp.ok) {
+          const profile = await profileResp.json();
+          userEmail = profile.email || userEmail;
+          userName = profile.name || userName;
+          userPhoto = profile.picture;
+        }
+      } catch (e) {
+        console.warn('[Drive Auth] Could not fetch user profile info:', e);
+      }
+
+      const existing = readSecureDriveSession();
+      const updatedSession: SecureDriveSessionRecord = {
+        refreshToken: tokenData.refresh_token || existing?.refreshToken,
+        accessToken: tokenData.access_token,
+        expiresAt: Date.now() + (tokenData.expires_in || 3600) * 1000,
+        accountEmail: userEmail,
+        accountName: userName,
+        accountPhoto: userPhoto,
+        folderId: folderId || existing?.folderId || '1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2',
+        folderName: folderName || existing?.folderName || 'NMO Gujarat',
+        folderUrl: folderUrl || existing?.folderUrl || 'https://drive.google.com/drive/folders/1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2',
+        status: 'active',
+        updatedAt: new Date().toISOString(),
+        lastRefreshedAt: new Date().toISOString()
+      };
+
+      writeSecureDriveSession(updatedSession);
+      console.log(`[Drive Auth] Google Drive session saved securely for ${userEmail}. Has refresh token: ${Boolean(updatedSession.refreshToken)}`);
+
+      return res.json({
+        success: true,
+        accountEmail: updatedSession.accountEmail,
+        accountName: updatedSession.accountName,
+        expiresAt: updatedSession.expiresAt,
+        folderId: updatedSession.folderId,
+        accessToken: updatedSession.accessToken,
+        hasRefreshToken: Boolean(updatedSession.refreshToken)
+      });
+    } catch (err: any) {
+      console.error('[Drive Auth] Exception during code exchange:', err);
+      return res.status(500).json({ error: err.message || 'Internal error during code exchange' });
+    }
+  });
+
+  /**
+   * POST /api/drive/save-session
+   * Saves or updates persistent backend session metadata and tokens.
+   */
+  app.post('/api/drive/save-session', async (req, res) => {
+    try {
+      const {
+        accessToken,
+        refreshToken,
+        accountEmail,
+        accountName,
+        accountPhoto,
+        expiresAt,
+        folderId,
+        folderName,
+        folderUrl
+      } = req.body;
+
+      if (!accessToken || !accountEmail) {
+        return res.status(400).json({ error: 'accessToken and accountEmail are required' });
+      }
+
+      const existing = readSecureDriveSession();
+      const newSession: SecureDriveSessionRecord = {
+        refreshToken: refreshToken || existing?.refreshToken || process.env.GOOGLE_DRIVE_REFRESH_TOKEN,
+        accessToken,
+        expiresAt: expiresAt || Date.now() + 3600 * 1000,
+        accountEmail,
+        accountName: accountName || existing?.accountName || 'Admin',
+        accountPhoto: accountPhoto || existing?.accountPhoto,
+        folderId: folderId || existing?.folderId || '1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2',
+        folderName: folderName || existing?.folderName || 'NMO Gujarat',
+        folderUrl: folderUrl || existing?.folderUrl || 'https://drive.google.com/drive/folders/1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2',
+        status: 'active',
+        updatedAt: new Date().toISOString()
+      };
+
+      writeSecureDriveSession(newSession);
+      console.log(`[Drive Auth] Session saved on backend for ${accountEmail}`);
+
+      return res.json({
+        success: true,
+        hasRefreshToken: Boolean(newSession.refreshToken)
+      });
+    } catch (err: any) {
+      console.error('[Drive Auth] Error saving session:', err);
+      return res.status(500).json({ error: 'Failed to save session' });
+    }
+  });
+
+  /**
+   * POST /api/drive/disconnect
+   * Disconnects Google Drive and wipes stored backend tokens.
+   */
+  app.post('/api/drive/disconnect', async (_req, res) => {
+    try {
+      if (fs.existsSync(SECURE_CREDENTIALS_FILE)) {
+        fs.unlinkSync(SECURE_CREDENTIALS_FILE);
+      }
+      console.log('[Drive Auth] Drive session disconnected and backend credentials file deleted.');
+      return res.json({ success: true, message: 'Google Drive disconnected successfully' });
+    } catch (err: any) {
+      console.error('[Drive Auth] Error disconnecting:', err);
+      return res.status(500).json({ error: 'Failed to disconnect session' });
+    }
+  });
+
+  /**
+   * POST /api/drive/test-expire-and-refresh
+   * Diagnostic test endpoint:
+   * 1. Expires current access token in the secure session.
+   * 2. Triggers the automatic refresh token flow.
+   * 3. Verifies that the new access token is generated and valid.
+   */
+  app.post('/api/drive/test-expire-and-refresh', async (_req, res) => {
+    try {
+      const session = readSecureDriveSession();
+      if (!session) {
+        return res.status(404).json({ error: 'No stored session found to test' });
+      }
+
+      const initialExpiresAt = session.expiresAt;
+      // Force expiration
+      session.expiresAt = Date.now() - 1000;
+      session.status = 'expired';
+      writeSecureDriveSession(session);
+
+      if (!session.refreshToken) {
+        return res.json({
+          test: 'expired_simulated',
+          message: 'Session access token expired. No refresh token available to auto-refresh.',
+          hasRefreshToken: false,
+          expiredSuccessfully: true
+        });
+      }
+
+      // Execute refresh
+      const refreshed = await refreshAccessTokenWithGoogle(session.refreshToken);
+      if (!refreshed) {
+        return res.status(502).json({
+          test: 'refresh_failed',
+          error: 'Google token refresh call failed during simulation. Verify GOOGLE_DRIVE_CLIENT_ID and GOOGLE_DRIVE_CLIENT_SECRET.'
+        });
+      }
+
+      session.accessToken = refreshed.accessToken;
+      session.expiresAt = Date.now() + refreshed.expiresIn * 1000;
+      session.lastRefreshedAt = new Date().toISOString();
+      session.status = 'active';
+      writeSecureDriveSession(session);
+
+      return res.json({
+        success: true,
+        test: 'auto_refresh_verified',
+        initialExpiresAt,
+        simulatedExpiredAt: Date.now() - 1000,
+        newExpiresAt: session.expiresAt,
+        newExpiresInSeconds: Math.round((session.expiresAt - Date.now()) / 1000),
+        message: 'Successfully simulated token expiration and auto-renewed access token using the server-side refresh token!'
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Error testing refresh' });
     }
   });
 

@@ -36,7 +36,7 @@ import {
   ExternalLink,
   FolderOpen
 } from 'lucide-react';
-import { connectGoogleDrive, getDriveAccessToken } from '../../lib/googleDrive';
+import { connectGoogleDrive, getDriveAccessToken, ensureDriveAccessToken } from '../../lib/googleDrive';
 import { CityDropdown } from '../common/CityDropdown';
 
 interface AdminEventsManagerProps {
@@ -137,7 +137,11 @@ export const AdminEventsManager: React.FC<AdminEventsManagerProps> = ({
   const handleCreateDriveSubfolder = async (evt: NMOEvent) => {
     setDriveActionId(evt.eventId);
     try {
-      if (!getDriveAccessToken()) {
+      let token = getDriveAccessToken();
+      if (!token) {
+        token = await ensureDriveAccessToken();
+      }
+      if (!token) {
         await connectGoogleDrive();
       }
       await createEventDriveSubfolder(evt.eventId, evt.title);

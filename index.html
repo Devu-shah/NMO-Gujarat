@@ -11,12 +11,21 @@
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
     <script>
-      // Suppress benign WebSocket/HMR disconnect errors in iframe preview
+      // Suppress benign Vite WebSocket/HMR connection notices in AI Studio preview iframe
       window.addEventListener('unhandledrejection', function(e) {
-        if (e.reason && (e.reason.message?.includes('WebSocket') || String(e.reason).includes('WebSocket'))) {
+        var msg = String((e && e.reason && (e.reason.message || e.reason)) || '');
+        if (msg.indexOf('WebSocket') !== -1 || msg.indexOf('websocket') !== -1) {
           e.preventDefault();
+          e.stopImmediatePropagation();
         }
-      });
+      }, true);
+      window.addEventListener('error', function(e) {
+        var msg = String((e && (e.message || e.error)) || '');
+        if (msg.indexOf('WebSocket') !== -1 || msg.indexOf('websocket') !== -1) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+        }
+      }, true);
     </script>
   </head>
   <body>

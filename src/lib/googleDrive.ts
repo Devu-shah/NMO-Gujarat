@@ -25,6 +25,9 @@ export interface SavedDriveSession {
   folderName: string;
   folderUrl: string;
   status: 'active' | 'expired' | 'disconnected';
+  hasRefreshToken?: boolean;
+  oauthConfigured?: boolean;
+  redirectUri?: string;
 }
 
 const DRIVE_STORAGE_KEY = 'nmo_saved_google_drive_session_v1';
@@ -58,6 +61,25 @@ export const saveDriveSessionLocally = (session: SavedDriveSession) => {
 };
 
 /**
+ * Save Drive session securely in the backend server.
+ * This ensures the session persists across page reloads and multiple admin devices.
+ */
+export const saveDriveSessionToBackend = async (session: SavedDriveSession) => {
+  try {
+    const res = await fetch('/api/drive/save-session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(session)
+    });
+    if (!res.ok) {
+      console.warn('Backend save-session returned non-200 status:', res.status);
+    }
+  } catch (err) {
+    console.warn('Notice saving Google Drive session to backend:', err);
+  }
+};
+
+/**
  * Helper to save drive session in Firestore so any future action can retrieve it
  */
 export const saveDriveSessionToFirestore = async (session: SavedDriveSession) => {
@@ -72,10 +94,56 @@ export const saveDriveSessionToFirestore = async (session: SavedDriveSession) =>
 };
 
 /**
- * Helper to restore drive session from Firestore database
+ * Restore persistent drive session from backend server.
+ * If backend has a stored session or refresh token, this silently restores it and auto-refreshes expired access tokens.
+ */
+export const restoreDriveSessionFromBackend = async (): Promise<SavedDriveSession | null> => {
+  try {
+    const res = await fetch('/api/drive/status');
+    if (res.ok) {
+      const data = await res.json();
+      if (data.connected && data.accessToken) {
+        const session: SavedDriveSession = {
+          accessToken: data.accessToken,
+          accountEmail: data.accountEmail || 'devanshshah768@gmail.com',
+          accountName: data.accountName || 'NMO Administrator',
+          accountPhoto: data.accountPhoto,
+          savedAt: new Date().toISOString(),
+          expiresAt: data.expiresAt || Date.now() + 3600 * 1000,
+          folderId: data.folderId || NMO_ROOT_DRIVE_FOLDER_ID,
+          folderName: data.folderName || NMO_ROOT_DRIVE_FOLDER_NAME,
+          folderUrl: data.folderUrl || NMO_ROOT_DRIVE_URL,
+          status: 'active',
+          hasRefreshToken: Boolean(data.hasRefreshToken),
+          oauthConfigured: Boolean(data.oauthConfigured),
+          redirectUri: data.redirectUri
+        };
+        cachedDriveSession = session;
+        cachedDriveAccessToken = data.accessToken;
+        saveDriveSessionLocally(session);
+        return session;
+      } else if (data.redirectUri || typeof data.oauthConfigured === 'boolean') {
+        // Store configuration info even if disconnected
+        if (cachedDriveSession) {
+          cachedDriveSession.oauthConfigured = data.oauthConfigured;
+          cachedDriveSession.redirectUri = data.redirectUri;
+          cachedDriveSession.hasRefreshToken = data.hasRefreshToken;
+        }
+      }
+    }
+  } catch (err) {
+    console.debug('Backend Drive session lookup note:', err);
+  }
+  return null;
+};
+
+/**
+ * Helper to restore drive session from Firestore database as backup.
+ * Gracefully handles missing document or unauthenticated access without throwing or logging noisy warnings.
  */
 export const restoreDriveSessionFromFirestore = async (): Promise<SavedDriveSession | null> => {
   try {
+    if (!db) return null;
     const snap = await getDoc(doc(db, 'Settings', 'googleDriveConfig'));
     if (snap.exists()) {
       const data = snap.data() as SavedDriveSession;
@@ -86,10 +154,15 @@ export const restoreDriveSessionFromFirestore = async (): Promise<SavedDriveSess
         return data;
       }
     }
-  } catch (err) {
-    console.warn('Notice restoring Google Drive session from Firestore:', err);
+    return null;
+  } catch (err: any) {
+    const code = err?.code;
+    if (code === 'permission-denied' || code === 'not-found' || code === 'unavailable') {
+      return null;
+    }
+    console.debug('Google Drive config not restored from Firestore:', err?.message || err);
+    return null;
   }
-  return null;
 };
 
 // Immediate in-memory initialization from persistent storage
@@ -97,10 +170,112 @@ let cachedDriveSession: SavedDriveSession | null = loadStoredDriveSession();
 let cachedDriveAccessToken: string | null = cachedDriveSession?.accessToken || null;
 let isSigningIn = false;
 
-// Asynchronous background hydration from Firestore if local cache is not set
-if (!cachedDriveAccessToken) {
-  restoreDriveSessionFromFirestore().catch(() => {});
+// Asynchronous background hydration from backend on page reload
+if (typeof window !== 'undefined') {
+  restoreDriveSessionFromBackend().then((backendSession) => {
+    if (!backendSession) {
+      // Fallback: check Firestore if user authenticated
+      onAuthStateChanged(auth, (user) => {
+        if (user && !cachedDriveAccessToken) {
+          restoreDriveSessionFromFirestore().catch(() => {});
+        }
+      });
+    }
+  }).catch(() => {});
 }
+
+/**
+ * Asynchronously ensure a valid access token is available.
+ * If expired, automatically requests token renewal from server-side refresh token flow.
+ */
+export const ensureDriveAccessToken = async (forceRefresh = false): Promise<string | null> => {
+  // If not forcing refresh and current token has at least 2 minutes validity, reuse it
+  if (!forceRefresh && cachedDriveAccessToken && cachedDriveSession) {
+    const now = Date.now();
+    if (cachedDriveSession.expiresAt > now + 120 * 1000) {
+      return cachedDriveAccessToken;
+    }
+  }
+
+  try {
+    const url = `/api/drive/token${forceRefresh ? '?forceRefresh=true' : ''}`;
+    const res = await fetch(url);
+    if (res.ok) {
+      const data = await res.json();
+      if (data.accessToken) {
+        cachedDriveAccessToken = data.accessToken;
+        if (cachedDriveSession) {
+          cachedDriveSession.accessToken = data.accessToken;
+          cachedDriveSession.expiresAt = data.expiresAt || Date.now() + 3600 * 1000;
+          cachedDriveSession.status = 'active';
+          saveDriveSessionLocally(cachedDriveSession);
+        } else {
+          await restoreDriveSessionFromBackend();
+        }
+        return data.accessToken;
+      }
+    } else if (res.status === 401) {
+      const errJson = await res.json().catch(() => ({}));
+      if (errJson.error === 'reauth_required') {
+        if (cachedDriveSession) {
+          cachedDriveSession.status = 'expired';
+          saveDriveSessionLocally(cachedDriveSession);
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('Notice requesting token from backend:', err);
+  }
+
+  // Fallback to local memory / local storage
+  const current = getDriveAccessToken();
+  if (current) return current;
+
+  const restored = await restoreDriveSessionFromBackend();
+  if (restored?.accessToken) return restored.accessToken;
+
+  const firestoreRestored = await restoreDriveSessionFromFirestore();
+  return firestoreRestored?.accessToken || null;
+};
+
+/**
+ * Wrapper for Google Drive REST API calls that automatically handles Bearer authorization
+ * and automatically renews expired access tokens on 401 Unauthorized via the backend refresh token.
+ */
+export const authenticatedDriveFetch = async (
+  url: string,
+  options: RequestInit = {}
+): Promise<Response> => {
+  let token = await ensureDriveAccessToken();
+  if (!token) {
+    throw new Error('Google Drive is not connected. Please connect with Google Drive first.');
+  }
+
+  const buildHeaders = (authToken: string): Headers => {
+    const headers = new Headers(options.headers || {});
+    headers.set('Authorization', `Bearer ${authToken}`);
+    return headers;
+  };
+
+  let res = await fetch(url, {
+    ...options,
+    headers: buildHeaders(token)
+  });
+
+  // If token expired, auto-renew from server refresh token and retry request once
+  if (res.status === 401) {
+    console.log('[Google Drive API] Received 401 Unauthorized. Auto-renewing token from server...');
+    const renewedToken = await ensureDriveAccessToken(true);
+    if (renewedToken) {
+      res = await fetch(url, {
+        ...options,
+        headers: buildHeaders(renewedToken)
+      });
+    }
+  }
+
+  return res;
+};
 
 /**
  * Check if the current Drive token is valid by querying Google TokenInfo API
@@ -108,8 +283,12 @@ if (!cachedDriveAccessToken) {
 export const checkDriveTokenHealth = async (
   token?: string
 ): Promise<{ valid: boolean; email?: string; error?: string }> => {
-  const t = token || cachedDriveAccessToken || loadStoredDriveSession()?.accessToken;
+  let t: string | null = token || getDriveAccessToken();
+  if (!t) {
+    t = await ensureDriveAccessToken();
+  }
   if (!t) return { valid: false, error: 'No token found' };
+
   try {
     const res = await fetch(
       `https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=${encodeURIComponent(t)}`
@@ -118,9 +297,51 @@ export const checkDriveTokenHealth = async (
       const info = await res.json();
       return { valid: true, email: info.email };
     }
+
+    // Try auto-refreshing via backend if initial token validation failed
+    const refreshedToken = await ensureDriveAccessToken(true);
+    if (refreshedToken && refreshedToken !== t) {
+      const retryRes = await fetch(
+        `https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=${encodeURIComponent(refreshedToken)}`
+      );
+      if (retryRes.ok) {
+        const info = await retryRes.json();
+        return { valid: true, email: info.email };
+      }
+    }
+
     return { valid: false, error: 'Token expired or invalid' };
   } catch (err: any) {
     return { valid: false, error: err.message || 'Validation request failed' };
+  }
+};
+
+/**
+ * Test server-side automatic token renewal across an expired access token.
+ * Calls /api/drive/test-expire-and-refresh.
+ */
+export const testServerTokenRefresh = async (): Promise<{
+  success: boolean;
+  message: string;
+  newExpiresInSeconds?: number;
+}> => {
+  try {
+    const res = await fetch('/api/drive/test-expire-and-refresh', { method: 'POST' });
+    const data = await res.json();
+    if (res.ok && data.success) {
+      await ensureDriveAccessToken(true);
+      return {
+        success: true,
+        message: data.message || 'Auto-refresh verified successfully!',
+        newExpiresInSeconds: data.newExpiresInSeconds
+      };
+    }
+    return {
+      success: false,
+      message: data.message || data.error || 'Server-side refresh test failed.'
+    };
+  } catch (err: any) {
+    return { success: false, message: err.message || 'Network error running refresh test' };
   }
 };
 
@@ -167,15 +388,122 @@ export const initDriveAuth = (
 };
 
 /**
+ * Connect to Google Drive using the secure server-side OAuth flow requesting offline access.
+ * This obtains a long-lived Google OAuth refresh token that is stored securely on the server
+ * and enables automatic, silent renewal of access tokens forever without re-prompts.
+ */
+export const connectGoogleDriveViaServerOAuth = async (): Promise<SavedDriveSession> => {
+  return new Promise(async (resolve, reject) => {
+    try {
+      const urlRes = await fetch('/api/auth/google/url');
+      if (!urlRes.ok) {
+        const errJson = await urlRes.json().catch(() => ({}));
+        throw new Error(errJson.message || 'Server Google OAuth 2.0 flow is not configured.');
+      }
+      const data = await urlRes.json();
+      if (!data.url) {
+        throw new Error('No authorization URL returned from server.');
+      }
+
+      const width = 600;
+      const height = 700;
+      const left = window.screenX + Math.max(0, (window.outerWidth - width) / 2);
+      const top = window.screenY + Math.max(0, (window.outerHeight - height) / 2);
+      const popup = window.open(
+        data.url,
+        'google_drive_oauth_offline_popup',
+        `width=${width},height=${height},left=${left},top=${top},toolbar=no,menubar=no,status=no`
+      );
+
+      if (!popup || popup.closed || typeof popup.closed === 'undefined') {
+        // Popup was blocked by browser, redirect current window
+        window.location.href = '/api/auth/google/login';
+        return;
+      }
+
+      let finished = false;
+
+      const handleMessage = async (event: MessageEvent) => {
+        if (event.data?.type === 'GOOGLE_DRIVE_AUTH_SUCCESS') {
+          finished = true;
+          window.removeEventListener('message', handleMessage);
+          const restored = await restoreDriveSessionFromBackend();
+          if (restored) {
+            resolve(restored);
+          } else {
+            const fallback: SavedDriveSession = {
+              accessToken: '',
+              accountEmail: event.data.email || 'admin@nmogujarat.org',
+              accountName: 'NMO Administrator',
+              savedAt: new Date().toISOString(),
+              expiresAt: Date.now() + 3600 * 1000,
+              folderId: NMO_ROOT_DRIVE_FOLDER_ID,
+              folderName: NMO_ROOT_DRIVE_FOLDER_NAME,
+              folderUrl: NMO_ROOT_DRIVE_URL,
+              status: 'active',
+              hasRefreshToken: true
+            };
+            cachedDriveSession = fallback;
+            resolve(fallback);
+          }
+        } else if (event.data?.type === 'GOOGLE_DRIVE_AUTH_ERROR') {
+          finished = true;
+          window.removeEventListener('message', handleMessage);
+          reject(new Error(event.data.error || 'Google Drive authorization was denied.'));
+        }
+      };
+
+      window.addEventListener('message', handleMessage);
+
+      // Watch for popup window close
+      const pollTimer = setInterval(async () => {
+        if (popup.closed) {
+          clearInterval(pollTimer);
+          window.removeEventListener('message', handleMessage);
+          if (!finished) {
+            // Check if authorization completed immediately before popup closed
+            const check = await restoreDriveSessionFromBackend();
+            if (check && check.status === 'active') {
+              resolve(check);
+            } else {
+              reject(new Error('Google Drive authorization window was closed before completion.'));
+            }
+          }
+        }
+      }, 1000);
+    } catch (err) {
+      reject(err);
+    }
+  });
+};
+
+/**
  * Connect to Google Drive via popup, saving the session persistently for future reuse
  */
 export const connectGoogleDrive = async (): Promise<{
-  user: User;
+  user?: User;
   accessToken: string;
   session: SavedDriveSession;
 }> => {
   try {
     isSigningIn = true;
+
+    // Check if server OAuth is configured. If so, prefer the server-side offline flow to get a refresh token!
+    let statusRes: Response | null = null;
+    try {
+      statusRes = await fetch('/api/drive/status');
+    } catch (e) {}
+
+    if (statusRes && statusRes.ok) {
+      const statusData = await statusRes.json().catch(() => ({}));
+      if (statusData.oauthConfigured) {
+        console.log('[Google Drive] Initiating server-side offline OAuth flow...');
+        const session = await connectGoogleDriveViaServerOAuth();
+        return { accessToken: session.accessToken, session };
+      }
+    }
+
+    // Fallback: Firebase Auth popup sign-in
     const provider = createDriveProvider();
     const result = await signInWithPopup(auth, provider);
     const credential = GoogleAuthProvider.credentialFromResult(result);
@@ -203,6 +531,7 @@ export const connectGoogleDrive = async (): Promise<{
 
     cachedDriveSession = session;
     saveDriveSessionLocally(session);
+    await saveDriveSessionToBackend(session);
     await saveDriveSessionToFirestore(session);
 
     return { user: result.user, accessToken: cachedDriveAccessToken, session };
@@ -229,16 +558,6 @@ export const getDriveAccessToken = (): string | null => {
 };
 
 /**
- * Asynchronously ensure an access token is available, restoring from Firestore if needed
- */
-export const ensureDriveAccessToken = async (): Promise<string | null> => {
-  const current = getDriveAccessToken();
-  if (current) return current;
-  const restored = await restoreDriveSessionFromFirestore();
-  return restored?.accessToken || null;
-};
-
-/**
  * Disconnect Google Drive and clear saved session
  */
 export const disconnectGoogleDrive = async () => {
@@ -246,6 +565,7 @@ export const disconnectGoogleDrive = async () => {
   cachedDriveSession = null;
   try {
     localStorage.removeItem(DRIVE_STORAGE_KEY);
+    await fetch('/api/drive/disconnect', { method: 'POST' }).catch(() => {});
     await setDoc(
       doc(db, 'Settings', 'googleDriveConfig'),
       {
@@ -458,7 +778,7 @@ export const uploadCertificateToDrive = async (
   );
   form.append('file', file);
 
-  const res = await fetch(
+  let res = await fetch(
     'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,mimeType,size,createdTime,webViewLink,webContentLink,thumbnailLink,description,properties',
     {
       method: 'POST',
@@ -469,8 +789,27 @@ export const uploadCertificateToDrive = async (
     }
   );
 
+  // If token expired, auto-renew from backend refresh token and retry upload once
+  if (res.status === 401) {
+    console.log('[Drive Upload] Token expired (401). Automatically refreshing via backend and retrying upload...');
+    const renewedToken = await ensureDriveAccessToken(true);
+    if (renewedToken) {
+      token = renewedToken;
+      res = await fetch(
+        'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,mimeType,size,createdTime,webViewLink,webContentLink,thumbnailLink,description,properties',
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${renewedToken}`
+          },
+          body: form
+        }
+      );
+    }
+  }
+
   if (!res.ok) {
-    const errData = await res.json();
+    const errData = await res.json().catch(() => ({}));
     throw new Error(errData.error?.message || 'Failed to upload certificate to Google Drive');
   }
 
