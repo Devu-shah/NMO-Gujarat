@@ -309,19 +309,10 @@ export const LiveQRScanner: React.FC<LiveQRScannerProps> = ({
           );
         }
 
-        // Detect multiple camera devices
-        try {
-          const devices = await navigator.mediaDevices.enumerateDevices();
-          const videoInputs = devices.filter((d) => d.kind === 'videoinput');
-          if (videoInputs.length > 1) {
-            setHasMultipleCameras(true);
-          }
-        } catch {}
-
-        // High-compatibility constraint fallbacks
+        // High-compatibility constraint fallbacks using ideal facingMode (never throws OverconstrainedError)
         const attempts: MediaStreamConstraints[] = [
-          { video: { facingMode: targetFacing } },
-          { video: { facingMode: targetFacing === 'environment' ? 'user' : 'environment' } },
+          { video: { facingMode: { ideal: targetFacing } } },
+          { video: { facingMode: { ideal: targetFacing === 'environment' ? 'user' : 'environment' } } },
           { video: true }
         ];
 
@@ -353,6 +344,15 @@ export const LiveQRScanner: React.FC<LiveQRScannerProps> = ({
         setFacingMode(targetFacing);
         setIsCameraActive(true);
         setIsStartingCamera(false);
+
+        // Detect multiple camera devices safely after permission is granted
+        try {
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          const videoInputs = devices.filter((d) => d.kind === 'videoinput');
+          if (videoInputs.length > 1) {
+            setHasMultipleCameras(true);
+          }
+        } catch {}
         isScanningActiveRef.current = true;
 
         // Check if track supports torch
@@ -567,6 +567,17 @@ export const LiveQRScanner: React.FC<LiveQRScannerProps> = ({
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isStartingCamera ? 'animate-spin' : ''}`} />
               <span>{isStartingCamera ? 'Reconnecting...' : 'Retry Camera Scanner'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => nativeCameraInputRef.current?.click()}
+              disabled={isProcessingImage}
+              className="px-3.5 py-2 bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs rounded-xl cursor-pointer flex items-center gap-1.5 shadow-xs"
+              title="Open device camera directly without browser WebRTC permissions"
+            >
+              <Camera className="w-3.5 h-3.5" />
+              <span>Snap Photo with Camera</span>
             </button>
 
             <button

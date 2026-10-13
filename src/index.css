@@ -58,3 +58,68 @@
   background-size: 200% 200%;
   animation: subtleGradient 8s ease infinite;
 }
+
+/* ========================================================================= */
+/* STRICT ID CARD PRINT STYLES                                               */
+/* Guarantees exactly Front & Back pages only (or 1 page), never 10 pages    */
+/* ========================================================================= */
+#nmo-printable-print-portal {
+  display: none;
+}
+
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 8mm 10mm;
+  }
+
+  /* When printing the ID card, completely hide the entire main web app (#root) */
+  body.is-printing-id-card {
+    background: #ffffff !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  body.is-printing-id-card > #root {
+    display: none !important;
+    visibility: hidden !important;
+    height: 0 !important;
+    overflow: hidden !important;
+  }
+
+  /* Show ONLY the dedicated ID card print portal */
+  body.is-printing-id-card > #nmo-printable-print-portal {
+    display: block !important;
+    visibility: visible !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #ffffff !important;
+  }
+
+  /* Precise page break controls */
+  .nmo-print-break-after {
+    page-break-after: always !important;
+    break-after: page !important;
+  }
+
+  .nmo-print-avoid-break {
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+    page-break-after: avoid !important;
+    break-after: avoid !important;
+  }
+
+  /* Force browsers to print exact colors, gradients, and images */
+  .nmo-print-card {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    color-adjust: exact !important;
+    box-shadow: none !important;
+  }
+
+  /* General no-print utility */
+  .no-print {
+    display: none !important;
+  }
+}

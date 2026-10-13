@@ -39,12 +39,18 @@ import {
   Eye,
   ShieldCheck,
   LogOut,
-  Zap
+  Zap,
+  HelpCircle,
+  Copy,
+  Check
 } from 'lucide-react';
+import { auth } from '../../lib/firebase';
+import { DriveIntegrationGuideModal } from './DriveIntegrationGuideModal';
 
 export const AdminCertificatesManager: React.FC = () => {
   const { users, events, createEventDriveSubfolder } = useNMO();
 
+  const [showGuideModal, setShowGuideModal] = useState<boolean>(false);
   const [savedAccount, setSavedAccount] = useState<SavedDriveSession | null>(getSavedDriveAccount());
   const [tokenHealth, setTokenHealth] = useState<'checking' | 'valid' | 'expired' | 'none'>('checking');
   const [isConnected, setIsConnected] = useState<boolean>(Boolean(getDriveAccessToken()));
@@ -55,6 +61,7 @@ export const AdminCertificatesManager: React.FC = () => {
   const [isLoadingFiles, setIsLoadingFiles] = useState<boolean>(false);
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [feedback, setFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const [copiedDomain, setCopiedDomain] = useState<boolean>(false);
 
   // Upload Modal State
   const [showUploadModal, setShowUploadModal] = useState(false);
@@ -295,6 +302,16 @@ export const AdminCertificatesManager: React.FC = () => {
           </div>
 
           <div className="shrink-0 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowGuideModal(true)}
+              className="px-3.5 py-2 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
+              title="Step-by-step Drive setup guide, refresh token explanation, and access denied troubleshooting"
+            >
+              <HelpCircle className="w-4 h-4 text-amber-700" />
+              <span>Drive Setup Guide</span>
+            </button>
+
             <a
               href={NMO_ROOT_DRIVE_URL}
               target="_blank"
@@ -336,28 +353,103 @@ export const AdminCertificatesManager: React.FC = () => {
         </div>
 
         {feedback && (
-          <div
-            className={`mt-4 p-4 rounded-xl border text-xs flex items-center justify-between gap-3 animate-in fade-in duration-200 ${
-              feedback.type === 'success'
-                ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
-                : 'bg-red-50 border-red-200 text-red-900'
-            }`}
-          >
-            <div className="flex items-center gap-2.5">
-              {feedback.type === 'success' ? (
-                <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
-              ) : (
-                <AlertCircle className="w-5 h-5 text-red-600 shrink-0" />
-              )}
-              <span className="font-medium leading-relaxed">{feedback.message}</span>
+          feedback.message.includes('unauthorized-domain') ? (
+            <div className="mt-4 p-5 rounded-2xl border-2 border-red-300 bg-red-50/95 text-slate-900 animate-in fade-in duration-200 shadow-xs">
+              <div className="flex items-start justify-between gap-3 mb-3">
+                <div className="flex items-center gap-2.5 text-red-700 font-black text-sm">
+                  <AlertCircle className="w-5 h-5 shrink-0" />
+                  <span>Action Required: Authorize Domain in Firebase Console</span>
+                </div>
+                <button
+                  onClick={() => setFeedback(null)}
+                  className="text-slate-400 hover:text-slate-600 font-bold p-1 cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <p className="text-xs text-slate-700 leading-relaxed mb-3">
+                Firebase Authentication blocked the Google sign-in popup because this domain (<strong>{typeof window !== 'undefined' ? window.location.hostname : 'nmo-gujarat.web.app'}</strong>) has not yet been registered in your Firebase project's <strong>Authorized Domains</strong>.
+              </p>
+
+              <div className="p-3 bg-white rounded-xl border border-red-200 mb-3 space-y-2">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <span className="text-[11px] font-bold text-slate-600">Domain to add to Firebase:</span>
+                  <div className="flex items-center gap-2">
+                    <code className="text-xs font-mono font-bold text-red-700 bg-red-50 px-2.5 py-1 rounded-lg border border-red-200 select-all">
+                      {typeof window !== 'undefined' ? window.location.hostname : 'nmo-gujarat.web.app'}
+                    </code>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const host = typeof window !== 'undefined' ? window.location.hostname : 'nmo-gujarat.web.app';
+                        navigator.clipboard.writeText(host);
+                        setCopiedDomain(true);
+                        setTimeout(() => setCopiedDomain(false), 2000);
+                      }}
+                      className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-700 rounded-lg text-xs font-bold cursor-pointer flex items-center gap-1 shrink-0"
+                    >
+                      {copiedDomain ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                      <span>{copiedDomain ? 'Copied' : 'Copy Domain'}</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-1.5 text-xs text-slate-700 mb-4 pl-1">
+                <div className="font-bold text-slate-900">How to fix in 30 seconds:</div>
+                <ol className="list-decimal list-inside space-y-1 text-slate-600">
+                  <li>Click the red <strong>"Open Firebase Settings"</strong> button below.</li>
+                  <li>Scroll to the <strong>Authorized domains</strong> section and click <strong>Add domain</strong>.</li>
+                  <li>Paste <strong>{typeof window !== 'undefined' ? window.location.hostname : 'nmo-gujarat.web.app'}</strong> (and <code>nmo-gujarat.firebaseapp.com</code>) and click <strong>Done</strong>.</li>
+                  <li>Return to this page and click <strong>"Retry Authorize Google Drive"</strong>!</li>
+                </ol>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2.5 pt-3 border-t border-red-200">
+                <a
+                  href={`https://console.firebase.google.com/project/${auth?.app?.options?.projectId || 'favorable-shine-4ghtt'}/authentication/settings`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="px-3.5 py-2 bg-red-700 hover:bg-red-800 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs cursor-pointer"
+                >
+                  <span>Open Firebase Settings &gt; Authorized Domains</span>
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </a>
+                <button
+                  type="button"
+                  onClick={handleConnect}
+                  className="px-3.5 py-2 bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-xs"
+                >
+                  <RefreshCw className="w-3.5 h-3.5 text-red-600" />
+                  <span>Retry Authorize Google Drive</span>
+                </button>
+              </div>
             </div>
-            <button
-              onClick={() => setFeedback(null)}
-              className="text-slate-400 hover:text-slate-600 font-bold p-1 cursor-pointer"
+          ) : (
+            <div
+              className={`mt-4 p-4 rounded-xl border text-xs flex items-center justify-between gap-3 animate-in fade-in duration-200 ${
+                feedback.type === 'success'
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                  : 'bg-red-50 border-red-200 text-red-900'
+              }`}
             >
-              ✕
-            </button>
-          </div>
+              <div className="flex items-center gap-2.5">
+                {feedback.type === 'success' ? (
+                  <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+                ) : (
+                  <AlertCircle className="w-5 h-5 text-red-600 shrink-0" />
+                )}
+                <span className="font-medium leading-relaxed">{feedback.message}</span>
+              </div>
+              <button
+                onClick={() => setFeedback(null)}
+                className="text-slate-400 hover:text-slate-600 font-bold p-1 cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+          )
         )}
 
         {/* Persistent Saved Drive Login Status Capsule */}
@@ -910,6 +1002,13 @@ export const AdminCertificatesManager: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Google Drive Setup & Troubleshooting Guide Modal */}
+      <DriveIntegrationGuideModal
+        isOpen={showGuideModal}
+        onClose={() => setShowGuideModal(false)}
+        onConnectNow={handleConnect}
+      />
     </div>
   );
 };

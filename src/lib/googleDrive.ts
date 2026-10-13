@@ -537,6 +537,15 @@ export const connectGoogleDrive = async (): Promise<{
     return { user: result.user, accessToken: cachedDriveAccessToken, session };
   } catch (err: any) {
     console.error('Google Drive connection error:', err);
+    if (err?.code === 'auth/unauthorized-domain' || err?.message?.includes('unauthorized-domain')) {
+      const hostname = typeof window !== 'undefined' ? window.location.hostname : 'nmo-gujarat.web.app';
+      const friendlyErr = new Error(
+        `Firebase Authentication: Domain "${hostname}" is not authorized. Please add "${hostname}" to your Firebase Console under Authentication > Settings > Authorized domains.`
+      );
+      (friendlyErr as any).code = 'auth/unauthorized-domain';
+      (friendlyErr as any).unauthorizedDomain = hostname;
+      throw friendlyErr;
+    }
     throw err;
   } finally {
     isSigningIn = false;
