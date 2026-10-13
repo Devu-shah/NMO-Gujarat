@@ -1,15 +1,46 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
-import { getFirestore, doc, getDocFromServer } from 'firebase/firestore';
+import {
+  getFirestore,
+  initializeFirestore,
+  setLogLevel,
+  doc,
+  getDocFromServer
+} from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
 import firebaseConfig from '../firebase-applet-config.json';
+
+// Configure Firestore logging to error-only to suppress transient WebChannel transport reconnect warnings
+try {
+  setLogLevel('error');
+} catch {
+  // Ignore if unsupported in environment
+}
 
 // Initialize Firebase App instance safely
 export const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 
 // Support both standard (default) Firestore and named database if provided
 const firestoreDbId = (firebaseConfig as any).firestoreDatabaseId;
-export const db = firestoreDbId ? getFirestore(app, firestoreDbId) : getFirestore(app);
+
+// Initialize Firestore with experimentalAutoDetectLongPolling enabled to prevent WebChannel Listen stream drops
+function setupFirestore() {
+  try {
+    return firestoreDbId
+      ? initializeFirestore(
+          app,
+          { experimentalAutoDetectLongPolling: true },
+          firestoreDbId
+        )
+      : initializeFirestore(app, {
+          experimentalAutoDetectLongPolling: true
+        });
+  } catch {
+    return firestoreDbId ? getFirestore(app, firestoreDbId) : getFirestore(app);
+  }
+}
+
+export const db = setupFirestore();
 export const auth = getAuth(app);
 export const storage = getStorage(app);
 

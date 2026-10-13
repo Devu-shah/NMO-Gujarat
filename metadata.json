@@ -1,6 +1,8 @@
 {
   "name": "NMO Gujarat - National Medicos Organisation",
   "description": "Official portal and membership management system of National Medicos Organisation (NMO) Gujarat.",
-  "requestFramePermissions": [],
+  "requestFramePermissions": [
+    "camera"
+  ],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

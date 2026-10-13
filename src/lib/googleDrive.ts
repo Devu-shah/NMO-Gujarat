@@ -596,6 +596,8 @@ export interface DriveCertificateFile {
   driveFolderId?: string;
   driveFolderName?: string;
   description?: string;
+  proxyViewUrl?: string;
+  proxyDownloadUrl?: string;
   updatedAt?: string;
 }
 
@@ -899,9 +901,37 @@ export const fetchCertificatesByMembershipNumber = async (
   const cleanNo = membershipNumber.trim().toUpperCase();
   if (!cleanNo) return [];
 
+  // 1. Try server-side Google Drive integration first
+  // The server has the active Google Drive connection and searches Drive for files
+  // where the file name contains the participant's membership ID.
+  try {
+    const serverResp = await fetch(`/api/drive/member-certificates/${encodeURIComponent(cleanNo)}`);
+    if (serverResp.ok) {
+      const serverData = await serverResp.json();
+      if (serverData.certificates && Array.isArray(serverData.certificates) && serverData.certificates.length > 0) {
+        // Enforce strict filtering: Only certificates matching this participant's membership ID
+        const strictlyFiltered: DriveCertificateFile[] = serverData.certificates.filter((c: any) => {
+          const upperName = (c.name || '').toUpperCase();
+          const upperMem = (c.membershipNumber || '').toUpperCase();
+          return upperName.includes(cleanNo) || upperMem === cleanNo;
+        });
+
+        if (strictlyFiltered.length > 0) {
+          // Asynchronously cache into Firestore for offline/quick reference
+          strictlyFiltered.forEach((cert) => {
+            syncCertificateToFirestore(cert).catch(() => {});
+          });
+          return strictlyFiltered;
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('Notice querying server Drive certificates API:', err);
+  }
+
   const token = getDriveAccessToken();
 
-  // If Drive token is available, query live Drive in NMO Gujarat folder & subfolders
+  // 2. If client Drive token is available, query live Drive directly
   if (token) {
     try {
       // Get all subfolders of NMO Gujarat folder
@@ -929,6 +959,12 @@ export const fetchCertificatesByMembershipNumber = async (
           .filter((f: any) => {
             if (specificFolderId) return true;
             return f.parents && f.parents.some((p: string) => allowedParentIds.has(p));
+          })
+          // Strict filter: Match exact membership ID in name or properties
+          .filter((f: any) => {
+            const upperName = (f.name || '').toUpperCase();
+            const upperMem = (f.properties?.membershipNumber || '').toUpperCase();
+            return upperName.includes(cleanNo) || upperMem === cleanNo;
           })
           .map((f: any) => {
             const cert: DriveCertificateFile = {
@@ -961,9 +997,14 @@ export const fetchCertificatesByMembershipNumber = async (
     }
   }
 
-  // Fallback / standard retrieval from indexed Firestore certificates (No user Drive login required!)
+  // 3. Fallback / standard retrieval from indexed Firestore certificates (No user Drive login required!)
   const firestoreCerts = await fetchMemberCertificatesFromFirestore(cleanNo);
-  return firestoreCerts;
+  // Ensure strict filtering: Don't show all certificates to everyone
+  return firestoreCerts.filter((c) => {
+    const upperName = (c.name || '').toUpperCase();
+    const upperMem = (c.membershipNumber || '').toUpperCase();
+    return upperName.includes(cleanNo) || upperMem === cleanNo;
+  });
 };
 
 /**
@@ -1050,9 +1091,28 @@ export const listCertificatesInFolder = async (
  * Download a certificate file directly from Google Drive or browser stream
  */
 export const downloadDriveCertificate = async (fileId: string, filename: string): Promise<void> => {
+  // 1. Try server streaming proxy endpoint first
+  try {
+    const res = await fetch(`/api/drive/file/${fileId}?download=true`);
+    if (res.ok) {
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename || `Certificate_${fileId}`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+      return;
+    }
+  } catch (err) {
+    console.warn('Server proxy download failed, trying client direct:', err);
+  }
+
   const token = getDriveAccessToken();
 
-  // If token is present, fetch media stream with bearer token
+  // 2. If token is present, fetch media stream with bearer token
   if (token) {
     try {
       const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
@@ -1076,7 +1136,7 @@ export const downloadDriveCertificate = async (fileId: string, filename: string)
     }
   }
 
-  // Direct download link fallback (works for public files)
+  // 3. Direct download link fallback (works for public files)
   const downloadUrl = `https://drive.google.com/uc?id=${fileId}&export=download`;
   window.open(downloadUrl, '_blank');
 };

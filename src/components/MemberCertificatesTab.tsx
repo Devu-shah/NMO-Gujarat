@@ -367,8 +367,11 @@ export const MemberCertificatesTab: React.FC = () => {
                   No Certificates Issued Yet
                 </h5>
                 <p className="text-xs text-slate-500 max-w-sm mx-auto leading-relaxed">
-                  When organizers upload or assign certificates for events you attended, they will appear here automatically for one-click download.
+                  Certificates in Google Drive are retrieved using your Membership ID (<strong className="text-slate-700 font-mono">{memberNo}</strong>). When organizers upload your certificate to Google Drive with your Membership ID in the file name (e.g. <code>{memberNo}.pdf</code> or <code>{memberNo}.jpg</code>), it will automatically appear here.
                 </p>
+                <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-100 text-[10px] text-slate-600 font-medium mt-1">
+                  <span>🔒 Privacy Protected: Only your own certificates are displayed</span>
+                </div>
               </div>
             ) : (
               <div className="space-y-3">

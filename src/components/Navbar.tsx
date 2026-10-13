@@ -12,7 +12,9 @@ import {
   LogOut,
   ChevronDown,
   Sparkles,
-  Info
+  Info,
+  QrCode,
+  Camera
 } from 'lucide-react';
 
 interface NavbarProps {
@@ -63,10 +65,10 @@ export const Navbar: React.FC<NavbarProps> = ({
         <div className="flex items-center gap-3">
           <button
             onClick={onOpenVerify}
-            className="flex items-center gap-1.5 text-[11px] text-amber-200 hover:text-white transition-colors font-medium underline-offset-2 hover:underline"
+            className="flex items-center gap-1.5 text-[11px] text-amber-200 hover:text-white transition-colors font-semibold underline-offset-2 hover:underline cursor-pointer"
           >
-            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-            <span>Verify Member ID</span>
+            <QrCode className="w-3.5 h-3.5 text-amber-300" />
+            <span>Scan QR / Verify Member</span>
           </button>
         </div>
       </div>
@@ -157,6 +159,16 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           {/* User Actions & Auth CTA */}
           <div className="hidden sm:flex items-center gap-3">
+            <button
+              type="button"
+              onClick={onOpenVerify}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg transition-colors cursor-pointer shadow-2xs"
+              title="Open camera to scan QR Code on Member ID card"
+            >
+              <QrCode className="w-3.5 h-3.5 text-red-600" />
+              <span>Scan QR</span>
+            </button>
+
             {currentUser?.email ? (
               <div className="flex items-center gap-2">
                 <button
@@ -217,6 +229,22 @@ export const Navbar: React.FC<NavbarProps> = ({
       {/* Mobile Menu Dropdown */}
       {mobileMenuOpen && (
         <div className="lg:hidden border-t border-slate-200 bg-white px-4 pt-3 pb-6 space-y-2 shadow-lg animate-in slide-in-from-top duration-200">
+          {/* Mobile Scan QR quick action */}
+          <button
+            type="button"
+            onClick={() => {
+              onOpenVerify();
+              setMobileMenuOpen(false);
+            }}
+            className="w-full text-left px-3.5 py-2.5 rounded-xl text-sm font-bold text-red-800 bg-red-50 border border-red-200 flex items-center justify-between cursor-pointer shadow-2xs mb-2"
+          >
+            <span className="flex items-center gap-2">
+              <QrCode className="w-4 h-4 text-red-600" />
+              <span>Scan ID Card QR Code</span>
+            </span>
+            <span className="text-[10px] bg-red-600 text-white px-2 py-0.5 rounded-full font-mono font-bold">Camera Scan</span>
+          </button>
+
           {navItems.map((item) => (
             <button
               key={item.id}

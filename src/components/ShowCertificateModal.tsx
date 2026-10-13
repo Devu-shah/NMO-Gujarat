@@ -107,9 +107,17 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
     window.print();
   };
 
-  const imageUrl = currentCert
-    ? getDriveDirectImageUrl(currentCert.id, currentCert.thumbnailLink)
+  const isPdf = Boolean(
+    currentCert &&
+      (currentCert.mimeType === 'application/pdf' ||
+        currentCert.name.toLowerCase().endsWith('.pdf'))
+  );
+
+  const previewSource = currentCert
+    ? currentCert.proxyViewUrl || getDriveDirectImageUrl(currentCert.id, currentCert.thumbnailLink)
     : '';
+
+  const imageUrl = previewSource;
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-3 sm:p-6 overflow-y-auto animate-in fade-in duration-200">
@@ -243,8 +251,17 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
                       </div>
                     )}
 
-                    {/* Image Error Fallback */}
-                    {imageError ? (
+                    {/* Image / PDF Display */}
+                    {isPdf ? (
+                      <div className="w-full h-[460px] flex flex-col items-center justify-center">
+                        <iframe
+                          src={imageUrl}
+                          title={`PDF Certificate for ${targetMemberNo}`}
+                          className="w-full h-full rounded-xl border border-slate-700 bg-white"
+                          onLoad={() => setImageLoaded(true)}
+                        />
+                      </div>
+                    ) : imageError ? (
                       <div className="text-center p-8 text-slate-300 space-y-3">
                         <AlertCircle className="w-10 h-10 text-amber-400 mx-auto" />
                         <p className="text-xs text-slate-300">

@@ -602,6 +602,32 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (matched) {
           setCurrentUser(matched);
         }
+      } else {
+        // Maintain admin login: Check if Super Admin server-side cookie exists
+        try {
+          const resp = await fetch('/api/admin/session', { credentials: 'include' });
+          if (resp.ok) {
+            const data = await resp.json();
+            if (data.authenticated && data.user) {
+              const sessionAdmin: NMOUserRecord = {
+                membershipNumber: data.user.membershipNumber || 'NMO-ADMIN-001',
+                name: data.user.name || 'Dr. Devansh Shah',
+                email: data.user.email || 'devanshshah768@gmail.com',
+                role: 'super_admin',
+                accountStatus: 'Active',
+                status: 'Active',
+                prant: 'All' as any,
+                nmoState: 'Gujarat',
+                uid: data.user.uid,
+                createdAt: new Date().toISOString(),
+                lastLogin: new Date().toISOString()
+              };
+              setCurrentUser(sessionAdmin);
+            }
+          }
+        } catch (cookieErr) {
+          // Silently proceed if server session check unavailable
+        }
       }
       setIsLoadingAuth(false);
     });
@@ -701,6 +727,23 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
 
       setCurrentUser(verifiedAdmin);
+
+      // Maintain login for admins: Store server-side cookie accessible only by superadmin
+      try {
+        await fetch('/api/admin/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({
+            email: authenticatedEmail,
+            membershipNumber: officialMemNo,
+            name: verifiedAdmin.name,
+            uid: verifiedAdmin.uid
+          })
+        });
+      } catch (cookieErr) {
+        console.warn('Notice setting server-side admin cookie:', cookieErr);
+      }
 
       try {
         const safeData = cleanDocForFirestore(verifiedAdmin);
@@ -910,6 +953,9 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const logout = async () => {
+    try {
+      await fetch('/api/admin/logout', { method: 'POST', credentials: 'include' });
+    } catch {}
     try {
       await firebaseSignOut(auth);
     } catch {}

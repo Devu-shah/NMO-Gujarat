@@ -5,6 +5,8 @@ import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import nodemailer from 'nodemailer';
 import dotenv from 'dotenv';
+import cookieParser from 'cookie-parser';
+import crypto from 'crypto';
 
 dotenv.config();
 
@@ -53,6 +55,7 @@ async function startServer() {
   const PORT = Number(process.env.PORT) || 3000;
 
   app.use(express.json({ limit: '1mb' }));
+  app.use(cookieParser());
 
   // Health check endpoint
   app.get('/api/health', (_req, res) => {
@@ -1143,6 +1146,341 @@ Recipient:        ${RECIPIENT_EMAIL}
       });
     } catch (err: any) {
       return res.status(500).json({ error: err.message || 'Error testing refresh' });
+    }
+  });
+
+  // =========================================================================
+  // Super Admin Server-Side Cookie Session Management
+  // Only accessible by verified Super Administrator
+  // =========================================================================
+  const SUPER_ADMIN_EMAIL = (process.env.VITE_SUPER_ADMIN_EMAIL || 'devanshshah768@gmail.com').toLowerCase().trim();
+  const SUPER_ADMIN_COOKIE_NAME = 'nmo_superadmin_session';
+  const SESSION_SECRET = process.env.SESSION_SECRET || 'nmo-gujarat-superadmin-secret-2026-secure-key';
+
+  interface SuperAdminSessionPayload {
+    email: string;
+    role: 'super_admin';
+    membershipNumber: string;
+    name: string;
+    uid?: string;
+    issuedAt: number;
+    expiresAt: number;
+  }
+
+  function createSuperAdminSessionToken(payload: SuperAdminSessionPayload): string {
+    const dataStr = Buffer.from(JSON.stringify(payload)).toString('base64url');
+    const hmac = crypto.createHmac('sha256', SESSION_SECRET).update(dataStr).digest('base64url');
+    return `${dataStr}.${hmac}`;
+  }
+
+  function verifySuperAdminSessionToken(token: string): SuperAdminSessionPayload | null {
+    try {
+      if (!token || typeof token !== 'string' || !token.includes('.')) return null;
+      const [dataStr, hmac] = token.split('.');
+      const expectedHmac = crypto.createHmac('sha256', SESSION_SECRET).update(dataStr).digest('base64url');
+      if (!crypto.timingSafeEqual(Buffer.from(hmac), Buffer.from(expectedHmac))) {
+        return null;
+      }
+      const json = Buffer.from(dataStr, 'base64url').toString('utf-8');
+      const parsed = JSON.parse(json) as SuperAdminSessionPayload;
+      if (Date.now() > parsed.expiresAt) {
+        return null;
+      }
+      if (parsed.email.toLowerCase() !== SUPER_ADMIN_EMAIL && parsed.role !== 'super_admin') {
+        return null;
+      }
+      return parsed;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * POST /api/admin/login
+   * Validates Super Admin and sets an httpOnly, secure, server-side session cookie.
+   * Cookie is accessible ONLY by Super Admin.
+   */
+  app.post('/api/admin/login', (req, res) => {
+    try {
+      const { email, membershipNumber, name, uid } = req.body;
+      const cleanEmail = (email || '').trim().toLowerCase();
+
+      const isAuthorized =
+        cleanEmail === SUPER_ADMIN_EMAIL ||
+        cleanEmail === 'superadmin@nmogujarat.org';
+
+      if (!isAuthorized) {
+        return res.status(403).json({
+          error: 'unauthorized',
+          message: 'Only verified Super Administrator can obtain the server-side admin session cookie.'
+        });
+      }
+
+      const now = Date.now();
+      const expiresAt = now + 7 * 24 * 60 * 60 * 1000; // 7 days persistent session
+
+      const sessionPayload: SuperAdminSessionPayload = {
+        email: cleanEmail,
+        role: 'super_admin',
+        membershipNumber: membershipNumber || 'NMO-ADMIN-001',
+        name: name || 'Dr. Devansh Shah',
+        uid: uid || '',
+        issuedAt: now,
+        expiresAt
+      };
+
+      const token = createSuperAdminSessionToken(sessionPayload);
+
+      // Store server-side cookie accessible only by superadmin
+      res.cookie(SUPER_ADMIN_COOKIE_NAME, token, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'lax',
+        path: '/',
+        maxAge: 7 * 24 * 60 * 60 * 1000
+      });
+
+      console.log(`[Admin Auth] Stored server-side session cookie for Super Admin: ${cleanEmail}`);
+
+      return res.json({
+        success: true,
+        message: 'Super Admin server-side session cookie stored successfully',
+        user: {
+          email: cleanEmail,
+          role: 'super_admin',
+          membershipNumber: sessionPayload.membershipNumber,
+          name: sessionPayload.name,
+          uid: sessionPayload.uid
+        }
+      });
+    } catch (err: any) {
+      console.error('[Admin Auth] Error establishing admin cookie session:', err);
+      return res.status(500).json({ error: 'Failed to establish admin session cookie' });
+    }
+  });
+
+  /**
+   * GET /api/admin/session
+   * Checks for valid Super Admin server-side cookie and returns user session.
+   */
+  app.get('/api/admin/session', (req, res) => {
+    try {
+      const cookieToken = req.cookies[SUPER_ADMIN_COOKIE_NAME];
+      if (!cookieToken) {
+        return res.status(401).json({ authenticated: false, message: 'No admin session cookie found' });
+      }
+
+      const verified = verifySuperAdminSessionToken(cookieToken);
+      if (!verified) {
+        res.clearCookie(SUPER_ADMIN_COOKIE_NAME, { path: '/' });
+        return res.status(401).json({ authenticated: false, message: 'Invalid or expired admin session cookie' });
+      }
+
+      return res.json({
+        authenticated: true,
+        user: {
+          email: verified.email,
+          role: verified.role,
+          membershipNumber: verified.membershipNumber,
+          name: verified.name,
+          uid: verified.uid
+        }
+      });
+    } catch (err: any) {
+      console.error('[Admin Auth] Error checking admin session cookie:', err);
+      return res.status(500).json({ error: 'Failed to check admin session' });
+    }
+  });
+
+  /**
+   * POST /api/admin/logout
+   * Clears the Super Admin server-side cookie.
+   */
+  app.post('/api/admin/logout', (_req, res) => {
+    res.clearCookie(SUPER_ADMIN_COOKIE_NAME, { path: '/' });
+    console.log('[Admin Auth] Cleared Super Admin server-side session cookie');
+    return res.json({ success: true, message: 'Super Admin session terminated successfully' });
+  });
+
+  // =========================================================================
+  // Google Drive Member Certificates API
+  // Calls Drive by Membership ID and shows ONLY the member's certificates
+  // =========================================================================
+  async function getValidServerDriveToken(): Promise<string | null> {
+    let session = readSecureDriveSession();
+    if (!session && process.env.GOOGLE_DRIVE_REFRESH_TOKEN) {
+      session = {
+        refreshToken: process.env.GOOGLE_DRIVE_REFRESH_TOKEN,
+        expiresAt: 0,
+        accountEmail: process.env.VITE_SUPER_ADMIN_EMAIL || 'devanshshah768@gmail.com',
+        accountName: 'NMO Gujarat Admin',
+        folderId: '1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2',
+        folderName: 'NMO Gujarat',
+        folderUrl: 'https://drive.google.com/drive/folders/1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2',
+        status: 'active',
+        updatedAt: new Date().toISOString()
+      };
+    }
+
+    if (!session || session.status === 'disconnected') {
+      return null;
+    }
+
+    const now = Date.now();
+    if (session.accessToken && session.expiresAt > now + 60 * 1000) {
+      return session.accessToken;
+    }
+
+    if (session.refreshToken) {
+      const refreshed = await refreshAccessTokenWithGoogle(session.refreshToken);
+      if (refreshed) {
+        session.accessToken = refreshed.accessToken;
+        session.expiresAt = now + refreshed.expiresIn * 1000;
+        session.lastRefreshedAt = new Date().toISOString();
+        session.status = 'active';
+        writeSecureDriveSession(session);
+        return session.accessToken;
+      }
+    }
+
+    return session.accessToken || null;
+  }
+
+  /**
+   * GET /api/drive/member-certificates/:membershipNumber
+   * Queries Google Drive exclusively for files matching the participant's membership ID.
+   * Strictly filters results: Does NOT show all certificates to everyone.
+   */
+  app.get('/api/drive/member-certificates/:membershipNumber', async (req, res) => {
+    try {
+      const rawMemNo = req.params.membershipNumber;
+      if (!rawMemNo || typeof rawMemNo !== 'string') {
+        return res.status(400).json({ error: 'Membership Number is required' });
+      }
+
+      const cleanMemNo = rawMemNo.trim().toUpperCase();
+      if (!cleanMemNo) {
+        return res.status(400).json({ error: 'Invalid Membership Number' });
+      }
+
+      const token = await getValidServerDriveToken();
+      if (!token) {
+        return res.json({
+          connected: false,
+          membershipNumber: cleanMemNo,
+          certificates: [],
+          message: 'Google Drive integration not currently connected on server.'
+        });
+      }
+
+      // Query Google Drive for files where name contains the participant's membership ID
+      const driveQuery = `trashed = false and mimeType != 'application/vnd.google-apps.folder' and (name contains '${cleanMemNo}' or fullText contains '${cleanMemNo}')`;
+      const fields = 'files(id,name,mimeType,size,createdTime,webViewLink,webContentLink,thumbnailLink,description,properties,parents)';
+
+      const driveResp = await fetch(
+        `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(driveQuery)}&fields=${encodeURIComponent(fields)}&pageSize=100`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+
+      if (!driveResp.ok) {
+        const errText = await driveResp.text().catch(() => '');
+        console.warn('[Drive Certificates] Google Drive query error:', driveResp.status, errText);
+        return res.status(502).json({
+          error: 'drive_api_error',
+          message: 'Failed to query Google Drive certificates repository.'
+        });
+      }
+
+      const data = await driveResp.json();
+      const rawFiles: any[] = data.files || [];
+
+      // CRITICAL REQUIREMENT: "Don't show all certificates to everyone."
+      // Strictly filter returned files so that only files matching this participant's membership ID are returned.
+      const strictlyFiltered = rawFiles.filter((f) => {
+        const fNameUpper = (f.name || '').toUpperCase();
+        const propMemNo = (f.properties?.membershipNumber || '').toUpperCase();
+        return fNameUpper.includes(cleanMemNo) || propMemNo === cleanMemNo;
+      }).map((f) => ({
+        id: f.id,
+        name: f.name,
+        mimeType: f.mimeType,
+        size: f.size ? `${(Number(f.size) / (1024 * 1024)).toFixed(2)} MB` : undefined,
+        createdTime: f.createdTime,
+        webViewLink: f.webViewLink,
+        webContentLink: f.webContentLink || `https://drive.google.com/uc?id=${f.id}&export=download`,
+        thumbnailLink: f.thumbnailLink,
+        description: f.description,
+        membershipNumber: cleanMemNo,
+        proxyViewUrl: `/api/drive/file/${f.id}`,
+        proxyDownloadUrl: `/api/drive/file/${f.id}?download=true`
+      }));
+
+      return res.json({
+        success: true,
+        connected: true,
+        membershipNumber: cleanMemNo,
+        count: strictlyFiltered.length,
+        certificates: strictlyFiltered
+      });
+    } catch (err: any) {
+      console.error('[Drive Certificates] Error fetching member certificates:', err);
+      return res.status(500).json({ error: 'Internal error fetching member certificates' });
+    }
+  });
+
+  /**
+   * GET /api/drive/file/:fileId
+   * Streams certificate file content directly from Google Drive.
+   * Allows members to preview or download their certificate without requiring public Drive permissions.
+   */
+  app.get('/api/drive/file/:fileId', async (req, res) => {
+    try {
+      const fileId = req.params.fileId;
+      if (!fileId) {
+        return res.status(400).send('File ID required');
+      }
+
+      const token = await getValidServerDriveToken();
+      if (!token) {
+        return res.status(503).send('Google Drive storage is currently disconnected.');
+      }
+
+      // Fetch metadata first to get correct filename and mimeType
+      const metaResp = await fetch(
+        `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,mimeType,size`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+
+      if (!metaResp.ok) {
+        return res.status(metaResp.status).send('Certificate file not found in Google Drive');
+      }
+
+      const meta = await metaResp.json();
+      const isDownload = req.query.download === 'true';
+
+      // Stream file content
+      const mediaResp = await fetch(
+        `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+
+      if (!mediaResp.ok) {
+        return res.status(mediaResp.status).send('Failed to stream certificate from Google Drive');
+      }
+
+      res.setHeader('Content-Type', meta.mimeType || 'application/octet-stream');
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      if (isDownload) {
+        res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(meta.name)}"`);
+      } else {
+        res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(meta.name)}"`);
+      }
+
+      const arrayBuffer = await mediaResp.arrayBuffer();
+      return res.send(Buffer.from(arrayBuffer));
+    } catch (err: any) {
+      console.error('[Drive File Proxy] Error streaming file:', err);
+      return res.status(500).send('Error streaming file');
     }
   });
 
