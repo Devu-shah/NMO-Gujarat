@@ -1,11 +1,9 @@
 {
-  "projectId": "gen-lang-client-0484899202",
-  "appId": "1:805643719207:web:f86d50a01889fef9e73402",
-  "apiKey": "AIzaSyCXCiuE4JlEiowikmdzmwryWgwrKyIvUxU",
-  "authDomain": "gen-lang-client-0484899202.firebaseapp.com",
-  "storageBucket": "gen-lang-client-0484899202.firebasestorage.app",
-  "messagingSenderId": "805643719207",
-  "measurementId": "",
-  "oAuthClientId": "805643719207-jd663ll7256o90t8gg0jih86dksefdj1.apps.googleusercontent.com",
-  "recaptchaSiteKey": ""
+  "projectId": "nmo-india-demo",
+  "appId": "1:321117934169:web:35376991c49f4606179748",
+  "apiKey": "AIzaSyD3fJNxR4kylm4csslEbReoFOROzMZNOks",
+  "authDomain": "nmo-india-demo.firebaseapp.com",
+  "storageBucket": "nmo-india-demo.firebasestorage.app",
+  "messagingSenderId": "321117934169",
+  "measurementId": "G-ER2LW8Y18M"
 }

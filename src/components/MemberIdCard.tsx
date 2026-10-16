@@ -622,7 +622,10 @@ export const MemberIdCard: React.FC<MemberIdCardProps> = ({ member }) => {
             {printLayout === 'duplex' && (
               <>
                 {/* PAGE 1: FRONT */}
-                <div className="w-full min-h-[92vh] flex flex-col items-center justify-center p-6 nmo-print-break-after">
+                <div
+                  style={{ height: '270mm', maxHeight: '270mm' }}
+                  className="w-full box-border flex flex-col items-center justify-center p-4 nmo-print-break-after overflow-hidden"
+                >
                   <div className="relative">
                     {/* Crop marks indicator */}
                     <div className="absolute -top-3 left-0 right-0 flex justify-between text-[9px] text-slate-400 font-mono">
@@ -635,13 +638,16 @@ export const MemberIdCard: React.FC<MemberIdCardProps> = ({ member }) => {
                       <span>Cut ┘</span>
                     </div>
                   </div>
-                  <div className="mt-4 text-center text-[10px] text-slate-400 font-mono">
+                  <div className="mt-3 text-center text-[10px] text-slate-400 font-mono">
                     NMO Gujarat Official ID Card • Page 1: Front Side • #{member.membershipNumber}
                   </div>
                 </div>
 
                 {/* PAGE 2: BACK */}
-                <div className="w-full min-h-[92vh] flex flex-col items-center justify-center p-6 nmo-print-avoid-break">
+                <div
+                  style={{ height: '270mm', maxHeight: '270mm' }}
+                  className="w-full box-border flex flex-col items-center justify-center p-4 nmo-print-avoid-break overflow-hidden"
+                >
                   <div className="relative">
                     <div className="absolute -top-3 left-0 right-0 flex justify-between text-[9px] text-slate-400 font-mono">
                       <span>┌ Cut</span>
@@ -653,7 +659,7 @@ export const MemberIdCard: React.FC<MemberIdCardProps> = ({ member }) => {
                       <span>Cut ┘</span>
                     </div>
                   </div>
-                  <div className="mt-4 text-center text-[10px] text-slate-400 font-mono">
+                  <div className="mt-3 text-center text-[10px] text-slate-400 font-mono">
                     NMO Gujarat Official ID Card • Page 2: Back Particulars • #{member.membershipNumber}
                   </div>
                 </div>
@@ -662,7 +668,10 @@ export const MemberIdCard: React.FC<MemberIdCardProps> = ({ member }) => {
 
             {/* 2. SINGLE PAGE FORMAT (Both Front & Back on 1 Page) */}
             {printLayout === 'single_page' && (
-              <div className="w-full min-h-[92vh] flex flex-col items-center justify-center p-4 nmo-print-avoid-break">
+              <div
+                style={{ height: '270mm', maxHeight: '270mm' }}
+                className="w-full box-border flex flex-col items-center justify-center p-4 nmo-print-avoid-break overflow-hidden"
+              >
                 <div className="text-center mb-3 text-[11px] font-bold text-slate-700">
                   National Medicos Organisation (Gujarat) • Official Identity Card
                 </div>
@@ -689,7 +698,10 @@ export const MemberIdCard: React.FC<MemberIdCardProps> = ({ member }) => {
 
             {/* 3. FRONT ONLY FORMAT (1 Page) */}
             {printLayout === 'front_only' && (
-              <div className="w-full min-h-[92vh] flex flex-col items-center justify-center p-6 nmo-print-avoid-break">
+              <div
+                style={{ height: '270mm', maxHeight: '270mm' }}
+                className="w-full box-border flex flex-col items-center justify-center p-6 nmo-print-avoid-break overflow-hidden"
+              >
                 {renderFrontCard(true)}
                 <div className="mt-4 text-center text-[10px] text-slate-400 font-mono">
                   NMO Gujarat Official ID Card • Front Side • #{member.membershipNumber}
@@ -699,7 +711,10 @@ export const MemberIdCard: React.FC<MemberIdCardProps> = ({ member }) => {
 
             {/* 4. BACK ONLY FORMAT (1 Page) */}
             {printLayout === 'back_only' && (
-              <div className="w-full min-h-[92vh] flex flex-col items-center justify-center p-6 nmo-print-avoid-break">
+              <div
+                style={{ height: '270mm', maxHeight: '270mm' }}
+                className="w-full box-border flex flex-col items-center justify-center p-6 nmo-print-avoid-break overflow-hidden"
+              >
                 {renderBackCard(true)}
                 <div className="mt-4 text-center text-[10px] text-slate-400 font-mono">
                   NMO Gujarat Official ID Card • Back Particulars • #{member.membershipNumber}

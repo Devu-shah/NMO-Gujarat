@@ -20,7 +20,12 @@ import {
   NMO_ROOT_DRIVE_URL,
   DriveCertificateFile,
   DriveFolderInfo,
-  SavedDriveSession
+  SavedDriveSession,
+  restoreDriveSessionFromFirestore,
+  saveDriveSessionToBackend,
+  fetchPendingCertificates,
+  approveCertificate,
+  rejectAndDeleteCertificate
 } from '../../lib/googleDrive';
 import {
   Award,
@@ -42,15 +47,25 @@ import {
   Zap,
   HelpCircle,
   Copy,
-  Check
+  Check,
+  Key,
+  Trash2,
+  Clock
 } from 'lucide-react';
 import { auth } from '../../lib/firebase';
-import { DriveIntegrationGuideModal } from './DriveIntegrationGuideModal';
+import { DriveIntegrationGuideModal, GuideTab } from './DriveIntegrationGuideModal';
 
 export const AdminCertificatesManager: React.FC = () => {
-  const { users, events, createEventDriveSubfolder } = useNMO();
+  const {
+    users,
+    events,
+    createEventDriveSubfolder,
+    updateParticipantAttendance,
+    addEventRSVPManually
+  } = useNMO();
 
   const [showGuideModal, setShowGuideModal] = useState<boolean>(false);
+  const [guideInitialTab, setGuideInitialTab] = useState<GuideTab>('invalid_secret');
   const [savedAccount, setSavedAccount] = useState<SavedDriveSession | null>(getSavedDriveAccount());
   const [tokenHealth, setTokenHealth] = useState<'checking' | 'valid' | 'expired' | 'none'>('checking');
   const [isConnected, setIsConnected] = useState<boolean>(Boolean(getDriveAccessToken()));
@@ -60,7 +75,7 @@ export const AdminCertificatesManager: React.FC = () => {
   const [driveFiles, setDriveFiles] = useState<DriveCertificateFile[]>([]);
   const [isLoadingFiles, setIsLoadingFiles] = useState<boolean>(false);
   const [searchTerm, setSearchTerm] = useState<string>('');
-  const [feedback, setFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const [feedback, setFeedback] = useState<{ message: string; type: 'success' | 'error'; isInvalidSecret?: boolean } | null>(null);
   const [copiedDomain, setCopiedDomain] = useState<boolean>(false);
 
   // Upload Modal State
@@ -73,17 +88,43 @@ export const AdminCertificatesManager: React.FC = () => {
   const [isUploading, setIsUploading] = useState(false);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
 
+  // Pending Member Certificate Submissions State
+  const [pendingCertificates, setPendingCertificates] = useState<DriveCertificateFile[]>([]);
+  const [isLoadingPending, setIsLoadingPending] = useState<boolean>(false);
+  const [processingPendingId, setProcessingPendingId] = useState<string | null>(null);
+
   // Create Subfolder Modal State
   const [showCreateFolderModal, setShowCreateFolderModal] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [isCreatingFolder, setIsCreatingFolder] = useState(false);
 
+  const loadPendingCertificates = async () => {
+    setIsLoadingPending(true);
+    try {
+      const pending = await fetchPendingCertificates();
+      setPendingCertificates(pending);
+    } catch (err) {
+      console.warn('Notice loading pending member certificates:', err);
+    } finally {
+      setIsLoadingPending(false);
+    }
+  };
+
   useEffect(() => {
     const initDrive = async () => {
       // 1. Attempt to restore persistent session from backend first
-      const backendSession = await restoreDriveSessionFromBackend();
-      const active = backendSession?.accessToken || getDriveAccessToken();
-      const saved = backendSession || getSavedDriveAccount();
+      let session = await restoreDriveSessionFromBackend();
+      if (!session || session.status === 'disconnected') {
+        // 2. Check Firestore persistent central configuration (allows any admin to auto-inherit)
+        const firestoreSession = await restoreDriveSessionFromFirestore();
+        if (firestoreSession && firestoreSession.status !== 'disconnected') {
+          session = firestoreSession;
+          await saveDriveSessionToBackend(firestoreSession).catch(() => {});
+        }
+      }
+
+      const active = session?.accessToken || getDriveAccessToken();
+      const saved = session || getSavedDriveAccount();
 
       setSavedAccount(saved);
       setIsConnected(Boolean(active));
@@ -108,6 +149,7 @@ export const AdminCertificatesManager: React.FC = () => {
       }
 
       await handleScanFolder();
+      await loadPendingCertificates();
     };
 
     initDrive();
@@ -128,9 +170,19 @@ export const AdminCertificatesManager: React.FC = () => {
         type: 'success'
       });
     } catch (err: any) {
+      const isInvalidSecret =
+        err?.code === 'auth/invalid-credential' ||
+        err?.isInvalidClientSecret ||
+        err?.message?.includes('invalid-credential') ||
+        err?.message?.includes('client secret is invalid') ||
+        err?.message?.includes('invalid_client');
+
       setFeedback({
-        message: err.message || 'Failed to connect with Google Drive.',
-        type: 'error'
+        message: isInvalidSecret
+          ? 'Firebase Error: "The provided client secret is invalid" (auth/invalid-credential). In your Firebase Console under Authentication > Sign-in method > Google, the Web Client Secret is invalid or mismatching.'
+          : err.message || 'Failed to connect with Google Drive.',
+        type: 'error',
+        isInvalidSecret
       });
     } finally {
       setIsConnecting(false);
@@ -232,11 +284,40 @@ export const AdminCertificatesManager: React.FC = () => {
         memberName: matchedUser?.name || 'NMO Member',
         eventId: targetEventId || undefined,
         eventTitle,
-        targetFolderId: targetUploadFolderId || NMO_ROOT_DRIVE_FOLDER_ID
+        targetFolderId: targetUploadFolderId || NMO_ROOT_DRIVE_FOLDER_ID,
+        uploadedBy: 'admin',
+        approvalStatus: 'approved',
+        assignedAttendance: true
       });
 
+      // If assigned to an event, automatically mark participant attendance as 'Attended'!
+      if (targetEventId) {
+        try {
+          const isParticipant = (chosenEvent?.participants || []).some(
+            (p) => p.membershipNumber.toUpperCase() === cleanNo
+          );
+          if (isParticipant) {
+            await updateParticipantAttendance(targetEventId, cleanNo, 'Attended');
+          } else {
+            await addEventRSVPManually(targetEventId, {
+              membershipNumber: cleanNo,
+              name: matchedUser?.name || 'Registered Medico',
+              email: matchedUser?.email || '',
+              phone: matchedUser?.phone || '',
+              medicalCollege: matchedUser?.medicalCollege || '',
+              prant: (matchedUser?.prant || chosenEvent?.prant || 'All') as any,
+              approvalStatus: 'Approved',
+              attendanceStatus: 'Attended',
+              registrationDate: new Date().toISOString().split('T')[0]
+            });
+          }
+        } catch (attendErr) {
+          console.warn('Notice updating attendance for direct certificate upload:', attendErr);
+        }
+      }
+
       setFeedback({
-        message: `Assigned and stored certificate "${uploaded.name}" for member ${cleanNo} into NMO Gujarat Drive!`,
+        message: `Assigned certificate "${uploaded.name}" for member ${cleanNo} into NMO Gujarat Drive! Attendance marked as Present (Attended).`,
         type: 'success'
       });
       setShowUploadModal(false);
@@ -245,6 +326,7 @@ export const AdminCertificatesManager: React.FC = () => {
       setTargetEventId('');
       setTargetEventTitle('');
       await handleScanFolder();
+      await loadPendingCertificates();
     } catch (err: any) {
       setFeedback({
         message: err.message || 'Failed to upload certificate to Google Drive.',
@@ -252,6 +334,78 @@ export const AdminCertificatesManager: React.FC = () => {
       });
     } finally {
       setIsUploading(false);
+    }
+  };
+
+  const handleApprovePending = async (cert: DriveCertificateFile) => {
+    setProcessingPendingId(cert.id);
+    try {
+      await approveCertificate(cert.id);
+
+      // If associated with an event, mark attendance
+      if (cert.eventId && cert.membershipNumber) {
+        try {
+          const cleanNo = cert.membershipNumber.trim().toUpperCase();
+          const evt = events.find((e) => e.eventId === cert.eventId);
+          const isParticipant = (evt?.participants || []).some(
+            (p) => p.membershipNumber.toUpperCase() === cleanNo
+          );
+          if (isParticipant) {
+            await updateParticipantAttendance(cert.eventId, cleanNo, 'Attended');
+          } else {
+            await addEventRSVPManually(cert.eventId, {
+              membershipNumber: cleanNo,
+              name: cert.memberName || 'Registered Medico',
+              email: '',
+              prant: (evt?.prant || 'All') as any,
+              approvalStatus: 'Approved',
+              attendanceStatus: 'Attended',
+              registrationDate: new Date().toISOString().split('T')[0]
+            });
+          }
+        } catch (e) {
+          console.warn('Notice marking attendance on approval:', e);
+        }
+      }
+
+      setFeedback({
+        message: `Approved certificate "${cert.name}" for member ${cert.membershipNumber}! Stored and confirmed in Google Drive.`,
+        type: 'success'
+      });
+      await loadPendingCertificates();
+      await handleScanFolder();
+    } catch (err: any) {
+      setFeedback({
+        message: err.message || 'Failed to approve certificate.',
+        type: 'error'
+      });
+    } finally {
+      setProcessingPendingId(null);
+    }
+  };
+
+  const handleRejectPending = async (cert: DriveCertificateFile) => {
+    const confirmed = window.confirm(
+      `Are you sure you want to REJECT and DELETE certificate "${cert.name}" for member ${cert.membershipNumber}?\n\nThis will permanently delete the file from Google Drive and remove it from the system.`
+    );
+    if (!confirmed) return;
+
+    setProcessingPendingId(cert.id);
+    try {
+      await rejectAndDeleteCertificate(cert.id, cert.id);
+      setFeedback({
+        message: `Certificate "${cert.name}" rejected and permanently deleted from Google Drive.`,
+        type: 'success'
+      });
+      await loadPendingCertificates();
+      await handleScanFolder();
+    } catch (err: any) {
+      setFeedback({
+        message: err.message || 'Failed to delete certificate from Google Drive.',
+        type: 'error'
+      });
+    } finally {
+      setProcessingPendingId(null);
     }
   };
 
@@ -304,7 +458,23 @@ export const AdminCertificatesManager: React.FC = () => {
           <div className="shrink-0 flex items-center gap-2">
             <button
               type="button"
-              onClick={() => setShowGuideModal(true)}
+              onClick={() => {
+                setGuideInitialTab('manual_token');
+                setShowGuideModal(true);
+              }}
+              className="px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-300 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
+              title="Enter or update Google Drive authorization tokens directly without changing Firebase configuration"
+            >
+              <Key className="w-4 h-4 text-emerald-700" />
+              <span>Update Drive Tokens</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setGuideInitialTab('quick_guide');
+                setShowGuideModal(true);
+              }}
               className="px-3.5 py-2 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
               title="Step-by-step Drive setup guide, refresh token explanation, and access denied troubleshooting"
             >
@@ -423,6 +593,159 @@ export const AdminCertificatesManager: React.FC = () => {
                 >
                   <RefreshCw className="w-3.5 h-3.5 text-red-600" />
                   <span>Retry Authorize Google Drive</span>
+                </button>
+              </div>
+            </div>
+          ) : feedback.isInvalidSecret || feedback.message.includes('client secret is invalid') ? (
+            <div className="mt-4 p-5 rounded-2xl border-2 border-red-300 bg-red-50/95 text-slate-900 animate-in fade-in duration-200 shadow-xs">
+              <div className="flex items-start justify-between gap-3 mb-3">
+                <div className="flex items-center gap-2.5 text-red-800 font-black text-sm">
+                  <AlertCircle className="w-5 h-5 shrink-0 text-red-600" />
+                  <span>Action Required: Invalid Client Secret in Firebase Console (auth/invalid-credential)</span>
+                </div>
+                <button
+                  onClick={() => setFeedback(null)}
+                  className="text-slate-400 hover:text-slate-600 font-bold p-1 cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <p className="text-xs text-slate-700 leading-relaxed mb-3">
+                Google rejected authentication because the <strong>Web Client Secret</strong> configured inside your Firebase Console (under <strong>Authentication &gt; Sign-in method &gt; Google</strong>) does not match the Web Client ID in Google Cloud Console.
+              </p>
+
+              <div className="p-3 bg-white rounded-xl border border-red-200 mb-3 space-y-2">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 text-[11px]">
+                  <span className="font-bold text-slate-700">OAuth2 Redirect Handler called:</span>
+                  <code className="text-xs font-mono font-bold text-red-700 bg-red-50 px-2 py-0.5 rounded border border-red-200 select-all truncate">
+                    https://{auth?.app?.options?.authDomain || 'gen-lang-client-0484899202.firebaseapp.com'}/__/auth/handler
+                  </code>
+                </div>
+              </div>
+
+              <div className="space-y-1.5 text-xs text-slate-700 mb-4 pl-1">
+                <div className="font-bold text-slate-900">How to fix in 2 minutes:</div>
+                <ol className="list-decimal list-inside space-y-1 text-slate-600">
+                  <li>Open <strong>Google Cloud Console &gt; Credentials</strong> and copy the <strong>Client Secret</strong> for your Web Client ID.</li>
+                  <li>Open <strong>Firebase Console &gt; Authentication &gt; Sign-in method &gt; Google</strong>.</li>
+                  <li>Expand <strong>Web SDK configuration</strong>, paste the Client Secret into <strong>Web client secret</strong>, and click <strong>Save</strong>.</li>
+                  <li>Click <strong>Retry Authorize Google Drive</strong> below!</li>
+                </ol>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2.5 pt-3 border-t border-red-200">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setGuideInitialTab('invalid_secret');
+                    setShowGuideModal(true);
+                  }}
+                  className="px-3.5 py-2 bg-red-700 hover:bg-red-800 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs cursor-pointer"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>Open Step-by-Step Fix Guide</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setGuideInitialTab('manual_token');
+                    setShowGuideModal(true);
+                  }}
+                  className="px-3.5 py-2 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs cursor-pointer"
+                >
+                  <Zap className="w-3.5 h-3.5" />
+                  <span>Quick Connect via Token (Bypass Firebase)</span>
+                </button>
+
+                <a
+                  href={`https://console.firebase.google.com/project/${auth?.app?.options?.projectId || 'gen-lang-client-0484899202'}/authentication/providers`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="px-3.5 py-2 bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-xs"
+                >
+                  <span>Open Firebase Google Provider</span>
+                  <ExternalLink className="w-3.5 h-3.5 text-slate-500" />
+                </a>
+
+                <button
+                  type="button"
+                  onClick={handleConnect}
+                  className="px-3.5 py-2 bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-xs"
+                >
+                  <RefreshCw className="w-3.5 h-3.5 text-red-600" />
+                  <span>Retry Authorize</span>
+                </button>
+              </div>
+            </div>
+          ) : feedback.message.includes('invalid authentication credentials') ||
+            feedback.message.includes('Invalid Credentials') ||
+            feedback.message.includes('Expected OAuth 2 access token') ||
+            feedback.message.includes('token expired') ? (
+            <div className="mt-4 p-5 rounded-2xl border-2 border-amber-300 bg-amber-50/95 text-slate-900 animate-in fade-in duration-200 shadow-xs">
+              <div className="flex items-start justify-between gap-3 mb-3">
+                <div className="flex items-center gap-2.5 text-amber-900 font-black text-sm">
+                  <AlertCircle className="w-5 h-5 shrink-0 text-amber-600" />
+                  <span>Action Required: Google Drive OAuth Token Expired (401 Invalid Credentials)</span>
+                </div>
+                <button
+                  onClick={() => setFeedback(null)}
+                  className="text-slate-400 hover:text-slate-600 font-bold p-1 cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <p className="text-xs text-slate-700 leading-relaxed mb-3">
+                Google rejected the request because the OAuth 2.0 access token has timed out (standard 60-minute lifespan):
+                <br />
+                <code className="block mt-1 text-[11px] font-mono text-amber-800 bg-amber-100/60 p-2 rounded border border-amber-200">
+                  {feedback.message}
+                </code>
+              </p>
+
+              <div className="space-y-1.5 text-xs text-slate-700 mb-4 pl-1">
+                <div className="font-bold text-slate-900">How to fix right now:</div>
+                <ol className="list-decimal list-inside space-y-1 text-slate-600">
+                  <li>Click <strong>"1-Click Re-Authorize"</strong> below to refresh your access token in 5 seconds.</li>
+                  <li>Or use <strong>"Quick Connect via Token"</strong> to enter a <strong>Refresh Token</strong> from Google OAuth Playground for permanent 24/7 access that never expires.</li>
+                </ol>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2.5 pt-3 border-t border-amber-200">
+                <button
+                  type="button"
+                  onClick={handleConnect}
+                  disabled={isConnecting}
+                  className="px-3.5 py-2 bg-red-700 hover:bg-red-800 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs cursor-pointer"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isConnecting ? 'animate-spin' : ''}`} />
+                  <span>{isConnecting ? 'Re-authorizing...' : '1-Click Re-Authorize Google Drive'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setGuideInitialTab('manual_token');
+                    setShowGuideModal(true);
+                  }}
+                  className="px-3.5 py-2 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs cursor-pointer"
+                >
+                  <Zap className="w-3.5 h-3.5" />
+                  <span>Quick Connect via Permanent Token</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setGuideInitialTab('refresh_token');
+                    setShowGuideModal(true);
+                  }}
+                  className="px-3.5 py-2 bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-xs"
+                >
+                  <HelpCircle className="w-3.5 h-3.5 text-slate-500" />
+                  <span>Drive Setup Guide</span>
                 </button>
               </div>
             </div>
@@ -683,6 +1006,134 @@ export const AdminCertificatesManager: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Pending Member Certificate Uploads Section */}
+      {pendingCertificates.length > 0 && (
+        <div className="bg-amber-50/80 border-2 border-amber-300 rounded-2xl p-5 shadow-xs animate-in fade-in">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4 pb-3 border-b border-amber-200">
+            <div className="flex items-center gap-2">
+              <div className="p-2 bg-amber-500 text-white rounded-xl shadow-xs">
+                <Clock className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="font-black text-amber-950 text-sm sm:text-base flex items-center gap-2">
+                  <span>Member Uploads Pending Admin Approval</span>
+                  <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-amber-200 text-amber-900 border border-amber-300">
+                    {pendingCertificates.length} Awaiting Review
+                  </span>
+                </h3>
+                <p className="text-[11px] text-amber-800 mt-0.5">
+                  Approve to certify the file in Google Drive and mark attendance. Reject to permanently delete the file from Google Drive.
+                </p>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={loadPendingCertificates}
+              disabled={isLoadingPending}
+              className="px-3 py-1.5 bg-white hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer self-start sm:self-auto"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isLoadingPending ? 'animate-spin' : ''}`} />
+              <span>Refresh Pending</span>
+            </button>
+          </div>
+
+          <div className="overflow-x-auto bg-white rounded-xl border border-amber-200">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-amber-100/70 text-amber-950 font-bold border-b border-amber-200">
+                <tr>
+                  <th className="p-3">Member Details</th>
+                  <th className="p-3">Event / Workshop</th>
+                  <th className="p-3">File Name (ID Match)</th>
+                  <th className="p-3">Uploaded Date</th>
+                  <th className="p-3">Size</th>
+                  <th className="p-3 text-right">Approval Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-amber-100">
+                {pendingCertificates.map((cert) => {
+                  const isProcessing = processingPendingId === cert.id;
+                  return (
+                    <tr key={cert.id} className="hover:bg-amber-50/40 transition-colors">
+                      <td className="p-3">
+                        <span className="font-bold text-slate-900 block">{cert.memberName || 'NMO Member'}</span>
+                        <span className="font-mono text-[11px] text-red-700 font-bold bg-red-50 px-1.5 py-0.5 rounded border border-red-200 inline-block mt-0.5">
+                          {cert.membershipNumber || 'Unassigned'}
+                        </span>
+                      </td>
+
+                      <td className="p-3">
+                        <span className="text-slate-800 font-semibold block">{cert.eventTitle || 'General Certificate'}</span>
+                        {cert.eventId && <span className="text-[10px] text-slate-400 font-mono">ID: {cert.eventId}</span>}
+                      </td>
+
+                      <td className="p-3">
+                        <span className="font-mono text-slate-700 font-medium block truncate max-w-[200px]" title={cert.name}>
+                          {cert.name}
+                        </span>
+                        <span className="text-[10px] text-amber-700 font-semibold block mt-0.5">
+                          Pending Drive Certification
+                        </span>
+                      </td>
+
+                      <td className="p-3 font-mono text-slate-500">
+                        {cert.createdTime ? new Date(cert.createdTime).toLocaleDateString() : 'Just now'}
+                      </td>
+
+                      <td className="p-3 font-mono text-slate-600">
+                        {cert.size || '--'}
+                      </td>
+
+                      <td className="p-3 text-right whitespace-nowrap">
+                        <div className="flex items-center justify-end gap-1.5">
+                          {/* Preview / View Link */}
+                          {(cert.webViewLink || cert.id) && (
+                            <a
+                              href={cert.webViewLink || `/api/drive/file/${cert.id}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
+                              title="Preview certificate file"
+                            >
+                              <Eye className="w-3.5 h-3.5" />
+                              <span className="hidden md:inline">Preview</span>
+                            </a>
+                          )}
+
+                          {/* Approve Button */}
+                          <button
+                            type="button"
+                            onClick={() => handleApprovePending(cert)}
+                            disabled={isProcessing}
+                            className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg text-xs font-bold flex items-center gap-1 transition-colors shadow-xs cursor-pointer"
+                            title="Approve upload and store permanently in Drive"
+                          >
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                            <span>{isProcessing ? 'Approving...' : 'Approve'}</span>
+                          </button>
+
+                          {/* Reject & Delete Button */}
+                          <button
+                            type="button"
+                            onClick={() => handleRejectPending(cert)}
+                            disabled={isProcessing}
+                            className="px-3 py-1.5 bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white rounded-lg text-xs font-bold flex items-center gap-1 transition-colors shadow-xs cursor-pointer"
+                            title="Reject and permanently delete file from Google Drive"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>{isProcessing ? 'Deleting...' : 'Reject & Delete'}</span>
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* Main Files Table */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
@@ -1008,6 +1459,18 @@ export const AdminCertificatesManager: React.FC = () => {
         isOpen={showGuideModal}
         onClose={() => setShowGuideModal(false)}
         onConnectNow={handleConnect}
+        initialTab={guideInitialTab}
+        onManualConnectSuccess={async () => {
+          setIsConnected(true);
+          setSavedAccount(getSavedDriveAccount());
+          setTokenHealth('valid');
+          await loadSubfolders();
+          await handleScanFolder();
+          setFeedback({
+            message: 'Connected with Google Drive using manual token! Certificate records are active.',
+            type: 'success'
+          });
+        }}
       />
     </div>
   );

@@ -37,6 +37,7 @@ import { NmoLogo } from './NmoLogo';
 import { MemberCertificatesTab } from './MemberCertificatesTab';
 import { UploadCertificateModal } from './UploadCertificateModal';
 import { ShowCertificateModal } from './ShowCertificateModal';
+import { setMemberIdCookie } from '../lib/memberCookie';
 
 interface MemberDashboardProps {
   initialTab?: 'dashboard' | 'id-card' | 'profile' | 'events' | 'history' | 'certificates' | 'alerts';
@@ -74,6 +75,13 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
       setActiveTabState(initialTab);
     }
   }, [initialTab]);
+
+  React.useEffect(() => {
+    const memNo = currentMember?.membershipNumber || currentUser?.membershipNumber;
+    if (memNo) {
+      setMemberIdCookie(memNo);
+    }
+  }, [currentMember?.membershipNumber, currentUser?.membershipNumber]);
 
   // Certificate Modal States
   const [isUploadModalOpen, setIsUploadModalOpen] = useState<boolean>(false);
@@ -491,18 +499,14 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
                           </div>
 
                           <div className="text-right shrink-0">
-                            <span
-                              className={`text-[11px] font-bold px-2 py-0.5 rounded ${
-                                reg.registrationStatus === 'Approved'
-                                  ? 'bg-emerald-100 text-emerald-800'
-                                  : 'bg-amber-100 text-amber-800'
-                              }`}
-                            >
-                              {reg.registrationStatus}
+                            <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200">
+                              Registered
                             </span>
-                            <span className="block text-[10px] text-slate-500 mt-1">
-                              Attendance: <strong>{reg.attendanceStatus}</strong>
-                            </span>
+                            {reg.attendanceStatus === 'Attended' && (
+                              <span className="block text-[10px] text-blue-700 font-bold mt-1">
+                                ✓ Present (Attended)
+                              </span>
+                            )}
                           </div>
                         </div>
                       );
@@ -834,20 +838,16 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
                               <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
                               <span>Registered</span>
                             </div>
-                            <span
-                              className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                                reg?.registrationStatus === 'Approved'
-                                  ? 'bg-emerald-200/80 text-emerald-900'
-                                  : 'bg-amber-100 text-amber-900'
-                              }`}
-                            >
-                              {reg?.registrationStatus || 'Pending Review'}
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-200/80 text-emerald-900">
+                              Confirmed
                             </span>
                           </div>
-                          <div className="flex items-center justify-between text-[10px] text-slate-500">
-                            <span>Attendance:</span>
-                            <strong className="text-slate-700">{reg?.attendanceStatus || 'Pending'}</strong>
-                          </div>
+                          {reg?.attendanceStatus === 'Attended' && (
+                            <div className="flex items-center justify-between text-[10px] text-blue-700 font-bold">
+                              <span>Attendance:</span>
+                              <span>✓ Present (Attended)</span>
+                            </div>
+                          )}
                           <button
                             type="button"
                             onClick={() => handleCancelRegistration(evt.eventId, evt.title)}

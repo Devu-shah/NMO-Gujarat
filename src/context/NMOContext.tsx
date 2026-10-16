@@ -37,6 +37,7 @@ import {
   createEventSubfolderInDrive,
   getDriveAccessToken
 } from '../lib/googleDrive';
+import { setMemberIdCookie, clearMemberIdCookie } from '../lib/memberCookie';
 
 interface NMOContextType {
   // Auth state
@@ -288,6 +289,12 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Authenticated user state
   const [currentUser, setCurrentUser] = useState<NMOUserRecord | null>(null);
+
+  useEffect(() => {
+    if (currentUser?.membershipNumber) {
+      setMemberIdCookie(currentUser.membershipNumber);
+    }
+  }, [currentUser?.membershipNumber]);
 
   // Collection 1: "Users" (Empty clean initial state, no random fake records)
   const [users, setUsers] = useState<NMOUserRecord[]>(() => {
@@ -959,6 +966,7 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       await firebaseSignOut(auth);
     } catch {}
+    clearMemberIdCookie();
     setCurrentUser(null);
   };
 
@@ -1799,7 +1807,8 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // --- Embedded Participants Workflow ---
-  // Member registers -> Pending -> Committee Approves/Rejects -> Attendance Attended/Not Attended
+  // All users are allowed to register for events directly. No approval needed from backend;
+  // they are allowed and registered immediately. No presence/absence required for registration.
   const registerForEvent = async (
     eventId: string,
     membershipNumber: string,
@@ -1819,6 +1828,7 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const memberRec = users.find((u) => u.membershipNumber.toUpperCase() === cleanNo);
 
+    // Immediate confirmed registration: no pending approval needed
     const newParticipant: EventParticipant = {
       membershipNumber: cleanNo,
       uid: currentUser?.uid,
@@ -1828,7 +1838,7 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       medicalCollege: memberRec?.medicalCollege || '',
       prant: (memberRec?.prant || targetEvent.prant) as any,
       registrationDate: new Date().toISOString().split('T')[0],
-      approvalStatus: 'Pending',
+      approvalStatus: 'Approved',
       attendanceStatus: 'Pending'
     };
 
@@ -1841,7 +1851,10 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     await updateEvent(updatedEvent);
 
-    // Automatically update status in the Firestore 'event_registrations' collection
+    // Save membership ID in cookie for strict verification
+    setMemberIdCookie(cleanNo);
+
+    // Automatically store status in the Firestore 'event_registrations' collection
     const regDocId = `${eventId}_${cleanNo}`;
     const registrationRecord = {
       id: regDocId,
@@ -1860,7 +1873,8 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       prant: newParticipant.prant,
       registrationDate: newParticipant.registrationDate,
       status: 'Registered',
-      registrationStatus: 'Pending',
+      registrationStatus: 'Approved',
+      approvalStatus: 'Approved',
       attendanceStatus: 'Pending',
       rsvpStatus: 'Attending',
       createdAt: new Date().toISOString(),
@@ -1877,7 +1891,7 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       'EVENT_REGISTRATION',
       'EVENT',
       eventId,
-      `Member ${newParticipant.name} (${cleanNo}) registered for "${targetEvent.title}". Status: Pending Review.`
+      `Member ${newParticipant.name} (${cleanNo}) registered for "${targetEvent.title}". Status: Registered & Confirmed.`
     );
   };
 

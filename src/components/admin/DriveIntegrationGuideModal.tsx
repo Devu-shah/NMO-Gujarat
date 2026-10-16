@@ -13,35 +13,68 @@ import {
   Terminal,
   X,
   Sparkles,
-  Info
+  Info,
+  AlertCircle,
+  Lock,
+  ArrowRight
 } from 'lucide-react';
-import { NMO_ROOT_DRIVE_FOLDER_ID, NMO_ROOT_DRIVE_FOLDER_NAME, NMO_ROOT_DRIVE_URL } from '../../lib/googleDrive';
+import {
+  NMO_ROOT_DRIVE_FOLDER_ID,
+  NMO_ROOT_DRIVE_FOLDER_NAME,
+  NMO_ROOT_DRIVE_URL,
+  connectWithManualToken
+} from '../../lib/googleDrive';
+import { auth } from '../../lib/firebase';
+
+export type GuideTab =
+  | 'invalid_secret'
+  | 'quick_guide'
+  | 'access_denied'
+  | 'refresh_token'
+  | 'manual_token'
+  | 'diagnostics';
 
 interface DriveIntegrationGuideModalProps {
   isOpen: boolean;
   onClose: () => void;
   onConnectNow?: () => void;
+  initialTab?: GuideTab;
+  onManualConnectSuccess?: () => void;
 }
 
 export const DriveIntegrationGuideModal: React.FC<DriveIntegrationGuideModalProps> = ({
   isOpen,
   onClose,
-  onConnectNow
+  onConnectNow,
+  initialTab = 'invalid_secret',
+  onManualConnectSuccess
 }) => {
   const [copiedUri, setCopiedUri] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'quick_guide' | 'access_denied' | 'refresh_token' | 'diagnostics'>('quick_guide');
+  const [activeTab, setActiveTab] = useState<GuideTab>(initialTab);
   const [serverStatus, setServerStatus] = useState<any>(null);
   const [isLoadingStatus, setIsLoadingStatus] = useState(false);
+
+  // Manual Token Form State
+  const [manualAccessToken, setManualAccessToken] = useState('');
+  const [manualRefreshToken, setManualRefreshToken] = useState('');
+  const [manualEmail, setManualEmail] = useState('');
+  const [isVerifyingManual, setIsVerifyingManual] = useState(false);
+  const [manualFeedback, setManualFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
   const origin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000';
   const redirectUri = `${origin}/api/auth/google/callback`;
   const localhostRedirectUri = 'http://localhost:3000/api/auth/google/callback';
+  const currentProjectId = auth?.app?.options?.projectId || 'gen-lang-client-0484899202';
+  const currentAuthDomain = auth?.app?.options?.authDomain || `${currentProjectId}.firebaseapp.com`;
+  const firebaseHandlerUri = `https://${currentAuthDomain}/__/auth/handler`;
 
   useEffect(() => {
     if (isOpen) {
+      setActiveTab(initialTab);
       checkStatus();
+      setManualFeedback(null);
     }
-  }, [isOpen]);
+  }, [isOpen, initialTab]);
 
   const checkStatus = async () => {
     setIsLoadingStatus(true);
@@ -64,11 +97,50 @@ export const DriveIntegrationGuideModal: React.FC<DriveIntegrationGuideModalProp
     setTimeout(() => setCopiedUri(null), 2500);
   };
 
+  const handleManualTokenSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!manualAccessToken.trim()) {
+      setManualFeedback({ message: 'Please enter a Google Access Token.', type: 'error' });
+      return;
+    }
+
+    setIsVerifyingManual(true);
+    setManualFeedback(null);
+
+    try {
+      const session = await connectWithManualToken(
+        manualAccessToken.trim(),
+        manualRefreshToken.trim() || undefined,
+        manualEmail.trim() || undefined
+      );
+
+      setManualFeedback({
+        message: `Connected successfully for ${session.accountEmail}! Certificates will sync with Drive.`,
+        type: 'success'
+      });
+
+      if (onManualConnectSuccess) {
+        onManualConnectSuccess();
+      }
+
+      setTimeout(() => {
+        onClose();
+      }, 1500);
+    } catch (err: any) {
+      setManualFeedback({
+        message: err.message || 'Failed to verify manual token. Please ensure token is valid and has Drive scopes.',
+        type: 'error'
+      });
+    } finally {
+      setIsVerifyingManual(false);
+    }
+  };
+
   if (!isOpen) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/80 backdrop-blur-xs animate-in fade-in duration-200">
-      <div className="bg-white rounded-3xl max-w-3xl w-full max-h-[92vh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden">
+      <div className="bg-white rounded-3xl max-w-4xl w-full max-h-[92vh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden">
         {/* Header */}
         <div className="bg-gradient-to-r from-slate-900 via-slate-800 to-red-950 text-white p-5 sm:p-6 flex items-start justify-between gap-4 border-b border-slate-800">
           <div className="flex items-start gap-3.5">
@@ -78,14 +150,14 @@ export const DriveIntegrationGuideModal: React.FC<DriveIntegrationGuideModalProp
             <div>
               <div className="flex items-center gap-2">
                 <h3 className="text-lg sm:text-xl font-black text-white">
-                  Google Drive Setup & Troubleshooting Guide
+                  Google Drive Integration & Setup Guide
                 </h3>
                 <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-400 text-slate-950">
-                  Official
+                  Solutions & Diagnostics
                 </span>
               </div>
-              <p className="text-xs text-slate-300 mt-1 max-w-xl leading-relaxed">
-                Step-by-step solutions for Refresh Token generation, "Access Denied" fixes, and Member ID certificate integration.
+              <p className="text-xs text-slate-300 mt-1 max-w-2xl leading-relaxed">
+                Fix "Invalid Client Secret" errors, resolve Access Denied, understand Refresh Tokens, or connect directly with manual tokens.
               </p>
             </div>
           </div>
@@ -99,55 +171,200 @@ export const DriveIntegrationGuideModal: React.FC<DriveIntegrationGuideModalProp
         </div>
 
         {/* Tab Navigation */}
-        <div className="grid grid-cols-4 border-b border-slate-200 bg-slate-50 text-xs font-bold text-slate-600">
+        <div className="grid grid-cols-2 sm:grid-cols-5 border-b border-slate-200 bg-slate-50 text-xs font-bold text-slate-600 overflow-x-auto">
+          <button
+            type="button"
+            onClick={() => setActiveTab('invalid_secret')}
+            className={`py-3 px-3 text-center cursor-pointer border-b-2 transition-all flex items-center justify-center gap-1.5 ${
+              activeTab === 'invalid_secret'
+                ? 'border-red-600 text-red-700 bg-white'
+                : 'border-transparent hover:text-slate-900 hover:bg-slate-100'
+            }`}
+          >
+            <span className="w-2 h-2 rounded-full bg-red-600 shrink-0"></span>
+            <span>Fix Invalid Secret</span>
+          </button>
           <button
             type="button"
             onClick={() => setActiveTab('quick_guide')}
-            className={`py-3 px-2 sm:px-4 text-center cursor-pointer border-b-2 transition-all ${
+            className={`py-3 px-3 text-center cursor-pointer border-b-2 transition-all ${
               activeTab === 'quick_guide'
                 ? 'border-red-600 text-red-700 bg-white'
                 : 'border-transparent hover:text-slate-900 hover:bg-slate-100'
             }`}
           >
-            1. Setup Steps
+            Setup Steps
           </button>
           <button
             type="button"
             onClick={() => setActiveTab('access_denied')}
-            className={`py-3 px-2 sm:px-4 text-center cursor-pointer border-b-2 transition-all ${
+            className={`py-3 px-3 text-center cursor-pointer border-b-2 transition-all ${
               activeTab === 'access_denied'
                 ? 'border-red-600 text-red-700 bg-white'
                 : 'border-transparent hover:text-slate-900 hover:bg-slate-100'
             }`}
           >
-            2. Fix "Access Denied"
+            Fix "Access Denied"
           </button>
           <button
             type="button"
             onClick={() => setActiveTab('refresh_token')}
-            className={`py-3 px-2 sm:px-4 text-center cursor-pointer border-b-2 transition-all ${
+            className={`py-3 px-3 text-center cursor-pointer border-b-2 transition-all ${
               activeTab === 'refresh_token'
                 ? 'border-red-600 text-red-700 bg-white'
                 : 'border-transparent hover:text-slate-900 hover:bg-slate-100'
             }`}
           >
-            3. Refresh Token Info
+            Refresh Token Info
           </button>
           <button
             type="button"
-            onClick={() => setActiveTab('diagnostics')}
-            className={`py-3 px-2 sm:px-4 text-center cursor-pointer border-b-2 transition-all ${
-              activeTab === 'diagnostics'
+            onClick={() => setActiveTab('manual_token')}
+            className={`py-3 px-3 text-center cursor-pointer border-b-2 transition-all ${
+              activeTab === 'manual_token'
                 ? 'border-red-600 text-red-700 bg-white'
                 : 'border-transparent hover:text-slate-900 hover:bg-slate-100'
             }`}
           >
-            4. Diagnostics
+            Quick Connect (Token)
           </button>
         </div>
 
         {/* Tab Content */}
         <div className="p-5 sm:p-6 overflow-y-auto space-y-6 flex-1 text-slate-800 text-xs sm:text-sm">
+          {/* TAB 0: FIX INVALID CLIENT SECRET */}
+          {activeTab === 'invalid_secret' && (
+            <div className="space-y-5 animate-in fade-in duration-150">
+              {/* Highlight Box with User Error */}
+              <div className="p-4 rounded-2xl bg-red-50 border-2 border-red-300 space-y-2.5">
+                <div className="flex items-start gap-2.5">
+                  <AlertCircle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+                  <div>
+                    <h4 className="font-bold text-red-950 text-sm">
+                      Firebase Error: "The provided client secret is invalid" (auth/invalid-credential)
+                    </h4>
+                    <p className="text-xs text-red-800 mt-1 leading-relaxed">
+                      Redirect URI: <code className="bg-red-100 px-1 py-0.5 rounded font-mono">{firebaseHandlerUri}</code>
+                    </p>
+                  </div>
+                </div>
+
+                <div className="p-3 bg-white/90 rounded-xl border border-red-200 text-xs text-slate-700 leading-relaxed">
+                  <strong>Why this happened:</strong> When you clicked "Authorize Google Drive", Firebase Authentication opened Google login. After you logged in, Firebase's backend server (<code>{firebaseHandlerUri}</code>) tried to trade the authorization code with Google using the <strong>Web Client Secret</strong> configured in Firebase Console. Google rejected it with <code>HTTP 401 Unauthorized: The provided client secret is invalid</code> because the secret in Firebase is incorrect, expired, or mismatching.
+                </div>
+              </div>
+
+              {/* Exact 3-Step Fix */}
+              <div className="space-y-3.5">
+                <h4 className="font-bold text-slate-900 text-sm flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                  <span>How to Fix in 2 Minutes:</span>
+                </h4>
+
+                {/* Step 1 */}
+                <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-xs">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="w-6 h-6 rounded-full bg-red-600 text-white flex items-center justify-center font-bold text-xs shrink-0">
+                      1
+                    </span>
+                    <h5 className="font-bold text-slate-900 text-xs sm:text-sm">
+                      Copy the Web Client Secret from Google Cloud Console
+                    </h5>
+                  </div>
+                  <p className="text-xs text-slate-600 mb-3 pl-8 leading-relaxed">
+                    Open your Google Cloud Project Credentials. Look for the <strong>OAuth 2.0 Client IDs</strong> list. Open your <strong>Web client</strong> (usually titled <em>"Web client (auto created by Google Service)"</em> or your Web application client). Copy the <strong>Client Secret</strong> value.
+                  </p>
+                  <div className="pl-8 flex flex-wrap items-center gap-2">
+                    <a
+                      href="https://console.cloud.google.com/apis/credentials"
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-900 text-white rounded-lg text-xs font-semibold hover:bg-slate-800 cursor-pointer"
+                    >
+                      <span>Open Google Cloud Credentials</span>
+                      <ExternalLink className="w-3.5 h-3.5 text-slate-300" />
+                    </a>
+                  </div>
+                </div>
+
+                {/* Step 2 */}
+                <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-xs">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="w-6 h-6 rounded-full bg-red-600 text-white flex items-center justify-center font-bold text-xs shrink-0">
+                      2
+                    </span>
+                    <h5 className="font-bold text-slate-900 text-xs sm:text-sm">
+                      Paste Secret in Firebase Console (Sign-in Providers &gt; Google)
+                    </h5>
+                  </div>
+                  <p className="text-xs text-slate-600 mb-3 pl-8 leading-relaxed">
+                    In Firebase Console under <strong>Authentication &gt; Sign-in method &gt; Google</strong> provider, expand the <strong>Web SDK configuration</strong> accordion. Paste the exact Client Secret into the <strong>Web client secret</strong> input box and click <strong>SAVE</strong>.
+                  </p>
+                  <div className="pl-8 flex flex-wrap items-center gap-2">
+                    <a
+                      href={`https://console.firebase.google.com/project/${currentProjectId}/authentication/providers`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-700 text-white rounded-lg text-xs font-semibold hover:bg-red-800 cursor-pointer"
+                    >
+                      <span>Open Firebase Console &gt; Google Provider</span>
+                      <ExternalLink className="w-3.5 h-3.5" />
+                    </a>
+                  </div>
+                </div>
+
+                {/* Step 3 */}
+                <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-xs">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="w-6 h-6 rounded-full bg-red-600 text-white flex items-center justify-center font-bold text-xs shrink-0">
+                      3
+                    </span>
+                    <h5 className="font-bold text-slate-900 text-xs sm:text-sm">
+                      Verify Authorized Redirect URI in Google Cloud Console
+                    </h5>
+                  </div>
+                  <p className="text-xs text-slate-600 mb-3 pl-8 leading-relaxed">
+                    In your Google Cloud OAuth 2.0 Web Client settings, ensure this Firebase redirect handler is listed under <strong>Authorized redirect URIs</strong>:
+                  </p>
+                  <div className="pl-8 flex items-center gap-2">
+                    <code className="p-2 bg-slate-100 rounded-lg text-xs font-mono text-slate-900 select-all border border-slate-200 flex-1 truncate">
+                      {firebaseHandlerUri}
+                    </code>
+                    <button
+                      type="button"
+                      onClick={() => copyToClipboard(firebaseHandlerUri, 'handler')}
+                      className="px-3 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-lg text-xs font-bold cursor-pointer flex items-center gap-1.5 shrink-0"
+                    >
+                      {copiedUri === 'handler' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                      <span>{copiedUri === 'handler' ? 'Copied' : 'Copy URI'}</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Direct Alternative */}
+                <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 space-y-2">
+                  <div className="flex items-center gap-2 text-emerald-900 font-bold text-xs sm:text-sm">
+                    <Sparkles className="w-4 h-4 text-emerald-700" />
+                    <span>Best Alternative: Bypass Firebase Entirely via Direct Server OAuth</span>
+                  </div>
+                  <p className="text-xs text-emerald-800 leading-relaxed">
+                    You do not even need Firebase Auth for Google Drive! If you configure <code>GOOGLE_DRIVE_CLIENT_ID</code> and <code>GOOGLE_DRIVE_CLIENT_SECRET</code> in your server <code>.env</code> file, our system uses direct server-side OAuth (<code>/api/auth/google/start</code>), completely bypassing Firebase Auth and automatically generating a persistent refresh token!
+                  </p>
+                  <div>
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('manual_token')}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-xs font-semibold cursor-pointer"
+                    >
+                      <span>Or Connect Instantly Using a Manual Token</span>
+                      <ArrowRight className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* TAB 1: QUICK GUIDE */}
           {activeTab === 'quick_guide' && (
             <div className="space-y-5 animate-in fade-in duration-150">
@@ -380,12 +597,12 @@ export const DriveIntegrationGuideModal: React.FC<DriveIntegrationGuideModalProp
                     Add "{origin.replace(/https?:\/\//, '')}" to Firebase Authorized Domains
                   </h4>
                   <p className="text-xs text-slate-600 leading-relaxed mb-3">
-                    If you deploy to Firebase Hosting or a custom domain (like <code>nmo-gujarat.web.app</code>), Firebase Auth blocks all Google login popups until that domain is added to Authorized Domains.
+                    If you deploy to Firebase Hosting or a custom domain, Firebase Auth blocks all Google login popups until that domain is added to Authorized Domains.
                   </p>
                   <ol className="list-decimal list-inside text-xs text-slate-700 space-y-1.5 pl-2 mb-3">
                     <li>Open <strong>Firebase Console &gt; Authentication &gt; Settings</strong> tab.</li>
                     <li>Scroll to <strong>Authorized domains</strong> and click <strong>Add domain</strong>.</li>
-                    <li>Enter <strong>{origin.replace(/https?:\/\//, '')}</strong> (and <code>nmo-gujarat.firebaseapp.com</code>).</li>
+                    <li>Enter <strong>{origin.replace(/https?:\/\//, '')}</strong>.</li>
                     <li>Click <strong>Done</strong>. Google sign-in popups will now work immediately!</li>
                   </ol>
                   <div className="flex flex-wrap items-center gap-2">
@@ -398,7 +615,7 @@ export const DriveIntegrationGuideModal: React.FC<DriveIntegrationGuideModalProp
                       <span>{copiedUri === 'domain' ? 'Copied' : `Copy: ${origin.replace(/https?:\/\//, '')}`}</span>
                     </button>
                     <a
-                      href="https://console.firebase.google.com/project/favorable-shine-4ghtt/authentication/settings"
+                      href={`https://console.firebase.google.com/project/${currentProjectId}/authentication/settings`}
                       target="_blank"
                       rel="noreferrer"
                       className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-700 text-white rounded-lg text-xs font-semibold hover:bg-red-800 cursor-pointer"
@@ -447,16 +664,16 @@ export const DriveIntegrationGuideModal: React.FC<DriveIntegrationGuideModalProp
                 </div>
               </div>
 
-              {/* Optional OAuth Playground instructions for headless servers */}
+              {/* OAuth Playground instructions */}
               <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-2.5">
                 <div className="flex items-center gap-2">
                   <Terminal className="w-4 h-4 text-slate-700" />
                   <h4 className="font-bold text-slate-900 text-xs sm:text-sm">
-                    Optional: Generating a Manual Refresh Token via Google OAuth Playground
+                    Generating a Manual Refresh Token via Google OAuth Playground
                   </h4>
                 </div>
                 <p className="text-xs text-slate-600 leading-relaxed">
-                  If you ever need to manually generate a refresh token for the <code>GOOGLE_DRIVE_REFRESH_TOKEN</code> environment variable:
+                  If you want to manually generate a token using Google OAuth Playground:
                 </p>
                 <ol className="list-decimal list-inside text-xs text-slate-700 space-y-1 pl-2">
                   <li>Open <a href="https://developers.google.com/oauthplayground/" target="_blank" rel="noreferrer" className="text-blue-600 underline font-semibold">developers.google.com/oauthplayground</a></li>
@@ -464,13 +681,117 @@ export const DriveIntegrationGuideModal: React.FC<DriveIntegrationGuideModalProp
                   <li>In Step 1 on the left, scroll to <strong>Drive API v3</strong> and select <code>https://www.googleapis.com/auth/drive</code>.</li>
                   <li>Click <strong>Authorize APIs</strong> and approve the Google login.</li>
                   <li>In Step 2, click <strong>Exchange authorization code for tokens</strong>.</li>
-                  <li>Copy the resulting <code>Refresh token</code> field and paste it into your server environment as <code>GOOGLE_DRIVE_REFRESH_TOKEN</code>!</li>
+                  <li>Copy the resulting <code>Access token</code> or <code>Refresh token</code> and paste it into the <strong>"Quick Connect (Token)"</strong> tab!</li>
                 </ol>
               </div>
             </div>
           )}
 
-          {/* TAB 4: DIAGNOSTICS */}
+          {/* TAB 4: QUICK CONNECT VIA MANUAL TOKEN */}
+          {activeTab === 'manual_token' && (
+            <div className="space-y-4 animate-in fade-in duration-150">
+              <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 flex items-start gap-3">
+                <Lock className="w-5 h-5 text-emerald-700 shrink-0 mt-0.5" />
+                <div>
+                  <h4 className="font-bold text-emerald-950 text-sm mb-1">
+                    Connect Immediately with an OAuth Token
+                  </h4>
+                  <p className="text-xs text-emerald-900 leading-relaxed">
+                    If Firebase Auth or Google popups are giving you errors, you can bypass all popup authentication by pasting an Access Token or Refresh Token from the Google OAuth Playground or Google Cloud Shell.
+                  </p>
+                </div>
+              </div>
+
+              {manualFeedback && (
+                <div
+                  className={`p-3.5 rounded-xl text-xs font-semibold flex items-center gap-2 border ${
+                    manualFeedback.type === 'success'
+                      ? 'bg-emerald-50 text-emerald-900 border-emerald-300'
+                      : 'bg-red-50 text-red-900 border-red-300'
+                  }`}
+                >
+                  {manualFeedback.type === 'success' ? (
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                  ) : (
+                    <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+                  )}
+                  <span>{manualFeedback.message}</span>
+                </div>
+              )}
+
+              <form onSubmit={handleManualTokenSubmit} className="space-y-4 bg-white p-5 rounded-2xl border border-slate-200 shadow-xs">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Google OAuth Access Token <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="password"
+                    value={manualAccessToken}
+                    onChange={(e) => setManualAccessToken(e.target.value)}
+                    placeholder="ya29.a0AfH6SM..."
+                    required
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-xs font-mono focus:outline-hidden focus:ring-2 focus:ring-red-500"
+                  />
+                  <p className="text-[11px] text-slate-500 mt-1">
+                    Generated from Google OAuth Playground with scope <code>https://www.googleapis.com/auth/drive</code>
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                      Refresh Token (Optional, for auto-renewal)
+                    </label>
+                    <input
+                      type="password"
+                      value={manualRefreshToken}
+                      onChange={(e) => setManualRefreshToken(e.target.value)}
+                      placeholder="1//04..."
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-xs font-mono focus:outline-hidden focus:ring-2 focus:ring-red-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                      Account Email (Optional)
+                    </label>
+                    <input
+                      type="email"
+                      value={manualEmail}
+                      onChange={(e) => setManualEmail(e.target.value)}
+                      placeholder="devanshshah768@gmail.com"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-xs focus:outline-hidden focus:ring-2 focus:ring-red-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="pt-2 flex items-center justify-between">
+                  <span className="text-[11px] text-slate-500">
+                    Validated against Google userinfo and saved persistently.
+                  </span>
+                  <button
+                    type="submit"
+                    disabled={isVerifyingManual || !manualAccessToken.trim()}
+                    className="px-5 py-2.5 bg-red-700 hover:bg-red-800 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-all shadow-xs flex items-center gap-1.5 cursor-pointer"
+                  >
+                    {isVerifyingManual ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        <span>Verifying with Google...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Check className="w-3.5 h-3.5" />
+                        <span>Verify & Connect Drive</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
+
+          {/* TAB 5: DIAGNOSTICS */}
           {activeTab === 'diagnostics' && (
             <div className="space-y-4 animate-in fade-in duration-150">
               <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-xs space-y-3">
@@ -494,9 +815,9 @@ export const DriveIntegrationGuideModal: React.FC<DriveIntegrationGuideModalProp
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                   <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
-                    <span className="text-slate-500 block mb-1">Server OAuth Config:</span>
+                    <span className="text-slate-500 block mb-1">Server Direct OAuth Config:</span>
                     <span className={`font-bold ${serverStatus?.oauthConfigured ? 'text-emerald-700' : 'text-amber-700'}`}>
-                      {serverStatus?.oauthConfigured ? '✓ Configured' : '⚠ Missing Client ID/Secret'}
+                      {serverStatus?.oauthConfigured ? '✓ Configured' : '⚠ Missing GOOGLE_DRIVE_CLIENT_ID / SECRET'}
                     </span>
                   </div>
 
@@ -515,7 +836,7 @@ export const DriveIntegrationGuideModal: React.FC<DriveIntegrationGuideModalProp
                   </div>
 
                   <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 sm:col-span-2">
-                    <span className="text-slate-500 block mb-1">Registered Redirect URI:</span>
+                    <span className="text-slate-500 block mb-1">Registered Direct OAuth Redirect URI:</span>
                     <div className="flex items-center justify-between gap-2 mt-1">
                       <code className="text-slate-900 font-mono text-[11px] truncate select-all">
                         {redirectUri}

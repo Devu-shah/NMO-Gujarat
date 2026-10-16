@@ -7,6 +7,7 @@ import {
   NMO_ROOT_DRIVE_FOLDER_NAME,
   DriveCertificateFile
 } from '../lib/googleDrive';
+import { setMemberIdCookie, isCertificateMatchingCookie } from '../lib/memberCookie';
 import {
   Award,
   X,
@@ -70,12 +71,13 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
     setImageLoaded(false);
     setImageError(false);
     try {
+      // Save membership ID in persistent cookie and compare
+      setMemberIdCookie(targetMemberNo);
       // Mechanism: Call the membership ID to retrieve only this member's certificates
       const results = await fetchCertificatesByMembershipNumber(targetMemberNo);
       // Strictly filter to ensure only this specific member's certificates are shown
       const strictlyFiltered = results.filter((c) => {
-        const certId = (c.membershipNumber || '').trim().toUpperCase();
-        return certId === targetMemberNo || c.name.toUpperCase().includes(targetMemberNo);
+        return isCertificateMatchingCookie(c, targetMemberNo);
       });
       setCertificates(strictlyFiltered);
       setSelectedIndex(0);

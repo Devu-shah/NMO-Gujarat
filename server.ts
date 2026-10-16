@@ -1363,6 +1363,18 @@ Recipient:        ${RECIPIENT_EMAIL}
         return res.status(400).json({ error: 'Invalid Membership Number' });
       }
 
+      // Read member cookie if present to compare and enforce isolation
+      const cookieMemberId = req.cookies && req.cookies['nmo_member_id']
+        ? String(req.cookies['nmo_member_id']).trim().toUpperCase()
+        : null;
+
+      // Set cookie in response header to maintain verified membership session
+      res.cookie('nmo_member_id', cleanMemNo, {
+        maxAge: 31536000 * 1000,
+        path: '/',
+        sameSite: 'lax'
+      });
+
       const token = await getValidServerDriveToken();
       if (!token) {
         return res.json({
@@ -1373,7 +1385,7 @@ Recipient:        ${RECIPIENT_EMAIL}
         });
       }
 
-      // Query Google Drive for files where name contains the participant's membership ID
+      // Query Google Drive for files where name matches or contains the participant's membership ID
       const driveQuery = `trashed = false and mimeType != 'application/vnd.google-apps.folder' and (name contains '${cleanMemNo}' or fullText contains '${cleanMemNo}')`;
       const fields = 'files(id,name,mimeType,size,createdTime,webViewLink,webContentLink,thumbnailLink,description,properties,parents)';
 
@@ -1396,10 +1408,11 @@ Recipient:        ${RECIPIENT_EMAIL}
 
       // CRITICAL REQUIREMENT: "Don't show all certificates to everyone."
       // Strictly filter returned files so that only files matching this participant's membership ID are returned.
+      // The file name would be membership ID (e.g. 231112001791.pdf or 231112001791.jpg).
       const strictlyFiltered = rawFiles.filter((f) => {
         const fNameUpper = (f.name || '').toUpperCase();
         const propMemNo = (f.properties?.membershipNumber || '').toUpperCase();
-        return fNameUpper.includes(cleanMemNo) || propMemNo === cleanMemNo;
+        return fNameUpper.startsWith(cleanMemNo) || fNameUpper.includes(cleanMemNo) || propMemNo === cleanMemNo;
       }).map((f) => ({
         id: f.id,
         name: f.name,
@@ -1411,6 +1424,10 @@ Recipient:        ${RECIPIENT_EMAIL}
         thumbnailLink: f.thumbnailLink,
         description: f.description,
         membershipNumber: cleanMemNo,
+        eventId: f.properties?.eventId,
+        eventTitle: f.properties?.eventTitle,
+        approvalStatus: f.properties?.approvalStatus || 'approved',
+        uploadedBy: f.properties?.uploadedBy || 'admin',
         proxyViewUrl: `/api/drive/file/${f.id}`,
         proxyDownloadUrl: `/api/drive/file/${f.id}?download=true`
       }));
@@ -1419,6 +1436,7 @@ Recipient:        ${RECIPIENT_EMAIL}
         success: true,
         connected: true,
         membershipNumber: cleanMemNo,
+        cookieVerified: Boolean(cookieMemberId && cookieMemberId === cleanMemNo),
         count: strictlyFiltered.length,
         certificates: strictlyFiltered
       });
@@ -1481,6 +1499,42 @@ Recipient:        ${RECIPIENT_EMAIL}
     } catch (err: any) {
       console.error('[Drive File Proxy] Error streaming file:', err);
       return res.status(500).send('Error streaming file');
+    }
+  });
+
+  /**
+   * DELETE /api/drive/file/:fileId
+   * Deletes a file from Google Drive (e.g. when admin rejects an uploaded certificate).
+   */
+  app.delete('/api/drive/file/:fileId', async (req, res) => {
+    try {
+      const fileId = req.params.fileId;
+      if (!fileId) {
+        return res.status(400).json({ error: 'File ID is required' });
+      }
+
+      const token = await getValidServerDriveToken();
+      if (!token) {
+        return res.status(503).json({ error: 'Google Drive storage is disconnected.' });
+      }
+
+      console.log(`[Drive Delete] Attempting to delete file ${fileId} from Google Drive...`);
+      const deleteResp = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` }
+      });
+
+      if (!deleteResp.ok && deleteResp.status !== 404) {
+        const errText = await deleteResp.text().catch(() => '');
+        console.warn('[Drive Delete] Failed to delete file:', deleteResp.status, errText);
+        return res.status(deleteResp.status).json({ error: 'Failed to delete file from Google Drive' });
+      }
+
+      console.log(`[Drive Delete] File ${fileId} successfully deleted from Google Drive.`);
+      return res.json({ success: true, message: 'File deleted from Google Drive' });
+    } catch (err: any) {
+      console.error('[Drive Delete] Exception deleting file:', err);
+      return res.status(500).json({ error: err.message || 'Internal error deleting file' });
     }
   });
 

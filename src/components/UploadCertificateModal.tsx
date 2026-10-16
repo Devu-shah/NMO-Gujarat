@@ -119,10 +119,12 @@ export const UploadCertificateModal: React.FC<UploadCertificateModalProps> = ({
         memberName,
         eventId: selectedEventId || undefined,
         eventTitle,
-        targetFolderId
+        targetFolderId,
+        uploadedBy: 'member',
+        approvalStatus: 'pending_approval'
       });
 
-      setSuccessMessage(`Certificate uploaded successfully to Google Drive under Membership ID: ${memberNo}!`);
+      setSuccessMessage(`Certificate uploaded and submitted for Admin Approval! Once verified by an administrator, it will be finalized in Google Drive. If rejected, it will be removed.`);
       if (onSuccess) {
         onSuccess(certResult);
       }
