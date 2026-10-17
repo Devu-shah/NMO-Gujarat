@@ -1,3 +1,4 @@
+import { apiUrl } from '../lib/api';
 import React, { createContext, useContext, useState, useEffect, useMemo } from 'react';
 import {
   NMOUserRecord,
@@ -612,7 +613,7 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       } else {
         // Maintain admin login: Check if Super Admin server-side cookie exists
         try {
-          const resp = await fetch('/api/admin/session', { credentials: 'include' });
+          const resp = await fetch(apiUrl('/api/admin/session'), { credentials: 'include' });
           if (resp.ok) {
             const data = await resp.json();
             if (data.authenticated && data.user) {
@@ -734,22 +735,33 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
 
       setCurrentUser(verifiedAdmin);
-
-      // Maintain login for admins: Store server-side cookie accessible only by superadmin
+          // Request a server-side session using a verified Firebase ID token
       try {
-        await fetch('/api/admin/login', {
+        const idToken = await authUser.getIdToken();
+
+        const response = await fetch(apiUrl('/api/admin/login'), {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${idToken}`,
+          },
           credentials: 'include',
           body: JSON.stringify({
-            email: authenticatedEmail,
             membershipNumber: officialMemNo,
             name: verifiedAdmin.name,
-            uid: verifiedAdmin.uid
-          })
+          }),
         });
+
+        if (!response.ok) {
+          throw new Error(
+            `Admin session creation failed: ${response.status}`
+          );
+        }
       } catch (cookieErr) {
-        console.warn('Notice setting server-side admin cookie:', cookieErr);
+        console.error(
+          'Could not create verified admin session:',
+          cookieErr
+        );
       }
 
       try {
@@ -961,7 +973,7 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const logout = async () => {
     try {
-      await fetch('/api/admin/logout', { method: 'POST', credentials: 'include' });
+      await fetch(apiUrl('/api/admin/logout'), { method: 'POST', credentials: 'include' });
     } catch {}
     try {
       await firebaseSignOut(auth);

@@ -7,8 +7,31 @@ import nodemailer from 'nodemailer';
 import dotenv from 'dotenv';
 import cookieParser from 'cookie-parser';
 import crypto from 'crypto';
+import { initializeApp, cert, getApps } from 'firebase-admin/app';
+import { getAuth } from 'firebase-admin/auth';
 
 dotenv.config();
+
+const firebaseProjectId = process.env.FIREBASE_PROJECT_ID;
+const firebaseClientEmail = process.env.FIREBASE_CLIENT_EMAIL;
+const firebasePrivateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n');
+
+if (!firebaseProjectId || !firebaseClientEmail || !firebasePrivateKey) {
+  throw new Error('Missing Firebase Admin environment variables.');
+}
+
+const firebaseAdminApp = getApps().length
+  ? getApps()[0]
+  : initializeApp({
+      credential: cert({
+        projectId: firebaseProjectId,
+        clientEmail: firebaseClientEmail,
+        privateKey: firebasePrivateKey,
+      }),
+    });
+
+const firebaseAdminAuth = getAuth(firebaseAdminApp);
+
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1200,7 +1223,84 @@ Recipient:        ${RECIPIENT_EMAIL}
    * Validates Super Admin and sets an httpOnly, secure, server-side session cookie.
    * Cookie is accessible ONLY by Super Admin.
    */
-  app.post('/api/admin/login', (req, res) => {
+    app.post('/api/admin/login', async (req, res) => {
+    try {
+      const authHeader = req.headers.authorization || '';
+      const idToken = authHeader.startsWith('Bearer ')
+        ? authHeader.slice(7)
+        : '';
+
+      if (!idToken) {
+        return res.status(401).json({
+          error: 'unauthorized',
+          message: 'Firebase ID token is required.',
+        });
+      }
+
+      const decoded = await firebaseAdminAuth.verifyIdToken(idToken);
+      const cleanEmail = (decoded.email || '').toLowerCase().trim();
+
+      if (
+        !decoded.email_verified ||
+        !cleanEmail ||
+        cleanEmail !== SUPER_ADMIN_EMAIL
+      ) {
+        return res.status(403).json({
+          error: 'unauthorized',
+          message: 'Only the verified Super Administrator can obtain an admin session.',
+        });
+      }
+
+      const { membershipNumber, name } = req.body || {};
+      const now = Date.now();
+
+      const sessionPayload: SuperAdminSessionPayload = {
+        email: cleanEmail,
+        role: 'super_admin',
+        membershipNumber: membershipNumber || 'NMO-ADMIN-001',
+        name: name || decoded.name || 'Super Administrator',
+        uid: decoded.uid,
+        issuedAt: now,
+        expiresAt: now + 7 * 24 * 60 * 60 * 1000,
+      };
+
+      const token = createSuperAdminSessionToken(sessionPayload);
+
+      res.cookie(SUPER_ADMIN_COOKIE_NAME, token, {
+        httpOnly: true,
+        secure: true,
+        sameSite: 'none',
+        path: '/',
+        maxAge: 7 * 24 * 60 * 60 * 1000,
+      });
+
+      return res.json({
+        success: true,
+        message: 'Admin session established.',
+        user: {
+          email: cleanEmail,
+          role: 'super_admin',
+          membershipNumber: sessionPayload.membershipNumber,
+          name: sessionPayload.name,
+          uid: decoded.uid,
+        },
+      });
+    } catch (err: any) {
+      if (err?.code === 'auth/argument-error' || err?.code === 'auth/id-token-expired' ||
+          err?.code === 'auth/invalid-id-token') {
+        return res.status(401).json({
+          error: 'unauthorized',
+          message: 'Firebase ID token is invalid or expired.',
+        });
+      }
+
+      console.error('[Admin Auth] Failed to establish session:', err);
+      return res.status(500).json({
+        error: 'session_creation_failed',
+        message: 'Could not establish admin session.',
+      });
+    }
+  });app.post('/api/admin/login', (req, res) => {
     try {
       const { email, membershipNumber, name, uid } = req.body;
       const cleanEmail = (email || '').trim().toLowerCase();

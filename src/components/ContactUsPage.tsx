@@ -1,3 +1,4 @@
+import { apiUrl } from '../lib/api';
 import React, { useState } from 'react';
 import { useNMO } from '../context/NMOContext';
 import {
@@ -144,8 +145,8 @@ export const ContactUsPage: React.FC<ContactUsPageProps> = ({
 
     setIsSubmitting(true);
 
-    try {
-      const response = await fetch('/api/contact', {
+    try 
+      const response = await fetch(apiUrl('/api/contact'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
