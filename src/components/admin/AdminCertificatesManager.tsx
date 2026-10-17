@@ -52,7 +52,7 @@ import {
   Trash2,
   Clock
 } from 'lucide-react';
-import { auth } from '../../lib/firebase';
+import { auth, firebaseConfig } from '../../lib/firebase';
 import { DriveIntegrationGuideModal, GuideTab } from './DriveIntegrationGuideModal';
 
 export const AdminCertificatesManager: React.FC = () => {
@@ -619,7 +619,7 @@ export const AdminCertificatesManager: React.FC = () => {
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 text-[11px]">
                   <span className="font-bold text-slate-700">OAuth2 Redirect Handler called:</span>
                   <code className="text-xs font-mono font-bold text-red-700 bg-red-50 px-2 py-0.5 rounded border border-red-200 select-all truncate">
-                    https://{auth?.app?.options?.authDomain || 'gen-lang-client-0484899202.firebaseapp.com'}/__/auth/handler
+                    https://{firebaseConfig.authDomain || auth?.app?.options?.authDomain || 'nmo-india-demo.firebaseapp.com'}/__/auth/handler
                   </code>
                 </div>
               </div>
@@ -627,10 +627,10 @@ export const AdminCertificatesManager: React.FC = () => {
               <div className="space-y-1.5 text-xs text-slate-700 mb-4 pl-1">
                 <div className="font-bold text-slate-900">How to fix in 2 minutes:</div>
                 <ol className="list-decimal list-inside space-y-1 text-slate-600">
-                  <li>Open <strong>Google Cloud Console &gt; Credentials</strong> and copy the <strong>Client Secret</strong> for your Web Client ID.</li>
+                  <li>Open <strong>Google Cloud Console &gt; Credentials</strong> for project <code>{firebaseConfig.projectId || 'nmo-india-demo'}</code> and copy the <strong>Client Secret</strong> for your Web Client ID.</li>
                   <li>Open <strong>Firebase Console &gt; Authentication &gt; Sign-in method &gt; Google</strong>.</li>
                   <li>Expand <strong>Web SDK configuration</strong>, paste the Client Secret into <strong>Web client secret</strong>, and click <strong>Save</strong>.</li>
-                  <li>Click <strong>Retry Authorize Google Drive</strong> below!</li>
+                  <li>Or use <strong>Quick Connect via Token</strong> below to bypass Firebase client secrets completely!</li>
                 </ol>
               </div>
 
@@ -660,7 +660,7 @@ export const AdminCertificatesManager: React.FC = () => {
                 </button>
 
                 <a
-                  href={`https://console.firebase.google.com/project/${auth?.app?.options?.projectId || 'gen-lang-client-0484899202'}/authentication/providers`}
+                  href={`https://console.firebase.google.com/project/${firebaseConfig.projectId || auth?.app?.options?.projectId || 'nmo-india-demo'}/authentication/providers`}
                   target="_blank"
                   rel="noreferrer"
                   className="px-3.5 py-2 bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-xs"

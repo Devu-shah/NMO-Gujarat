@@ -24,7 +24,7 @@ import {
   NMO_ROOT_DRIVE_URL,
   connectWithManualToken
 } from '../../lib/googleDrive';
-import { auth } from '../../lib/firebase';
+import { auth, firebaseConfig } from '../../lib/firebase';
 
 export type GuideTab =
   | 'invalid_secret'
@@ -64,8 +64,8 @@ export const DriveIntegrationGuideModal: React.FC<DriveIntegrationGuideModalProp
   const origin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000';
   const redirectUri = `${origin}/api/auth/google/callback`;
   const localhostRedirectUri = 'http://localhost:3000/api/auth/google/callback';
-  const currentProjectId = auth?.app?.options?.projectId || 'gen-lang-client-0484899202';
-  const currentAuthDomain = auth?.app?.options?.authDomain || `${currentProjectId}.firebaseapp.com`;
+  const currentProjectId = firebaseConfig.projectId || auth?.app?.options?.projectId || 'nmo-india-demo';
+  const currentAuthDomain = firebaseConfig.authDomain || auth?.app?.options?.authDomain || `${currentProjectId}.firebaseapp.com`;
   const firebaseHandlerUri = `https://${currentAuthDomain}/__/auth/handler`;
 
   useEffect(() => {
