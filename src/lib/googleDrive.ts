@@ -655,6 +655,7 @@ export interface DriveCertificateFile {
   memberName?: string;
   eventId?: string;
   eventTitle?: string;
+  eventName?: string;
   driveFolderId?: string;
   driveFolderName?: string;
   description?: string;
@@ -674,6 +675,73 @@ export interface DriveCertificateFile {
   isAmbiguous?: boolean;
   ambiguousMatchesCount?: number;
 }
+
+/**
+ * Safely resolves the display name for a certificate's event using the fallback priority:
+ * eventName → driveFolderName → eventTitle → "Event name unavailable"
+ * Avoids displaying generic/structural folders ("NMO Gujarat", "Certificates", etc.) or technical folder IDs.
+ */
+export const getCertificateEventName = (cert?: {
+  eventName?: string;
+  driveFolderName?: string;
+  eventTitle?: string;
+  [key: string]: any;
+} | null): string => {
+  if (!cert) return 'Event name unavailable';
+
+  const isStructuralOrGeneric = (val?: string): boolean => {
+    if (!val || typeof val !== 'string') return true;
+    const clean = val.trim();
+    if (!clean) return true;
+    // Never show technical Google Drive IDs (e.g. 1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2)
+    if (/^[a-zA-Z0-9_-]{25,}$/.test(clean)) return true;
+
+    const lower = clean.toLowerCase();
+    const genericList = [
+      'nmo gujarat',
+      'nmo-gujarat',
+      'nmo india',
+      'nmo_gujarat',
+      'nmo',
+      'events',
+      'all events',
+      'nmo events',
+      'certificates',
+      'certificate',
+      'all certificates',
+      'member certificates',
+      'event certificates',
+      'my drive',
+      'drive',
+      'root',
+      'uploads',
+      'documents',
+      'files'
+    ];
+    if (genericList.includes(lower)) return true;
+    if (/^(all\s+)?(certificates?|events)(\s+(files|docs|records))?$/i.test(lower)) return true;
+    if (/^nmo(\s+gujarat)?$/i.test(lower)) return true;
+    return false;
+  };
+
+  // Priority 1: eventName (resolved from Drive event folder or server resolution)
+  if (cert.eventName && !isStructuralOrGeneric(cert.eventName)) {
+    return cert.eventName.trim();
+  }
+
+  // Priority 2: driveFolderName (resolved parent folder name)
+  if (cert.driveFolderName && !isStructuralOrGeneric(cert.driveFolderName)) {
+    return cert.driveFolderName.trim();
+  }
+
+  // Priority 3: eventTitle (original certificate property)
+  if (cert.eventTitle && !isStructuralOrGeneric(cert.eventTitle)) {
+    return cert.eventTitle.trim();
+  }
+
+  // Priority 4: Clean fallback
+  return 'Event name unavailable';
+};
 
 export interface DriveFolderInfo {
   id: string;
@@ -951,109 +1019,32 @@ export const uploadCertificateToDrive = async (
       const certRecord: DriveCertificateFile = {
         ...resJson.certificate,
         id: resJson.certificate.driveFileId,
-        name: `${cleanNo}.${fileExt}`,
+        name: resJson.certificate.originalFileName || `${cleanNo}.${fileExt}`,
+        driveFolderId: resJson.certificate.driveFolderId,
+        driveFolderName: resJson.certificate.driveFolderName,
+        eventName: resJson.certificate.eventName || resJson.certificate.eventTitle,
         uploadSource: source,
-        approvalStatus: finalApprovalStatus,
+        approvalStatus: resJson.certificate.approvalStatus || finalApprovalStatus,
         assignedAttendance: Boolean(metadata.assignedAttendance)
       };
 
-      // Sync Firestore collection
-      await syncCertificateToFirestore(certRecord);
+      // Safely sync to Firestore collection without failing the successful Drive upload if Firestore has a transient warning
+      try {
+        await syncCertificateToFirestore(certRecord);
+      } catch (syncErr) {
+        console.warn('Certificate created in Google Drive; Firestore sync warning:', syncErr);
+      }
       setMemberIdCookie(cleanNo);
       return certRecord;
+    } else {
+      const errData = await serverResp.json().catch(() => ({}));
+      throw new Error(errData.error || errData.message || `Server upload failed with status ${serverResp.status}`);
     }
   } catch (err: any) {
     if (err.conflict) throw err;
-    console.warn('Server upload endpoint notice, evaluating client fallback:', err);
+    console.warn('Server upload endpoint error:', err.message || err);
+    throw err;
   }
-
-  // 2. Direct client fallback if server session is absent or direct token exists
-  let token = getDriveAccessToken();
-  if (!token) {
-    token = await ensureDriveAccessToken();
-  }
-  if (!token) {
-    throw new Error('Google Drive is not connected. Please connect Google Drive in the Admin Portal before uploading.');
-  }
-
-  const targetFolderId = metadata.targetFolderId || NMO_ROOT_DRIVE_FOLDER_ID;
-  const customFileName = `${cleanNo}.${fileExt}`;
-
-  // Check duplicate on client
-  if (!metadata.overwriteExisting) {
-    const dupCheck = await checkCertificateDuplicate(targetFolderId, cleanNo);
-    if (dupCheck.exists && dupCheck.existingFiles.length > 0) {
-      const existing = dupCheck.existingFiles[0];
-      const conflictErr: any = new Error(`A certificate named "${existing.name}" already exists for Membership ID ${cleanNo}.`);
-      conflictErr.conflict = true;
-      conflictErr.existingFileId = existing.id;
-      conflictErr.existingFileName = existing.name;
-      throw conflictErr;
-    }
-  }
-
-  const fileMetadata = {
-    name: customFileName,
-    description: `NMO Certificate for Membership ID: ${cleanNo} (${metadata.memberName}). Event: ${metadata.eventTitle || 'Event'}. Source: ${source}. Status: ${finalApprovalStatus}.`,
-    parents: [targetFolderId],
-    properties: {
-      membershipNumber: cleanNo,
-      memberName: metadata.memberName,
-      eventId: metadata.eventId || '',
-      eventTitle: metadata.eventTitle || '',
-      uploadedAt: new Date().toISOString(),
-      uploadSource: source,
-      approvalStatus: finalApprovalStatus,
-      uploaderUid: metadata.uploaderUid || ''
-    }
-  };
-
-  const form = new FormData();
-  form.append('metadata', new Blob([JSON.stringify(fileMetadata)], { type: 'application/json' }));
-  form.append('file', file);
-
-  const res = await fetch(
-    'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,mimeType,size,createdTime,webViewLink,webContentLink,thumbnailLink,description,properties',
-    {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-      body: form
-    }
-  );
-
-  if (!res.ok) {
-    const errData = await res.json().catch(() => ({}));
-    throw new Error(errData.error?.message || 'Failed to upload certificate to Google Drive');
-  }
-
-  const uploadedFile = await res.json();
-  const certRecord: DriveCertificateFile = {
-    id: uploadedFile.id,
-    name: uploadedFile.name,
-    mimeType: uploadedFile.mimeType,
-    size: uploadedFile.size ? `${(Number(uploadedFile.size) / (1024 * 1024)).toFixed(2)} MB` : undefined,
-    createdTime: uploadedFile.createdTime || new Date().toISOString(),
-    webViewLink: uploadedFile.webViewLink,
-    webContentLink: uploadedFile.webContentLink || `https://drive.google.com/uc?id=${uploadedFile.id}&export=download`,
-    thumbnailLink: uploadedFile.thumbnailLink,
-    description: uploadedFile.description,
-    membershipNumber: cleanNo,
-    memberName: metadata.memberName,
-    eventId: metadata.eventId,
-    eventTitle: metadata.eventTitle,
-    driveFolderId: targetFolderId,
-    uploadSource: source,
-    approvalStatus: finalApprovalStatus,
-    uploaderUid: metadata.uploaderUid || '',
-    proxyViewUrl: apiUrl(`/api/drive/file/${uploadedFile.id}`),
-    proxyDownloadUrl: apiUrl(`/api/drive/file/${uploadedFile.id}?download=true`),
-    assignedAttendance: Boolean(metadata.assignedAttendance),
-    updatedAt: new Date().toISOString()
-  };
-
-  await syncCertificateToFirestore(certRecord);
-  setMemberIdCookie(cleanNo);
-  return certRecord;
 };
 
 /**
@@ -1072,6 +1063,8 @@ export const syncCertificateToFirestore = async (cert: DriveCertificateFile): Pr
         certId: docId,
         eventId: cert.eventId || '',
         eventTitle: cert.eventTitle || '',
+        eventName: cert.eventName || '',
+        driveFolderName: cert.driveFolderName || '',
         membershipNumber: cert.membershipNumber || '',
         memberName: cert.memberName || '',
         uploaderUid: cert.uploaderUid || '',
@@ -1325,9 +1318,16 @@ export const fetchCertificatesByMembershipNumber = async (
       const serverData = await serverResp.json();
       if (serverData.certificates && Array.isArray(serverData.certificates) && serverData.certificates.length > 0) {
         // Enforce strict filtering: Only certificates matching this participant's membership ID via cookie validator
-        const strictlyFiltered: DriveCertificateFile[] = serverData.certificates.filter((c: any) => {
-          return isCertificateMatchingCookie(c, cleanNo);
-        });
+        const strictlyFiltered: DriveCertificateFile[] = serverData.certificates
+          .filter((c: any) => {
+            return isCertificateMatchingCookie(c, cleanNo);
+          })
+          .map((c: any) => ({
+            ...c,
+            driveFolderId: c.driveFolderId || undefined,
+            driveFolderName: c.driveFolderName || undefined,
+            eventName: c.eventName || undefined
+          }));
 
         if (strictlyFiltered.length > 0) {
           // Asynchronously cache into Firestore for offline/quick reference

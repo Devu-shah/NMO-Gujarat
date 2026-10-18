@@ -10,7 +10,8 @@ import {
   NMO_ROOT_DRIVE_FOLDER_ID,
   NMO_ROOT_DRIVE_FOLDER_NAME,
   NMO_ROOT_DRIVE_URL,
-  DriveCertificateFile
+  DriveCertificateFile,
+  getCertificateEventName
 } from '../lib/googleDrive';
 import {
   Award,
@@ -121,10 +122,17 @@ export const MemberCertificatesTab: React.FC = () => {
         approvalStatus: 'pending'
       });
 
-      setUploadFeedback({
-        message: `Certificate "${uploaded.name}" successfully uploaded and submitted for Admin Approval! Your submission is now in the review queue. Once verified by an administrator, it will be marked approved and officially certified.`,
-        type: 'success'
-      });
+      if ((uploaded as any)?.alreadyExisted) {
+        setUploadFeedback({
+          message: `Certificate "${uploaded.name}" is already securely stored in Google Drive for this event. Record verified.`,
+          type: 'success'
+        });
+      } else {
+        setUploadFeedback({
+          message: `Certificate "${uploaded.name}" successfully uploaded and submitted for Admin Approval! Your submission is now in the review queue. Once verified by an administrator, it will be marked approved and officially certified.`,
+          type: 'success'
+        });
+      }
 
       setSelectedFile(null);
       setCustomCertTitle('');
@@ -132,10 +140,18 @@ export const MemberCertificatesTab: React.FC = () => {
       setSelectedEventTitle('');
       await loadCertificates();
     } catch (err: any) {
-      setUploadFeedback({
-        message: err.message || 'Failed to upload certificate to Google Drive repository.',
-        type: 'error'
-      });
+      if (err.conflict) {
+        setUploadFeedback({
+          message: `A certificate for this event already exists in Google Drive (${err.existingFileName || 'verified file'}). Your certificate is securely stored.`,
+          type: 'success'
+        });
+        await loadCertificates();
+      } else {
+        setUploadFeedback({
+          message: err.message || 'Failed to upload certificate to Google Drive repository.',
+          type: 'error'
+        });
+      }
     } finally {
       setIsUploading(false);
     }
@@ -432,12 +448,10 @@ export const MemberCertificatesTab: React.FC = () => {
                           </h5>
                         </div>
 
-                        {cert.eventTitle && (
-                          <p className="text-[11px] text-slate-500 flex items-center gap-1">
-                            <Calendar className="w-3 h-3 text-slate-400" />
-                            <span>{cert.eventTitle}</span>
-                          </p>
-                        )}
+                        <p className="text-xs text-slate-700 font-medium flex items-center gap-1.5 mt-0.5">
+                          <Calendar className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                          <span>{getCertificateEventName(cert)}</span>
+                        </p>
 
                         {isPending && (
                           <p className="text-[10px] text-amber-700 bg-amber-50/80 px-2 py-1 rounded border border-amber-200 inline-block">

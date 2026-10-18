@@ -5,7 +5,8 @@ import {
   downloadDriveCertificate,
   getDriveDirectImageUrl,
   NMO_ROOT_DRIVE_FOLDER_NAME,
-  DriveCertificateFile
+  DriveCertificateFile,
+  getCertificateEventName
 } from '../lib/googleDrive';
 import { setMemberIdCookie, isCertificateMatchingCookie } from '../lib/memberCookie';
 import {
@@ -238,7 +239,7 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
                           : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
                       }`}
                     >
-                      <span>#{idx + 1} {cert.eventTitle || cert.name.split('_')[1] || 'Certificate'}</span>
+                      <span>#{idx + 1} {getCertificateEventName(cert)}</span>
                     </button>
                   ))}
                 </div>
@@ -303,13 +304,15 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
                     <div className="space-y-1">
                       <div className="flex items-center gap-2">
                         <span className="font-bold text-slate-900 text-sm">
-                          {currentCert.eventTitle || currentCert.name}
+                          {getCertificateEventName(currentCert)}
                         </span>
                         <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-red-100 text-red-800">
                           ID: {targetMemberNo}
                         </span>
                       </div>
                       <div className="text-[11px] text-slate-500 flex flex-wrap items-center gap-3">
+                        <span className="font-mono text-slate-600">{currentCert.name}</span>
+                        <span>·</span>
                         <span>Format: JPG/PNG</span>
                         <span>·</span>
                         <span>{currentCert.createdTime ? new Date(currentCert.createdTime).toLocaleDateString() : 'Verified Record'}</span>

@@ -1640,6 +1640,7 @@ Recipient:        ${RECIPIENT_EMAIL}
     const data = await resp.json();
     const folders: any[] = data.files || [];
 
+    // Priority 1: Match by stable Drive folder ID inside "Events"
     if (knownDriveFolderId) {
       const matchedById = folders.find((f) => f.id === knownDriveFolderId);
       if (matchedById) {
@@ -1655,42 +1656,85 @@ Recipient:        ${RECIPIENT_EMAIL}
     const cleanId = (eventId || '').trim().toLowerCase();
     const cleanTitle = (eventTitle || '').trim().toLowerCase();
 
-    const matches = folders.filter((f) => {
-      const fName = (f.name || '').trim().toLowerCase();
-      if (cleanTitle && fName === cleanTitle) return true;
-      if (cleanId && (fName === cleanId || fName.includes(cleanId))) return true;
-      if (cleanTitle && (fName.includes(cleanTitle) || cleanTitle.includes(fName))) return true;
+    // Priority 2: Exact name match
+    if (cleanTitle) {
+      const exactTitleMatches = folders.filter((f) => (f.name || '').trim().toLowerCase() === cleanTitle);
+      if (exactTitleMatches.length === 1) {
+        return {
+          success: true,
+          rootFolder: hierarchy.rootFolder,
+          eventsFolder: hierarchy.eventsFolder,
+          eventFolder: { id: exactTitleMatches[0].id, name: exactTitleMatches[0].name, webViewLink: exactTitleMatches[0].webViewLink }
+        };
+      }
+    }
+
+    // Priority 3: Exact ID match
+    if (cleanId) {
+      const exactIdMatches = folders.filter((f) => (f.name || '').trim().toLowerCase() === cleanId);
+      if (exactIdMatches.length === 1) {
+        return {
+          success: true,
+          rootFolder: hierarchy.rootFolder,
+          eventsFolder: hierarchy.eventsFolder,
+          eventFolder: { id: exactIdMatches[0].id, name: exactIdMatches[0].name, webViewLink: exactIdMatches[0].webViewLink }
+        };
+      }
+    }
+
+    // Priority 4: Normalized comparison (ignoring non-alphanumeric differences)
+    const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const normTitle = normalize(cleanTitle);
+    const normId = normalize(cleanId);
+
+    const normMatches = folders.filter((f) => {
+      const fn = normalize(f.name || '');
+      return (normTitle && fn === normTitle) || (normId && fn === normId);
+    });
+    if (normMatches.length === 1) {
+      return {
+        success: true,
+        rootFolder: hierarchy.rootFolder,
+        eventsFolder: hierarchy.eventsFolder,
+        eventFolder: { id: normMatches[0].id, name: normMatches[0].name, webViewLink: normMatches[0].webViewLink }
+      };
+    }
+
+    // Priority 5: Substring matching if cleanTitle or cleanId is distinct (at least 4 chars)
+    const subMatches = folders.filter((f) => {
+      const fn = (f.name || '').trim().toLowerCase();
+      if (cleanTitle && cleanTitle.length >= 4 && (fn.includes(cleanTitle) || cleanTitle.includes(fn))) return true;
+      if (cleanId && cleanId.length >= 4 && fn.includes(cleanId)) return true;
       return false;
     });
 
-    if (matches.length === 0) {
+    if (subMatches.length === 1) {
       return {
-        success: false,
-        error: `Event folder for "${eventTitle || eventId}" was not found inside "NMO Gujarat → Events". As per safety policy, duplicate event folders are never created automatically. Please create or assign this event's folder in Google Drive.`,
-        code: 'EVENT_FOLDER_NOT_FOUND',
+        success: true,
         rootFolder: hierarchy.rootFolder,
         eventsFolder: hierarchy.eventsFolder,
-        availableFolders: folders.map((f) => ({ id: f.id, name: f.name }))
+        eventFolder: { id: subMatches[0].id, name: subMatches[0].name, webViewLink: subMatches[0].webViewLink }
       };
     }
 
-    if (matches.length > 1) {
+    if (subMatches.length > 1) {
       return {
         success: false,
-        error: `Multiple folders matching "${eventTitle || eventId}" were found inside "NMO Gujarat → Events" (${matches.map((m) => m.name).join(', ')}). Resolution is ambiguous. Please disambiguate in Google Drive.`,
+        error: `Multiple folders matching "${eventTitle || eventId}" were found inside "NMO Gujarat → Events" (${subMatches.map((m) => m.name).join(', ')}). Resolution is ambiguous. Please disambiguate in Google Drive.`,
         code: 'EVENT_FOLDER_AMBIGUOUS',
         rootFolder: hierarchy.rootFolder,
         eventsFolder: hierarchy.eventsFolder,
-        matchingFolders: matches.map((f) => ({ id: f.id, name: f.name }))
+        matchingFolders: subMatches.map((f) => ({ id: f.id, name: f.name }))
       };
     }
 
-    const matched = matches[0];
     return {
-      success: true,
+      success: false,
+      error: `Event folder for "${eventTitle || eventId}" was not found inside "NMO Gujarat → Events". As per safety policy, duplicate event folders are never created automatically. Please create or assign this event's folder in Google Drive.`,
+      code: 'EVENT_FOLDER_NOT_FOUND',
       rootFolder: hierarchy.rootFolder,
       eventsFolder: hierarchy.eventsFolder,
-      eventFolder: { id: matched.id, name: matched.name, webViewLink: matched.webViewLink }
+      availableFolders: folders.map((f) => ({ id: f.id, name: f.name }))
     };
   }
 
@@ -1900,10 +1944,11 @@ Recipient:        ${RECIPIENT_EMAIL}
   /**
    * POST /api/drive/check-duplicate
    * Checks if a certificate for this membership ID already exists in the event folder.
+   * Differentiates events so legitimate certificates for different events are never blocked.
    */
   app.post('/api/drive/check-duplicate', async (req, res) => {
     try {
-      const { folderId, membershipNumber } = req.body;
+      const { folderId, membershipNumber, eventId } = req.body;
       if (!folderId || !membershipNumber) {
         return res.status(400).json({ error: 'folderId and membershipNumber are required' });
       }
@@ -1914,9 +1959,10 @@ Recipient:        ${RECIPIENT_EMAIL}
       }
 
       const cleanNo = String(membershipNumber).trim().toUpperCase();
-      const query = `'${folderId}' in parents and mimeType != 'application/vnd.google-apps.folder' and (name = '${cleanNo}.pdf' or name = '${cleanNo}.jpg' or name = '${cleanNo}.jpeg' or name = '${cleanNo}.png' or name contains '${cleanNo}') and trashed = false`;
+      const cleanEventId = eventId ? String(eventId).replace(/[^a-zA-Z0-9_-]/g, '_') : '';
+      const query = `'${folderId}' in parents and mimeType != 'application/vnd.google-apps.folder' and (name contains '${cleanNo}') and trashed = false`;
       const resp = await fetch(
-        `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=files(id,name,mimeType,size,createdTime)&pageSize=10`,
+        `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=files(id,name,mimeType,size,createdTime,properties)&pageSize=25`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
 
@@ -1927,12 +1973,20 @@ Recipient:        ${RECIPIENT_EMAIL}
       const data = await resp.json();
       const files: any[] = data.files || [];
       const exactMatches = files.filter((f) => {
-        const parts = (f.name || '').split('.');
-        const base = parts.length > 1 ? parts.slice(0, -1).join('.') : f.name;
-        return String(base).trim().toUpperCase() === cleanNo;
+        const propMemNo = (f.properties?.membershipNumber || '').toUpperCase();
+        const fName = (f.name || '').toUpperCase();
+        const isMemMatch = fName.startsWith(cleanNo) || propMemNo === cleanNo;
+        if (!isMemMatch) return false;
+
+        // If eventId was specified, differentiate between events:
+        if (cleanEventId && f.properties?.eventId) {
+          return f.properties.eventId === eventId;
+        }
+        return true;
       });
 
       return res.json({
+        success: true,
         exists: exactMatches.length > 0,
         matchesCount: exactMatches.length,
         existingFiles: exactMatches
@@ -1946,8 +2000,10 @@ Recipient:        ${RECIPIENT_EMAIL}
    * POST /api/drive/upload-certificate
    * Secure backend certificate upload endpoint:
    * - Validates event folder hierarchy ("NMO Gujarat → Events → [Event Folder]")
-   * - Enforces exact membership ID filename (${cleanNo}.${ext})
-   * - Prevents silent duplicate overwrite unless explicitly confirmed
+   * - Standardizes filename starting with membership ID (${cleanNo}.${ext} or ${cleanNo}_${eventId}.${ext})
+   * - Segregates certificates strictly by verified membership ID
+   * - Safe retry handling: reuses verified existing record on retry without failing
+   * - Prevents duplicate creation without blocking legitimate certificates for different events
    * - Differentiates admin vs user upload source & approval status
    */
   app.post('/api/drive/upload-certificate', async (req, res) => {
@@ -1979,6 +2035,12 @@ Recipient:        ${RECIPIENT_EMAIL}
       const source = uploadSource === 'user' ? 'user' : 'admin';
       const approvalStatus = source === 'admin' ? 'not_required' : 'pending';
 
+      // Membership ID integrity: If user upload, compare with verified cookie session
+      const cookieMemberId = req.cookies && req.cookies['nmo_member_id']
+        ? String(req.cookies['nmo_member_id']).trim().toUpperCase()
+        : null;
+      const verifiedMemberNo = (source === 'user' && cookieMemberId) ? cookieMemberId : cleanNo;
+
       const token = await getValidServerDriveToken();
       if (!token) {
         return res.status(503).json({ error: 'Google Drive storage is disconnected.' });
@@ -1999,7 +2061,15 @@ Recipient:        ${RECIPIENT_EMAIL}
       // 2. Validate file type & extension
       const rawExt = (fileName || '').split('.').pop()?.toLowerCase() || 'jpg';
       const fileExt = ['pdf', 'jpg', 'jpeg', 'png'].includes(rawExt) ? rawExt : 'jpg';
-      const finalFileName = `${cleanNo}.${fileExt}`;
+
+      // Standardize filename: begins with membership ID and preserves event identifier if relevant
+      const cleanEventId = (eventId && eventId !== 'general')
+        ? String(eventId).replace(/[^a-zA-Z0-9_-]/g, '_')
+        : '';
+      const finalFileName = cleanEventId
+        ? `${verifiedMemberNo}_${cleanEventId}.${fileExt}`
+        : `${verifiedMemberNo}.${fileExt}`;
+      const legacyFileName = `${verifiedMemberNo}.${fileExt}`;
       const finalMime = mimeType || (fileExt === 'pdf' ? 'application/pdf' : 'image/jpeg');
 
       // Convert base64 to buffer
@@ -2013,38 +2083,81 @@ Recipient:        ${RECIPIENT_EMAIL}
         return res.status(400).json({ error: 'File size exceeds maximum limit of 15MB' });
       }
 
-      // 3. Duplicate conflict verification
-      const dupCheckQuery = `'${folderId}' in parents and mimeType != 'application/vnd.google-apps.folder' and (name = '${finalFileName}' or name contains '${cleanNo}') and trashed = false`;
+      // 3. Duplicate conflict verification & safe retry handling
+      const dupCheckQuery = `'${folderId}' in parents and mimeType != 'application/vnd.google-apps.folder' and (name = '${finalFileName}' or name = '${legacyFileName}' or name contains '${verifiedMemberNo}') and trashed = false`;
       const dupResp = await fetch(
-        `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(dupCheckQuery)}&fields=files(id,name)&pageSize=10`,
+        `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(dupCheckQuery)}&fields=files(id,name,mimeType,size,createdTime,webViewLink,properties)&pageSize=20`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
+
       if (dupResp.ok) {
         const dupData = await dupResp.json();
-        const existing = (dupData.files || []).find((f: any) => {
-          const parts = (f.name || '').split('.');
-          const base = parts.length > 1 ? parts.slice(0, -1).join('.') : f.name;
-          return String(base).trim().toUpperCase() === cleanNo;
+        const candidateFiles: any[] = dupData.files || [];
+
+        // Identify existing file specifically for THIS member and THIS event:
+        const existingForThisEvent = candidateFiles.find((f: any) => {
+          const propMemNo = (f.properties?.membershipNumber || '').toUpperCase();
+          const fName = (f.name || '').toUpperCase();
+          const isMemberMatch = fName.startsWith(verifiedMemberNo) || propMemNo === verifiedMemberNo;
+          if (!isMemberMatch) return false;
+
+          const fPropEventId = f.properties?.eventId;
+          // If the file explicitly records eventId, match it:
+          if (fPropEventId && eventId) {
+            return fPropEventId === eventId;
+          }
+          // If filename has the eventId:
+          if (cleanEventId && fName.includes(cleanEventId.toUpperCase())) {
+            return true;
+          }
+          // If filenames match exactly:
+          if (f.name === finalFileName || f.name === legacyFileName) {
+            return true;
+          }
+          return false;
         });
 
-        if (existing && !overwriteExisting) {
-          return res.status(409).json({
-            error: 'duplicate_conflict',
-            conflict: true,
-            message: `A certificate with filename "${existing.name}" already exists for Membership ID ${cleanNo} in this event folder. Silent overwrite is prevented.`,
-            existingFileId: existing.id,
-            existingFileName: existing.name
-          });
-        }
+        if (existingForThisEvent) {
+          if (overwriteExisting) {
+            // Explicit overwrite confirmed: remove previous file to prevent duplicates
+            const fileToDelete = existingFileId || existingForThisEvent.id;
+            console.log(`[Drive Upload] Replacing existing certificate file ${fileToDelete} for ${verifiedMemberNo} in event ${eventId}...`);
+            await fetch(`https://www.googleapis.com/drive/v3/files/${fileToDelete}`, {
+              method: 'DELETE',
+              headers: { Authorization: `Bearer ${token}` }
+            }).catch(() => {});
+          } else {
+            // Safe retry handling: If the certificate already exists in Google Drive for this event,
+            // report success and return the existing verified certificate record.
+            console.log(`[Drive Upload] Safe retry detected: reusing existing certificate ${existingForThisEvent.id} for member ${verifiedMemberNo} in event ${eventId}`);
+            const existingRecord = {
+              certId: `${eventId}_${verifiedMemberNo}`,
+              eventId,
+              eventTitle: existingForThisEvent.properties?.eventTitle || eventTitle || '',
+              membershipNumber: verifiedMemberNo,
+              memberName: existingForThisEvent.properties?.memberName || memberName || '',
+              uploaderUid: existingForThisEvent.properties?.uploaderUid || uploaderUid || '',
+              uploadSource: existingForThisEvent.properties?.uploadSource || source,
+              approvalStatus: existingForThisEvent.properties?.approvalStatus || approvalStatus,
+              driveFileId: existingForThisEvent.id,
+              driveFolderId: folderId,
+              originalFileName: existingForThisEvent.name,
+              mimeType: existingForThisEvent.mimeType || finalMime,
+              fileSize: existingForThisEvent.size ? `${(Number(existingForThisEvent.size) / (1024 * 1024)).toFixed(2)} MB` : undefined,
+              uploadedAt: existingForThisEvent.createdTime || new Date().toISOString(),
+              webViewLink: existingForThisEvent.webViewLink,
+              proxyViewUrl: `/api/drive/file/${existingForThisEvent.id}`,
+              proxyDownloadUrl: `/api/drive/file/${existingForThisEvent.id}?download=true`,
+              alreadyExisted: true
+            };
 
-        // If overwrite is confirmed and old file exists, clean up old file
-        if (existing && overwriteExisting) {
-          const fileToDelete = existingFileId || existing.id;
-          console.log(`[Drive Upload] Replacing existing file ${fileToDelete} with new upload for ${cleanNo}...`);
-          await fetch(`https://www.googleapis.com/drive/v3/files/${fileToDelete}`, {
-            method: 'DELETE',
-            headers: { Authorization: `Bearer ${token}` }
-          }).catch(() => {});
+            return res.json({
+              success: true,
+              alreadyExisted: true,
+              message: `Certificate for member ${verifiedMemberNo} is already safely recorded in Google Drive.`,
+              certificate: existingRecord
+            });
+          }
         }
       }
 
@@ -2140,10 +2253,187 @@ Recipient:        ${RECIPIENT_EMAIL}
     }
   });
 
+  // =========================================================================
+  // Google Drive Folder Lookup & Event Disambiguation Helpers
+  // =========================================================================
+  interface CachedDriveFolderMeta {
+    id: string;
+    name: string;
+    parents?: string[];
+    expiresAt: number;
+  }
+
+  // Server-level in-memory cache for folder lookups (10-minute TTL)
+  const serverDriveFolderCache = new Map<string, CachedDriveFolderMeta | null>();
+
+  function isStructuralDriveFolder(folderName?: string): boolean {
+    if (!folderName || typeof folderName !== 'string') return true;
+    const clean = folderName.trim().toLowerCase();
+    if (!clean) return true;
+
+    const structuralNames = new Set([
+      'nmo gujarat',
+      'nmo-gujarat',
+      'nmo india',
+      'nmo_gujarat',
+      'nmo',
+      'events',
+      'all events',
+      'nmo events',
+      'certificates',
+      'certificate',
+      'all certificates',
+      'member certificates',
+      'event certificates',
+      'my drive',
+      'drive',
+      'root',
+      'uploads',
+      'documents',
+      'files'
+    ]);
+
+    if (structuralNames.has(clean)) return true;
+    if (/^(all\s+)?(certificates?|events)(\s+(files|docs|records))?$/i.test(clean)) return true;
+    if (/^nmo(\s+gujarat)?$/i.test(clean)) return true;
+    // Don't treat technical folder IDs as folder names
+    if (/^[a-zA-Z0-9_-]{25,}$/.test(clean)) return true;
+
+    return false;
+  }
+
+  async function getDriveFolderMetadata(
+    folderId: string,
+    token: string,
+    requestFolderCache?: Map<string, CachedDriveFolderMeta | null>
+  ): Promise<CachedDriveFolderMeta | null> {
+    const cleanId = (folderId || '').trim();
+    if (!cleanId) return null;
+
+    // 1. Check request-scoped cache first
+    if (requestFolderCache && requestFolderCache.has(cleanId)) {
+      return requestFolderCache.get(cleanId) || null;
+    }
+
+    // 2. Check server-level memory cache
+    const cached = serverDriveFolderCache.get(cleanId);
+    if (cached !== undefined) {
+      if (cached === null || cached.expiresAt > Date.now()) {
+        if (requestFolderCache) requestFolderCache.set(cleanId, cached);
+        return cached;
+      }
+    }
+
+    // 3. Query Google Drive API
+    try {
+      const resp = await fetch(
+        `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(cleanId)}?fields=id,name,parents,trashed`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+
+      if (!resp.ok) {
+        serverDriveFolderCache.set(cleanId, null);
+        if (requestFolderCache) requestFolderCache.set(cleanId, null);
+        return null;
+      }
+
+      const data = await resp.json();
+      if (data.trashed) {
+        serverDriveFolderCache.set(cleanId, null);
+        if (requestFolderCache) requestFolderCache.set(cleanId, null);
+        return null;
+      }
+
+      const meta: CachedDriveFolderMeta = {
+        id: data.id,
+        name: data.name || '',
+        parents: Array.isArray(data.parents) ? data.parents : undefined,
+        expiresAt: Date.now() + 10 * 60 * 1000
+      };
+
+      serverDriveFolderCache.set(cleanId, meta);
+      if (requestFolderCache) requestFolderCache.set(cleanId, meta);
+      return meta;
+    } catch (err) {
+      console.warn(`[Drive Folder Lookup] Error fetching folder ${cleanId}:`, err);
+      serverDriveFolderCache.set(cleanId, null);
+      if (requestFolderCache) requestFolderCache.set(cleanId, null);
+      return null;
+    }
+  }
+
+  async function resolveCertificateEventFolder(
+    parentIds: string[] | undefined,
+    token: string,
+    requestFolderCache: Map<string, CachedDriveFolderMeta | null>
+  ): Promise<{
+    driveFolderId?: string;
+    driveFolderName?: string;
+    eventName?: string;
+  }> {
+    if (!parentIds || !parentIds.length) {
+      return {};
+    }
+
+    const immediateFolderId = parentIds[0];
+    const immediateFolder = await getDriveFolderMetadata(immediateFolderId, token, requestFolderCache);
+
+    if (!immediateFolder) {
+      return { driveFolderId: immediateFolderId };
+    }
+
+    // Build the ancestor chain from immediate folder upwards (depth limit: 6 to prevent cycles)
+    const chain: CachedDriveFolderMeta[] = [immediateFolder];
+    let curr = immediateFolder;
+    let depth = 0;
+    while (curr.parents && curr.parents.length > 0 && depth < 6) {
+      depth++;
+      const nextParentId = curr.parents[0];
+      const parentMeta = await getDriveFolderMetadata(nextParentId, token, requestFolderCache);
+      if (!parentMeta) break;
+      chain.push(parentMeta);
+      curr = parentMeta;
+    }
+
+    // 1. Check if an ancestor is the structural "Events" folder
+    let eventFolder: CachedDriveFolderMeta | undefined;
+    const eventsIdx = chain.findIndex((f) => {
+      const n = (f.name || '').trim().toLowerCase();
+      return n === 'events' || n === 'all events' || n === 'nmo events';
+    });
+
+    if (eventsIdx > 0) {
+      const candidate = chain[eventsIdx - 1];
+      if (candidate && !isStructuralDriveFolder(candidate.name)) {
+        eventFolder = candidate;
+      }
+    }
+
+    // 2. If no "Events" folder found, take the highest non-structural folder in the chain
+    if (!eventFolder) {
+      const nonStructural = chain.filter((f) => !isStructuralDriveFolder(f.name));
+      if (nonStructural.length > 0) {
+        eventFolder = nonStructural[nonStructural.length - 1];
+      }
+    }
+
+    const eventName = eventFolder ? eventFolder.name.trim() : undefined;
+    const immediateIsStructural = isStructuralDriveFolder(immediateFolder.name);
+
+    return {
+      driveFolderId: eventFolder ? eventFolder.id : immediateFolder.id,
+      driveFolderName: immediateIsStructural
+        ? (eventName || undefined)
+        : immediateFolder.name.trim(),
+      eventName
+    };
+  }
+
   /**
    * GET /api/drive/member-certificates/:membershipNumber
    * Queries Google Drive exclusively for files matching the participant's membership ID.
    * Strictly filters results: Does NOT show all certificates to everyone.
+   * Resolves certificate parent folders and event names via Google Drive API with caching.
    */
   app.get('/api/drive/member-certificates/:membershipNumber', async (req, res) => {
     try {
@@ -2203,29 +2493,56 @@ Recipient:        ${RECIPIENT_EMAIL}
       // CRITICAL REQUIREMENT: "Don't show all certificates to everyone."
       // Strictly filter returned files so that only files matching this participant's membership ID are returned.
       // The file name would be membership ID (e.g. 231112001791.pdf or 231112001791.jpg).
-      const strictlyFiltered = rawFiles.filter((f) => {
+      const matchingFiles = rawFiles.filter((f) => {
         const fNameUpper = (f.name || '').toUpperCase();
         const propMemNo = (f.properties?.membershipNumber || '').toUpperCase();
         return fNameUpper.startsWith(cleanMemNo) || fNameUpper.includes(cleanMemNo) || propMemNo === cleanMemNo;
-      }).map((f) => ({
-        id: f.id,
-        name: f.name,
-        mimeType: f.mimeType,
-        size: f.size ? `${(Number(f.size) / (1024 * 1024)).toFixed(2)} MB` : undefined,
-        createdTime: f.createdTime,
-        webViewLink: f.webViewLink,
-        webContentLink: f.webContentLink || `https://drive.google.com/uc?id=${f.id}&export=download`,
-        thumbnailLink: f.thumbnailLink,
-        description: f.description,
-        membershipNumber: cleanMemNo,
-        eventId: f.properties?.eventId,
-        eventTitle: f.properties?.eventTitle,
-        approvalStatus: f.properties?.approvalStatus || (f.properties?.uploadSource === 'user' ? 'pending' : 'not_required'),
-        uploadSource: f.properties?.uploadSource || (f.properties?.uploadedBy === 'member' ? 'user' : 'admin'),
-        uploadedBy: f.properties?.uploadedBy || (f.properties?.uploadSource === 'user' ? 'member' : 'admin'),
-        proxyViewUrl: `/api/drive/file/${f.id}`,
-        proxyDownloadUrl: `/api/drive/file/${f.id}?download=true`
-      }));
+      });
+
+      // Request-scoped cache to reuse folder lookups across files within this single request
+      const requestFolderCache = new Map<string, CachedDriveFolderMeta | null>();
+
+      const strictlyFiltered = await Promise.all(
+        matchingFiles.map(async (f) => {
+          const folderMeta = await resolveCertificateEventFolder(
+            f.parents,
+            token,
+            requestFolderCache
+          );
+
+          // Priority for resolved event name:
+          // 1. Google Drive event folder name (folderMeta.eventName)
+          // 2. Non-structural driveFolderName
+          // 3. Certificate property eventTitle (if non-structural)
+          const resolvedEventName =
+            folderMeta.eventName ||
+            (!isStructuralDriveFolder(folderMeta.driveFolderName) ? folderMeta.driveFolderName : undefined) ||
+            (!isStructuralDriveFolder(f.properties?.eventTitle) ? f.properties?.eventTitle : undefined);
+
+          return {
+            id: f.id,
+            name: f.name,
+            mimeType: f.mimeType,
+            size: f.size ? `${(Number(f.size) / (1024 * 1024)).toFixed(2)} MB` : undefined,
+            createdTime: f.createdTime,
+            webViewLink: f.webViewLink,
+            webContentLink: f.webContentLink || `https://drive.google.com/uc?id=${f.id}&export=download`,
+            thumbnailLink: f.thumbnailLink,
+            description: f.description,
+            membershipNumber: cleanMemNo,
+            eventId: f.properties?.eventId,
+            eventTitle: f.properties?.eventTitle,
+            driveFolderId: folderMeta.driveFolderId,
+            driveFolderName: folderMeta.driveFolderName,
+            eventName: resolvedEventName,
+            approvalStatus: f.properties?.approvalStatus || (f.properties?.uploadSource === 'user' ? 'pending' : 'not_required'),
+            uploadSource: f.properties?.uploadSource || (f.properties?.uploadedBy === 'member' ? 'user' : 'admin'),
+            uploadedBy: f.properties?.uploadedBy || (f.properties?.uploadSource === 'user' ? 'member' : 'admin'),
+            proxyViewUrl: `/api/drive/file/${f.id}`,
+            proxyDownloadUrl: `/api/drive/file/${f.id}?download=true`
+          };
+        })
+      );
 
       return res.json({
         success: true,
