@@ -127,6 +127,9 @@ export interface NMOEvent {
   // Google Drive folder integration
   driveFolderId?: string;
   driveFolderLink?: string;
+  driveFolderName?: string;
+  driveFolderCreated?: boolean;
+  driveFolderError?: string;
 
   // Embedded participants array
   participants: EventParticipant[];

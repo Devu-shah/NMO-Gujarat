@@ -137,17 +137,12 @@ export const AdminEventsManager: React.FC<AdminEventsManagerProps> = ({
   const handleCreateDriveSubfolder = async (evt: NMOEvent) => {
     setDriveActionId(evt.eventId);
     try {
-      let token = getDriveAccessToken();
-      if (!token) {
-        token = await ensureDriveAccessToken();
+      const folder = await createEventDriveSubfolder(evt.eventId, evt.title, evt.driveFolderId);
+      if (folder) {
+        alert(`Successfully linked Google Drive folder "${folder.name}" inside "Events" root folder!`);
       }
-      if (!token) {
-        await connectGoogleDrive();
-      }
-      await createEventDriveSubfolder(evt.eventId, evt.title);
-      alert(`Successfully generated event subfolder for "${evt.title}" inside NMO Gujarat Mega Drive!`);
     } catch (err: any) {
-      alert(err.message || 'Failed to generate event subfolder in Google Drive.');
+      alert(err.message || 'Failed to generate event subfolder in Google Drive. Verify Drive is connected.');
     } finally {
       setDriveActionId(null);
     }
@@ -474,7 +469,7 @@ export const AdminEventsManager: React.FC<AdminEventsManagerProps> = ({
                     disabled={driveActionId === evt.eventId}
                     className="inline-flex items-center gap-1 text-[10px] font-bold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 px-2 py-0.5 rounded-md transition-colors cursor-pointer disabled:opacity-50"
                   >
-                    <span>{driveActionId === evt.eventId ? 'Creating...' : '+ Create in NMO Gujarat'}</span>
+                    <span>{driveActionId === evt.eventId ? 'Creating...' : evt.driveFolderError ? 'Retry Drive Folder' : '+ Create / Link Drive Folder'}</span>
                   </button>
                 )}
               </div>

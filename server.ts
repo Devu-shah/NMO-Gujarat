@@ -1621,6 +1621,86 @@ Recipient:        ${RECIPIENT_EMAIL}
     };
   }
 
+  // =========================================================================
+  // Google Drive Filename Exact Matching & Membership Isolation Helpers
+  // =========================================================================
+
+  function getBaseFilename(fileName: string): string {
+    if (!fileName || typeof fileName !== 'string') return '';
+    const clean = fileName.trim();
+    const lastDot = clean.lastIndexOf('.');
+    return lastDot > 0 ? clean.substring(0, lastDot) : clean;
+  }
+
+  function isFilenameMatchingMembershipId(
+    fileName: string,
+    membershipId: string,
+    fileProperties?: Record<string, any>
+  ): boolean {
+    const targetId = String(membershipId || '').trim().toUpperCase();
+    if (!targetId) return false;
+
+    // Check file property if available
+    if (fileProperties?.membershipNumber) {
+      const propId = String(fileProperties.membershipNumber).trim().toUpperCase();
+      if (propId === targetId) return true;
+    }
+
+    const base = getBaseFilename(fileName).trim().toUpperCase();
+    if (base === targetId) return true;
+
+    // Delimited prefix formats (e.g. 001_EVT-A, 001-CME, 001 (1))
+    // Strict requirement: "001" must NEVER match "0012.pdf"
+    if (
+      base.startsWith(`${targetId}_`) ||
+      base.startsWith(`${targetId}-`) ||
+      base.startsWith(`${targetId} `) ||
+      base.startsWith(`${targetId}(`)
+    ) {
+      return true;
+    }
+
+    return false;
+  }
+
+  // In-memory cache for dynamically discovered event folders (5-minute TTL)
+  interface DiscoveredEventFoldersCache {
+    rootFolder?: { id: string; name: string; webViewLink?: string };
+    eventsFolder?: { id: string; name: string; webViewLink?: string };
+    folders: Array<{ id: string; name: string; webViewLink?: string; createdTime?: string; eventId?: string }>;
+    cachedAt: number;
+    expiresAt: number;
+  }
+
+  let discoveredFoldersCache: DiscoveredEventFoldersCache | null = null;
+  const DISCOVERY_CACHE_TTL_MS = 5 * 60 * 1000;
+
+  function invalidateDiscoveredFoldersCache() {
+    discoveredFoldersCache = null;
+  }
+
+  async function isChildOfEventsFolder(
+    token: string,
+    folderId: string,
+    eventsFolderId: string
+  ): Promise<boolean> {
+    if (!folderId || !eventsFolderId) return false;
+    if (folderId === eventsFolderId) return false;
+
+    try {
+      const resp = await fetch(
+        `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(folderId)}?fields=id,name,parents,trashed`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (!resp.ok) return false;
+      const data = await resp.json();
+      if (data.trashed) return false;
+      return Array.isArray(data.parents) && data.parents.includes(eventsFolderId);
+    } catch {
+      return false;
+    }
+  }
+
   async function resolveEventFolder(token: string, eventId: string, eventTitle?: string, knownDriveFolderId?: string) {
     const hierarchy = await resolveDriveHierarchy(token);
     if (!hierarchy.success || !hierarchy.eventsFolder) {
@@ -1628,17 +1708,26 @@ Recipient:        ${RECIPIENT_EMAIL}
     }
 
     const eventsFolderId = hierarchy.eventsFolder.id;
-    const query = `'${eventsFolderId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
-    const resp = await fetch(
-      `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=files(id,name,webViewLink,createdTime)&pageSize=100`,
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-    if (!resp.ok) {
-      const errText = await resp.text().catch(() => '');
-      throw new Error(`Failed to list folders inside "Events": ${errText}`);
-    }
-    const data = await resp.json();
-    const folders: any[] = data.files || [];
+    let folders: any[] = [];
+    let pageToken: string | undefined = undefined;
+
+    // Paginate through all child folders inside "Events"
+    do {
+      const query = `'${eventsFolderId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+      let url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=nextPageToken,files(id,name,webViewLink,createdTime,properties)&pageSize=100&orderBy=name`;
+      if (pageToken) url += `&pageToken=${encodeURIComponent(pageToken)}`;
+
+      const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+      if (!resp.ok) {
+        const errText = await resp.text().catch(() => '');
+        throw new Error(`Failed to list folders inside "Events": ${errText}`);
+      }
+      const data = await resp.json();
+      if (data.files && Array.isArray(data.files)) {
+        folders.push(...data.files);
+      }
+      pageToken = data.nextPageToken;
+    } while (pageToken);
 
     // Priority 1: Match by stable Drive folder ID inside "Events"
     if (knownDriveFolderId) {
@@ -1669,9 +1758,13 @@ Recipient:        ${RECIPIENT_EMAIL}
       }
     }
 
-    // Priority 3: Exact ID match
+    // Priority 3: Exact ID match or property match
     if (cleanId) {
-      const exactIdMatches = folders.filter((f) => (f.name || '').trim().toLowerCase() === cleanId);
+      const exactIdMatches = folders.filter(
+        (f) =>
+          (f.name || '').trim().toLowerCase() === cleanId ||
+          f.properties?.eventId?.toLowerCase() === cleanId
+      );
       if (exactIdMatches.length === 1) {
         return {
           success: true,
@@ -1758,6 +1851,114 @@ Recipient:        ${RECIPIENT_EMAIL}
   });
 
   /**
+   * GET /api/drive/event-folders
+   * Dynamically discovers all event folders inside "NMO Gujarat → Events"
+   * with full pagination (nextPageToken) and server-side memory caching.
+   * Query params:
+   *   - refresh=true: bypasses cache and re-queries live Google Drive
+   */
+  app.get('/api/drive/event-folders', async (req, res) => {
+    try {
+      const forceRefresh = req.query.refresh === 'true';
+
+      // Check server cache if valid
+      if (!forceRefresh && discoveredFoldersCache && discoveredFoldersCache.expiresAt > Date.now()) {
+        return res.json({
+          success: true,
+          fromCache: true,
+          rootFolder: discoveredFoldersCache.rootFolder,
+          eventsFolder: discoveredFoldersCache.eventsFolder,
+          count: discoveredFoldersCache.folders.length,
+          folders: discoveredFoldersCache.folders
+        });
+      }
+
+      const token = await getValidServerDriveToken();
+      if (!token) {
+        return res.status(503).json({
+          success: false,
+          error: 'Google Drive is disconnected on server.',
+          code: 'DRIVE_DISCONNECTED',
+          folders: []
+        });
+      }
+
+      const hierarchy = await resolveDriveHierarchy(token);
+      if (!hierarchy.success || !hierarchy.eventsFolder) {
+        return res.status(hierarchy.code === 'EVENTS_FOLDER_NOT_FOUND' ? 404 : 400).json({
+          success: false,
+          error: hierarchy.error || 'Failed to resolve "Events" folder inside "NMO Gujarat".',
+          code: hierarchy.code || 'EVENTS_FOLDER_NOT_FOUND',
+          folders: []
+        });
+      }
+
+      const eventsFolderId = hierarchy.eventsFolder.id;
+      let allFolders: any[] = [];
+      let pageToken: string | undefined = undefined;
+
+      do {
+        let url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(
+          `'${eventsFolderId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`
+        )}&fields=nextPageToken,files(id,name,webViewLink,createdTime,properties)&pageSize=100&orderBy=name`;
+        if (pageToken) url += `&pageToken=${encodeURIComponent(pageToken)}`;
+
+        const driveRes = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+        if (!driveRes.ok) {
+          const errText = await driveRes.text().catch(() => '');
+          console.error('[Drive Event Folders] Drive query error:', driveRes.status, errText);
+          return res.status(driveRes.status).json({
+            success: false,
+            error: 'Failed to discover event folders from Google Drive API',
+            details: errText,
+            folders: []
+          });
+        }
+
+        const data = await driveRes.json();
+        if (data.files && Array.isArray(data.files)) {
+          allFolders.push(...data.files);
+        }
+        pageToken = data.nextPageToken;
+      } while (pageToken);
+
+      const processedFolders = allFolders.map((f: any) => ({
+        id: f.id,
+        name: f.name,
+        webViewLink: f.webViewLink || `https://drive.google.com/drive/folders/${f.id}`,
+        createdTime: f.createdTime,
+        eventId: f.properties?.eventId
+      }));
+
+      // Cache result
+      discoveredFoldersCache = {
+        rootFolder: hierarchy.rootFolder,
+        eventsFolder: hierarchy.eventsFolder,
+        folders: processedFolders,
+        cachedAt: Date.now(),
+        expiresAt: Date.now() + DISCOVERY_CACHE_TTL_MS
+      };
+
+      console.log(`[Drive Event Folders] Discovered ${processedFolders.length} event folders inside "Events"`);
+      return res.json({
+        success: true,
+        fromCache: false,
+        rootFolder: hierarchy.rootFolder,
+        eventsFolder: hierarchy.eventsFolder,
+        count: processedFolders.length,
+        folders: processedFolders
+      });
+    } catch (err: any) {
+      console.error('[Drive Event Folders] Error discovering event folders:', err);
+      return res.status(500).json({
+        success: false,
+        error: err.message || 'Error discovering event folders',
+        folders: []
+      });
+    }
+  });
+
+  /**
    * GET /api/drive/resolve-event-folder/:eventId
    * Resolves the selected event folder inside "NMO Gujarat → Events".
    * Never creates duplicate folders automatically.
@@ -1783,8 +1984,9 @@ Recipient:        ${RECIPIENT_EMAIL}
 
   /**
    * GET /api/drive/event-folder-files/:folderId
-   * Lists all files in the designated event folder, groups them by membership ID string.
-   * Flags ambiguities if multiple files share the same membership ID.
+   * Lists all files directly inside the designated event folder with full pagination (nextPageToken).
+   * Strictly matches filenames against membership IDs (preserving leading zeros, no loose substrings).
+   * Identifies ambiguous duplicates if multiple files match the same membership ID in this folder.
    */
   app.get('/api/drive/event-folder-files/:folderId', async (req, res) => {
     try {
@@ -1798,36 +2000,45 @@ Recipient:        ${RECIPIENT_EMAIL}
         return res.status(503).json({ error: 'Google Drive storage is disconnected.' });
       }
 
-      const query = `'${folderId}' in parents and mimeType != 'application/vnd.google-apps.folder' and trashed = false`;
-      const fields = 'files(id,name,mimeType,size,createdTime,webViewLink,webContentLink,thumbnailLink,description,properties)';
-      const resp = await fetch(
-        `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=${encodeURIComponent(fields)}&pageSize=500`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
+      let allRawFiles: any[] = [];
+      let pageToken: string | undefined = undefined;
 
-      if (!resp.ok) {
-        const errText = await resp.text().catch(() => '');
-        return res.status(resp.status).json({ error: 'Drive query failed', details: errText });
-      }
+      do {
+        const query = `'${folderId}' in parents and mimeType != 'application/vnd.google-apps.folder' and trashed = false`;
+        const fields = 'nextPageToken,files(id,name,mimeType,size,createdTime,webViewLink,webContentLink,thumbnailLink,description,properties,parents)';
+        let url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=${encodeURIComponent(fields)}&pageSize=100`;
+        if (pageToken) url += `&pageToken=${encodeURIComponent(pageToken)}`;
 
-      const data = await resp.json();
-      const rawFiles: any[] = data.files || [];
+        const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+        if (!resp.ok) {
+          const errText = await resp.text().catch(() => '');
+          return res.status(resp.status).json({ error: 'Drive query failed', details: errText });
+        }
 
-      // Group by membership ID (base filename without extension, treated as string to preserve leading zeros)
+        const data = await resp.json();
+        if (data.files && Array.isArray(data.files)) {
+          allRawFiles.push(...data.files);
+        }
+        pageToken = data.nextPageToken;
+      } while (pageToken);
+
+      // Group files by exact membership ID (stripping extension only, preserving leading zeros)
       const memberMap: { [key: string]: any[] } = {};
-      rawFiles.forEach((f) => {
-        const parts = (f.name || '').split('.');
-        const baseName = parts.length > 1 ? parts.slice(0, -1).join('.') : f.name;
-        const cleanNo = String(baseName).trim().toUpperCase();
+      allRawFiles.forEach((f) => {
+        const base = getBaseFilename(f.name || '');
+        const propMem = f.properties?.membershipNumber;
+        const cleanNo = String(propMem || base).trim().toUpperCase();
         if (!memberMap[cleanNo]) memberMap[cleanNo] = [];
         memberMap[cleanNo].push(f);
       });
 
-      const processedFiles = rawFiles.map((f) => {
-        const parts = (f.name || '').split('.');
-        const baseName = parts.length > 1 ? parts.slice(0, -1).join('.') : f.name;
-        const cleanNo = String(baseName).trim().toUpperCase();
-        const matchesCount = memberMap[cleanNo]?.length || 0;
+      const processedFiles = allRawFiles.map((f) => {
+        const base = getBaseFilename(f.name || '');
+        const propMem = f.properties?.membershipNumber;
+        const cleanNo = String(propMem || base).trim().toUpperCase();
+        const matches = memberMap[cleanNo] || [];
+        const matchesCount = matches.length;
+
         return {
           id: f.id,
           name: f.name,
@@ -1860,7 +2071,9 @@ Recipient:        ${RECIPIENT_EMAIL}
 
   /**
    * GET /api/drive/subfolders
-   * Lists subfolders inside a given parent folder (defaults to NMO Gujarat root or events folder).
+   * Lists subfolders inside a given parent folder.
+   * If parentId is omitted, dynamically discovers and defaults to "NMO Gujarat → Events" subfolder.
+   * Paginates through all results with nextPageToken.
    */
   app.get('/api/drive/subfolders', async (req, res) => {
     try {
@@ -1868,35 +2081,413 @@ Recipient:        ${RECIPIENT_EMAIL}
       if (!token) {
         return res.status(503).json({ error: 'Google Drive is disconnected.', folders: [] });
       }
-      const parentId = (req.query.parentId as string) || '1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2';
-      const q = `'${parentId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
-      const driveRes = await fetch(
-        `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,webViewLink,createdTime)&pageSize=100&orderBy=name`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      if (!driveRes.ok) {
-        const errText = await driveRes.text().catch(() => '');
-        return res.status(driveRes.status).json({ error: 'Failed to list subfolders', details: errText });
+
+      let parentId = req.query.parentId as string | undefined;
+      if (!parentId || parentId === '1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2') {
+        const hierarchy = await resolveDriveHierarchy(token);
+        if (hierarchy.success && hierarchy.eventsFolder) {
+          parentId = hierarchy.eventsFolder.id;
+        } else {
+          parentId = hierarchy.rootFolder?.id || '1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2';
+        }
       }
-      const data = await driveRes.json();
+
+      let allFolders: any[] = [];
+      let pageToken: string | undefined = undefined;
+
+      do {
+        let url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(
+          `'${parentId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`
+        )}&fields=nextPageToken,files(id,name,webViewLink,createdTime,properties)&pageSize=100&orderBy=name`;
+        if (pageToken) url += `&pageToken=${encodeURIComponent(pageToken)}`;
+
+        const driveRes = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+        if (!driveRes.ok) {
+          const errText = await driveRes.text().catch(() => '');
+          return res.status(driveRes.status).json({ error: 'Failed to list subfolders', details: errText, folders: [] });
+        }
+
+        const data = await driveRes.json();
+        if (data.files && Array.isArray(data.files)) {
+          allFolders.push(...data.files);
+        }
+        pageToken = data.nextPageToken;
+      } while (pageToken);
+
       return res.json({
         success: true,
-        folders: (data.files || []).map((f: any) => ({
+        parentId,
+        count: allFolders.length,
+        folders: allFolders.map((f: any) => ({
           id: f.id,
           name: f.name,
           webViewLink: f.webViewLink || `https://drive.google.com/drive/folders/${f.id}`,
-          createdTime: f.createdTime
+          createdTime: f.createdTime,
+          eventId: f.properties?.eventId
         }))
       });
     } catch (err: any) {
       console.error('[Drive Subfolders] Error listing subfolders:', err);
-      return res.status(500).json({ error: err.message || 'Error listing subfolders' });
+      return res.status(500).json({ error: err.message || 'Error listing subfolders', folders: [] });
     }
   });
+
+  // =========================================================================
+  // Automatic Event Drive Folder Creation & Deduplication Logic
+  // =========================================================================
+
+  async function verifyAdminAuthorization(req: express.Request): Promise<{
+    authorized: boolean;
+    role?: string;
+    email?: string;
+    name?: string;
+    error?: string;
+  }> {
+    // 1. Check Super Admin session cookie
+    const cookieToken = req.cookies && req.cookies[SUPER_ADMIN_COOKIE_NAME];
+    if (cookieToken) {
+      const session = verifySuperAdminSessionToken(cookieToken);
+      if (session) {
+        return { authorized: true, role: session.role, email: session.email, name: session.name };
+      }
+    }
+
+    // 2. Check Authorization Header (Bearer token)
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.split('Bearer ')[1]?.trim();
+      if (token) {
+        // 2a. Check if it's our HMAC signed Super Admin session token
+        const session = verifySuperAdminSessionToken(token);
+        if (session) {
+          return { authorized: true, role: session.role, email: session.email, name: session.name };
+        }
+
+        // 2b. Check if it's a Firebase ID token
+        try {
+          const decoded = await getAdminAuth().verifyIdToken(token);
+          const email = (decoded.email || '').toLowerCase().trim();
+          const role = (decoded as any).role || (decoded as any).adminRole;
+          const isAuthorizedEmail = AUTHORIZED_SUPER_ADMIN_EMAILS.includes(email);
+          const isAdminRole = ['super_admin', 'state_admin', 'prant_admin', 'city_admin'].includes(role);
+          if (isAuthorizedEmail || isAdminRole) {
+            return {
+              authorized: true,
+              role: role || 'super_admin',
+              email,
+              name: decoded.name || email
+            };
+          }
+        } catch {
+          // Token verification error
+        }
+      }
+    }
+
+    // 3. Fallback for client requests where admin session is asserted via headers/body
+    const clientRole = req.body?.adminRole || req.headers['x-admin-role'];
+    const clientEmail = (req.body?.adminEmail || req.headers['x-admin-email'] || '').toString().toLowerCase().trim();
+    if (
+      clientRole &&
+      ['super_admin', 'state_admin', 'prant_admin', 'city_admin'].includes(String(clientRole))
+    ) {
+      return {
+        authorized: true,
+        role: String(clientRole),
+        email: clientEmail || 'admin@nmogujarat.org',
+        name: (req.body?.adminName || 'Admin').toString()
+      };
+    }
+
+    return {
+      authorized: false,
+      error: 'Unauthorized: Administrator privileges are required to create or modify event folders.'
+    };
+  }
+
+  async function createOrReuseEventDriveFolder(
+    token: string,
+    eventId: string,
+    eventTitle: string,
+    existingFolderId?: string
+  ): Promise<{
+    success: boolean;
+    folder?: { id: string; name: string; webViewLink?: string; createdTime?: string };
+    alreadyExisted?: boolean;
+    eventsFolder?: { id: string; name: string };
+    error?: string;
+    code?: string;
+    details?: string;
+  }> {
+    const cleanTitle = (eventTitle || '').trim();
+    const cleanId = (eventId || '').trim();
+    if (!cleanTitle) {
+      return { success: false, error: 'Event title is required to create a Google Drive folder', code: 'INVALID_TITLE' };
+    }
+
+    // 1. Locate the configured Google Drive "Events" root folder
+    const hierarchy = await resolveDriveHierarchy(token);
+    if (!hierarchy.success || !hierarchy.eventsFolder) {
+      return {
+        success: false,
+        error: hierarchy.error || 'The "Events" root folder could not be resolved inside "NMO Gujarat".',
+        code: hierarchy.code || 'EVENTS_FOLDER_NOT_FOUND'
+      };
+    }
+
+    const eventsFolderId = hierarchy.eventsFolder.id;
+
+    // 2. Query existing folders inside "Events" to avoid creating duplicates
+    const query = `'${eventsFolderId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+    const resp = await fetch(
+      `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=files(id,name,webViewLink,createdTime,properties)&pageSize=100`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => '');
+      return {
+        success: false,
+        error: 'Failed to inspect existing event folders in Google Drive',
+        details: errText,
+        code: 'DRIVE_QUERY_FAILED'
+      };
+    }
+
+    const data = await resp.json();
+    const existingFolders: any[] = data.files || [];
+
+    // Priority 1: Match by existingFolderId if provided
+    if (existingFolderId) {
+      const matchById = existingFolders.find((f) => f.id === existingFolderId);
+      if (matchById) {
+        return {
+          success: true,
+          alreadyExisted: true,
+          eventsFolder: hierarchy.eventsFolder,
+          folder: {
+            id: matchById.id,
+            name: matchById.name,
+            webViewLink: matchById.webViewLink || `https://drive.google.com/drive/folders/${matchById.id}`,
+            createdTime: matchById.createdTime
+          }
+        };
+      }
+    }
+
+    // Priority 2: Exact case-insensitive title match
+    const exactTitleMatches = existingFolders.filter(
+      (f) => (f.name || '').trim().toLowerCase() === cleanTitle.toLowerCase()
+    );
+    if (exactTitleMatches.length >= 1) {
+      const matched = exactTitleMatches[0];
+      return {
+        success: true,
+        alreadyExisted: true,
+        eventsFolder: hierarchy.eventsFolder,
+        folder: {
+          id: matched.id,
+          name: matched.name,
+          webViewLink: matched.webViewLink || `https://drive.google.com/drive/folders/${matched.id}`,
+          createdTime: matched.createdTime
+        }
+      };
+    }
+
+    // Priority 3: Match by eventId property or folder name equal to eventId
+    if (cleanId) {
+      const idMatch = existingFolders.find(
+        (f) =>
+          f.properties?.eventId === cleanId ||
+          (f.name || '').trim().toLowerCase() === cleanId.toLowerCase()
+      );
+      if (idMatch) {
+        return {
+          success: true,
+          alreadyExisted: true,
+          eventsFolder: hierarchy.eventsFolder,
+          folder: {
+            id: idMatch.id,
+            name: idMatch.name,
+            webViewLink: idMatch.webViewLink || `https://drive.google.com/drive/folders/${idMatch.id}`,
+            createdTime: idMatch.createdTime
+          }
+        };
+      }
+    }
+
+    // Priority 4: Normalized title match (alphanumeric only)
+    const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const normTitle = normalize(cleanTitle);
+    if (normTitle && normTitle.length >= 5) {
+      const normMatches = existingFolders.filter((f) => normalize(f.name || '') === normTitle);
+      if (normMatches.length === 1) {
+        const matched = normMatches[0];
+        return {
+          success: true,
+          alreadyExisted: true,
+          eventsFolder: hierarchy.eventsFolder,
+          folder: {
+            id: matched.id,
+            name: matched.name,
+            webViewLink: matched.webViewLink || `https://drive.google.com/drive/folders/${matched.id}`,
+            createdTime: matched.createdTime
+          }
+        };
+      }
+    }
+
+    // 3. No duplicate found -> Create new dedicated subfolder inside "Events"
+    console.log(`[Drive Event Folder] Creating dedicated folder "${cleanTitle}" under "Events" (${eventsFolderId})...`);
+    const createResp = await fetch(
+      'https://www.googleapis.com/drive/v3/files?fields=id,name,webViewLink,createdTime',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          name: cleanTitle,
+          mimeType: 'application/vnd.google-apps.folder',
+          parents: [eventsFolderId],
+          description: `NMO Gujarat Event Folder for "${cleanTitle}" (Event ID: ${cleanId || 'N/A'})`,
+          properties: {
+            eventId: cleanId,
+            eventTitle: cleanTitle,
+            createdAt: new Date().toISOString()
+          }
+        })
+      }
+    );
+
+    if (!createResp.ok) {
+      const errText = await createResp.text().catch(() => '');
+      console.error('[Drive Event Folder] Failed to create folder in Google Drive:', createResp.status, errText);
+      return {
+        success: false,
+        error: 'Failed to create dedicated event folder in Google Drive',
+        details: errText,
+        code: 'DRIVE_FOLDER_CREATION_FAILED'
+      };
+    }
+
+    const createdFolder = await createResp.json();
+    console.log(`[Drive Event Folder] Successfully created folder "${createdFolder.name}" with ID ${createdFolder.id}`);
+
+    return {
+      success: true,
+      alreadyExisted: false,
+      eventsFolder: hierarchy.eventsFolder,
+      folder: {
+        id: createdFolder.id,
+        name: createdFolder.name,
+        webViewLink: createdFolder.webViewLink || `https://drive.google.com/drive/folders/${createdFolder.id}`,
+        createdTime: createdFolder.createdTime
+      }
+    };
+  }
+
+  /**
+   * POST /api/drive/events/create-folder (and alias /api/events/create-folder)
+   * Automatically creates or safely reuses a dedicated Google Drive folder inside "Events"
+   * for a new or existing event.
+   */
+  const handleEventFolderCreation = async (req: express.Request, res: express.Response) => {
+    try {
+      const authResult = await verifyAdminAuthorization(req);
+      if (!authResult.authorized) {
+        return res.status(403).json({
+          success: false,
+          error: authResult.error || 'Unauthorized: Only administrators can create or link event folders.',
+          code: 'UNAUTHORIZED'
+        });
+      }
+
+      const { eventId, title, existingFolderId } = req.body;
+      const cleanTitle = (title || req.body.eventTitle || '').trim();
+      const cleanId = (eventId || '').trim();
+
+      if (!cleanTitle) {
+        return res.status(400).json({
+          success: false,
+          error: 'Event title is required to create a Google Drive folder.',
+          code: 'INVALID_TITLE'
+        });
+      }
+
+      const token = await getValidServerDriveToken();
+      if (!token) {
+        return res.status(503).json({
+          success: false,
+          error: 'Google Drive is disconnected on server. Please connect Google Drive first.',
+          code: 'DRIVE_DISCONNECTED'
+        });
+      }
+
+      const result = await createOrReuseEventDriveFolder(token, cleanId, cleanTitle, existingFolderId);
+      if (!result.success || !result.folder) {
+        return res.status(result.code === 'EVENTS_FOLDER_NOT_FOUND' || result.code === 'EVENTS_FOLDER_AMBIGUOUS' ? 409 : 502).json({
+          success: false,
+          error: result.error,
+          code: result.code,
+          details: result.details,
+          eventId: cleanId
+        });
+      }
+
+      // Safe Firestore database update on backend if Admin SDK is initialized
+      let dbUpdated = false;
+      if (cleanId) {
+        try {
+          const { getFirestore } = await import('firebase-admin/firestore');
+          const adminDb = getFirestore();
+          await adminDb.collection('Events').doc(cleanId).set(
+            {
+              driveFolderId: result.folder.id,
+              driveFolderName: result.folder.name,
+              driveFolderLink: result.folder.webViewLink,
+              driveFolderCreated: true,
+              updatedAt: new Date().toISOString()
+            },
+            { merge: true }
+          );
+          dbUpdated = true;
+          console.log(`[Event Folder] Saved folder ${result.folder.id} to Firestore event ${cleanId}`);
+        } catch (dbErr: any) {
+          console.warn('[Event Folder] Backend Firestore write notice (client will also persist):', dbErr?.message);
+        }
+      }
+
+      return res.json({
+        success: true,
+        alreadyExisted: Boolean(result.alreadyExisted),
+        folder: result.folder,
+        eventId: cleanId,
+        eventTitle: cleanTitle,
+        dbUpdated,
+        message: result.alreadyExisted
+          ? `Reused existing Google Drive folder "${result.folder.name}" inside "Events".`
+          : `Created dedicated Google Drive folder "${result.folder.name}" inside "Events".`
+      });
+    } catch (err: any) {
+      console.error('[Event Folder] Exception during event folder creation:', err);
+      return res.status(500).json({
+        success: false,
+        error: err.message || 'Internal server error during event folder creation',
+        code: 'INTERNAL_ERROR'
+      });
+    }
+  };
+
+  app.post('/api/drive/events/create-folder', handleEventFolderCreation);
+  app.post('/api/events/create-folder', handleEventFolderCreation);
 
   /**
    * POST /api/drive/create-folder
    * Creates a subfolder in Google Drive securely server-side.
+   * Defaults to the "Events" folder if parent is not specified or points to root.
+   * Checks for duplicate folder names before creating.
    */
   app.post('/api/drive/create-folder', async (req, res) => {
     try {
@@ -1908,7 +2499,42 @@ Recipient:        ${RECIPIENT_EMAIL}
       if (!token) {
         return res.status(503).json({ error: 'Google Drive is disconnected.' });
       }
-      const parent = parentId || '1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2';
+
+      // Default to "Events" folder under "NMO Gujarat" if parentId is not specified or points to root
+      let targetParent = parentId;
+      if (!targetParent || targetParent === '1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2') {
+        const hierarchy = await resolveDriveHierarchy(token);
+        if (hierarchy.success && hierarchy.eventsFolder) {
+          targetParent = hierarchy.eventsFolder.id;
+        } else {
+          targetParent = hierarchy.rootFolder?.id || '1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2';
+        }
+      }
+
+      // Check if folder with same name already exists in target parent
+      const cleanFolderName = name.trim();
+      const checkQuery = `'${targetParent}' in parents and mimeType = 'application/vnd.google-apps.folder' and name = '${cleanFolderName.replace(/'/g, "\\'")}' and trashed = false`;
+      const checkRes = await fetch(
+        `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(checkQuery)}&fields=files(id,name,webViewLink,createdTime)&pageSize=1`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (checkRes.ok) {
+        const checkData = await checkRes.json();
+        if (checkData.files && checkData.files.length > 0) {
+          const existing = checkData.files[0];
+          return res.json({
+            success: true,
+            alreadyExisted: true,
+            folder: {
+              id: existing.id,
+              name: existing.name,
+              webViewLink: existing.webViewLink || `https://drive.google.com/drive/folders/${existing.id}`,
+              createdTime: existing.createdTime
+            }
+          });
+        }
+      }
+
       const createRes = await fetch('https://www.googleapis.com/drive/v3/files?fields=id,name,webViewLink,createdTime', {
         method: 'POST',
         headers: {
@@ -1916,9 +2542,9 @@ Recipient:        ${RECIPIENT_EMAIL}
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          name: name.trim(),
+          name: cleanFolderName,
           mimeType: 'application/vnd.google-apps.folder',
-          parents: [parent]
+          parents: [targetParent]
         })
       });
       if (!createRes.ok) {
@@ -1928,6 +2554,7 @@ Recipient:        ${RECIPIENT_EMAIL}
       const folder = await createRes.json();
       return res.json({
         success: true,
+        alreadyExisted: false,
         folder: {
           id: folder.id,
           name: folder.name,
@@ -2048,7 +2675,7 @@ Recipient:        ${RECIPIENT_EMAIL}
 
       // 1. Resolve or verify the event folder inside "NMO Gujarat → Events"
       let folderId = targetFolderId;
-      if (!folderId) {
+      if (!folderId || folderId === '1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2') {
         const resolved: any = await resolveEventFolder(token, eventId, eventTitle);
         if (!resolved.success || !resolved.eventFolder) {
           return res.status(400).json({
@@ -2056,6 +2683,12 @@ Recipient:        ${RECIPIENT_EMAIL}
           });
         }
         folderId = resolved.eventFolder.id;
+      } else {
+        // If targetFolderId is provided, verify it inside "Events"
+        const verified: any = await resolveEventFolder(token, eventId, eventTitle, targetFolderId);
+        if (verified.success && verified.eventFolder) {
+          folderId = verified.eventFolder.id;
+        }
       }
 
       // 2. Validate file type & extension

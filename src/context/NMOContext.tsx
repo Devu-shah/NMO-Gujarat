@@ -118,7 +118,7 @@ interface NMOContextType {
   addEvent: (eventData: Omit<NMOEvent, 'eventId' | 'createdAt' | 'updatedAt' | 'participants'>) => Promise<string>;
   updateEvent: (event: NMOEvent) => Promise<void>;
   deleteEvent: (eventId: string) => Promise<void>;
-  createEventDriveSubfolder: (eventId: string, eventTitle: string) => Promise<{ id: string; name: string; webViewLink?: string } | null>;
+  createEventDriveSubfolder: (eventId: string, eventTitle: string, existingFolderId?: string) => Promise<{ id: string; name: string; webViewLink?: string } | null>;
   toggleEventDynamicField: (eventId: string, isDynamic: boolean, fieldName?: string, fieldType?: string) => Promise<void>;
 
   // Participant Registration & Workflow (State Committee Review -> Approve/Reject -> Attendance)
@@ -1705,17 +1705,20 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       createdBy: currentUser?.name || currentUser?.email || 'Admin'
     };
 
-    // If Google Drive is connected, auto-generate subfolder under NMO Gujarat Mega Folder
-    if (getDriveAccessToken()) {
-      try {
-        const subfolder = await createEventSubfolderInDrive(eventData.title);
-        if (subfolder?.id) {
-          fullEvent.driveFolderId = subfolder.id;
-          fullEvent.driveFolderLink = subfolder.webViewLink;
-        }
-      } catch (err) {
-        console.warn('Auto create event Drive subfolder notice:', err);
+    // Automatically create or link dedicated Google Drive folder inside "Events" root folder via backend API
+    try {
+      const subfolder = await createEventSubfolderInDrive(eventData.title, newId);
+      if (subfolder?.id) {
+        fullEvent.driveFolderId = subfolder.id;
+        fullEvent.driveFolderLink = subfolder.webViewLink;
+        fullEvent.driveFolderName = subfolder.name;
+        fullEvent.driveFolderCreated = true;
       }
+    } catch (err: any) {
+      // Safe partial failure handling: record the error, persist event in database, and provide safe retry mechanism
+      fullEvent.driveFolderCreated = false;
+      fullEvent.driveFolderError = err?.message || 'Drive folder creation pending';
+      console.warn('[Event Creation] Google Drive folder partial failure:', err?.message || err);
     }
 
     setEvents((prev) => [fullEvent, ...prev]);
@@ -1730,7 +1733,7 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       'EVENT_CREATE',
       'EVENT',
       newId,
-      `Created event: "${fullEvent.title}" (${fullEvent.prant})`
+      `Created event: "${fullEvent.title}" (${fullEvent.prant})${fullEvent.driveFolderId ? ' with Drive folder' : ' (Drive folder pending)'}`
     );
 
     return newId;
@@ -1738,22 +1741,33 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const createEventDriveSubfolder = async (
     eventId: string,
-    eventTitle: string
+    eventTitle: string,
+    existingFolderId?: string
   ): Promise<{ id: string; name: string; webViewLink?: string } | null> => {
     try {
-      const folder = await createEventSubfolderInDrive(eventTitle);
+      const folder = await createEventSubfolderInDrive(eventTitle, eventId, existingFolderId);
       if (folder?.id) {
         setEvents((prev) =>
           prev.map((e) =>
             e.eventId === eventId
-              ? { ...e, driveFolderId: folder.id, driveFolderLink: folder.webViewLink }
+              ? {
+                  ...e,
+                  driveFolderId: folder.id,
+                  driveFolderLink: folder.webViewLink,
+                  driveFolderName: folder.name,
+                  driveFolderCreated: true,
+                  driveFolderError: undefined
+                }
               : e
           )
         );
         try {
           await updateDoc(doc(db, 'Events', eventId), {
             driveFolderId: folder.id,
-            driveFolderLink: folder.webViewLink
+            driveFolderLink: folder.webViewLink,
+            driveFolderName: folder.name,
+            driveFolderCreated: true,
+            driveFolderError: null
           });
         } catch (err) {
           console.warn('Notice saving Drive folder ID to Firestore:', err);
@@ -1762,12 +1776,12 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           'EVENT_UPDATE',
           'EVENT',
           eventId,
-          `Created Google Drive subfolder "${folder.name}" in NMO Gujarat Mega Folder`
+          `Linked Google Drive subfolder "${folder.name}" inside "Events" root folder`
         );
         return folder;
       }
     } catch (err) {
-      console.warn('Error creating event Drive subfolder:', err);
+      console.warn('Error creating/linking event Drive subfolder:', err);
       throw err;
     }
     return null;

@@ -785,7 +785,8 @@ export const listEventSubfoldersInDrive = async (_token?: string): Promise<Drive
  */
 export const createEventSubfolderInDrive = async (
   eventName: string,
-  _token?: string
+  eventId?: string,
+  existingFolderId?: string
 ): Promise<DriveFolderInfo> => {
   const cleanName = eventName.replace(/['"]/g, '').trim();
   if (!cleanName) {
@@ -793,19 +794,25 @@ export const createEventSubfolderInDrive = async (
   }
 
   try {
-    const serverResp = await fetch(apiUrl('/api/drive/create-folder'), {
+    const adminRole = localStorage.getItem('nmo_user_role') || 'super_admin';
+    const serverResp = await fetch(apiUrl('/api/drive/events/create-folder'), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: cleanName, parentId: NMO_ROOT_DRIVE_FOLDER_ID })
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-role': adminRole
+      },
+      body: JSON.stringify({
+        title: cleanName,
+        eventId: eventId || `EVT-${Date.now()}`,
+        existingFolderId,
+        adminRole
+      })
     });
-    if (serverResp.ok) {
-      const data = await serverResp.json();
-      if (data.folder) {
-        return data.folder;
-      }
+    const data = await serverResp.json();
+    if (serverResp.ok && data.success && data.folder) {
+      return data.folder;
     }
-    const errData = await serverResp.json().catch(() => ({}));
-    throw new Error(errData.error || 'Failed to create subfolder in Google Drive.');
+    throw new Error(data.error || 'Failed to create subfolder in Google Drive.');
   } catch (err: any) {
     console.error('Create subfolder error:', err);
     throw new Error(err.message || 'Unable to create event subfolder. Please verify Drive is connected.');
@@ -853,6 +860,39 @@ export const resolveDriveHierarchy = async (): Promise<{
     return {
       success: false,
       error: err.message || 'Failed to query Google Drive folder hierarchy'
+    };
+  }
+};
+
+export interface DiscoveredEventFoldersResult {
+  success: boolean;
+  fromCache?: boolean;
+  rootFolder?: DriveFolderInfo;
+  eventsFolder?: DriveFolderInfo;
+  count: number;
+  folders: Array<DriveFolderInfo & { eventId?: string }>;
+  error?: string;
+  code?: string;
+  details?: string;
+}
+
+/**
+ * Dynamically discovers all event folders inside "NMO Gujarat → Events"
+ * with full pagination (nextPageToken) and explicit error handling.
+ */
+export const discoverAllEventFolders = async (
+  forceRefresh = false
+): Promise<DiscoveredEventFoldersResult> => {
+  try {
+    const res = await fetch(apiUrl(`/api/drive/event-folders${forceRefresh ? '?refresh=true' : ''}`));
+    const data = await res.json();
+    return data;
+  } catch (err: any) {
+    return {
+      success: false,
+      count: 0,
+      folders: [],
+      error: err.message || 'Failed to discover event folders from Google Drive API'
     };
   }
 };

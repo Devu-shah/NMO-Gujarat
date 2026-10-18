@@ -19,6 +19,8 @@ import {
   resolveEventDriveFolder,
   listEventFolderCertificates,
   checkCertificateDuplicate,
+  discoverAllEventFolders,
+  DiscoveredEventFoldersResult,
   NMO_ROOT_DRIVE_FOLDER_ID,
   NMO_ROOT_DRIVE_FOLDER_NAME,
   NMO_ROOT_DRIVE_URL,
@@ -112,6 +114,15 @@ export const AdminCertificatesManager: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'issued' | 'missing' | 'pending'>('all');
 
+  // Discovered Google Drive Folders inside "Events"
+  const [discoveredFolders, setDiscoveredFolders] = useState<DriveFolderInfo[]>([]);
+  const [isDiscoveringFolders, setIsDiscoveringFolders] = useState<boolean>(false);
+  const [discoveryError, setDiscoveryError] = useState<string | null>(null);
+  const [selectedFolderToLink, setSelectedFolderToLink] = useState<string>('');
+  const [isLinkingFolder, setIsLinkingFolder] = useState<boolean>(false);
+  const [isCreatingDedicatedFolder, setIsCreatingDedicatedFolder] = useState<boolean>(false);
+  const [showFolderSwitcher, setShowFolderSwitcher] = useState<boolean>(false);
+
   // Bulk Upload Modal State
   const [showBulkUploadModal, setShowBulkUploadModal] = useState<boolean>(false);
 
@@ -199,10 +210,138 @@ export const AdminCertificatesManager: React.FC = () => {
       }
 
       await loadPendingCertificates();
+      await loadDiscoveredFolders();
     };
 
     initDrive();
   }, []);
+
+  // Dynamically discover all event folders inside "NMO Gujarat → Events" with full pagination
+  const loadDiscoveredFolders = async (forceRefresh = false) => {
+    setIsDiscoveringFolders(true);
+    setDiscoveryError(null);
+    try {
+      const res = await discoverAllEventFolders(forceRefresh);
+      if (res.success && Array.isArray(res.folders)) {
+        setDiscoveredFolders(res.folders);
+        setEventSubfolders(res.folders);
+        if (res.eventsFolder && !eventFolderInfo.eventsFolder) {
+          setEventFolderInfo((prev) => ({ ...prev, eventsFolder: res.eventsFolder }));
+        }
+      } else if (res.error) {
+        setDiscoveryError(res.error);
+      }
+    } catch (err: any) {
+      console.warn('Folder discovery error:', err);
+      setDiscoveryError(err.message || 'Failed to discover event folders from Google Drive API');
+    } finally {
+      setIsDiscoveringFolders(false);
+    }
+  };
+
+  // Match the selected event to a discovered Drive folder using:
+  // 1. Saved Drive folder ID
+  // 2. Exact Title Match
+  // 3. Normalized Title Match
+  const currentEventMatch = useMemo(() => {
+    if (!selectedEvent) return null;
+
+    // 1. Stored Drive folder ID in the event record
+    if (selectedEvent.driveFolderId) {
+      const byId = discoveredFolders.find((f) => f.id === selectedEvent.driveFolderId);
+      if (byId) return { matched: true, folder: byId, method: 'Database ID Match' as const };
+    }
+
+    // 2. Exact name match (case-insensitive)
+    const cleanTitle = (selectedEvent.title || '').trim().toLowerCase();
+    if (cleanTitle) {
+      const byExact = discoveredFolders.find(
+        (f) => (f.name || '').trim().toLowerCase() === cleanTitle
+      );
+      if (byExact) return { matched: true, folder: byExact, method: 'Exact Title Match' as const };
+    }
+
+    // 3. Normalized name match (removing non-alphanumeric differences)
+    const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const normTitle = normalize(selectedEvent.title || '');
+    if (normTitle && normTitle.length >= 4) {
+      const byNorm = discoveredFolders.find((f) => normalize(f.name || '') === normTitle);
+      if (byNorm) return { matched: true, folder: byNorm, method: 'Normalized Name Match' as const };
+    }
+
+    return { matched: false, folder: null, method: 'Unmatched' as const };
+  }, [selectedEvent, discoveredFolders]);
+
+  const handleLinkFolderToEvent = async (folderIdToLink: string) => {
+    if (!selectedEvent || !folderIdToLink) return;
+    const targetFolder = discoveredFolders.find((f) => f.id === folderIdToLink);
+    if (!targetFolder) return;
+
+    setIsLinkingFolder(true);
+    try {
+      const linked = await createEventDriveSubfolder(
+        selectedEvent.eventId,
+        selectedEvent.title,
+        folderIdToLink
+      );
+      if (linked) {
+        setEventFolderInfo({
+          resolved: true,
+          folder: {
+            id: linked.id,
+            name: linked.name,
+            webViewLink: linked.webViewLink
+          },
+          eventsFolder: eventFolderInfo.eventsFolder
+        });
+        await loadEventFolderFiles(linked.id);
+        setShowFolderSwitcher(false);
+        setFeedback({
+          message: `Linked Google Drive folder "${linked.name}" to event "${selectedEvent.title}". Folder ID persisted in database!`,
+          type: 'success'
+        });
+      }
+    } catch (err: any) {
+      setFeedback({
+        message: err.message || 'Failed to link Google Drive folder.',
+        type: 'error'
+      });
+    } finally {
+      setIsLinkingFolder(false);
+    }
+  };
+
+  const handleCreateDedicatedFolder = async () => {
+    if (!selectedEvent) return;
+    setIsCreatingDedicatedFolder(true);
+    try {
+      const created = await createEventDriveSubfolder(selectedEvent.eventId, selectedEvent.title);
+      if (created) {
+        setEventFolderInfo({
+          resolved: true,
+          folder: {
+            id: created.id,
+            name: created.name,
+            webViewLink: created.webViewLink
+          },
+          eventsFolder: eventFolderInfo.eventsFolder
+        });
+        await loadDiscoveredFolders(true);
+        await loadEventFolderFiles(created.id);
+        setFeedback({
+          message: `Created dedicated Google Drive folder "${created.name}" under "Events" and linked it to "${selectedEvent.title}"!`,
+          type: 'success'
+        });
+      }
+    } catch (err: any) {
+      setFeedback({
+        message: err.message || 'Failed to create Google Drive folder for event.',
+        type: 'error'
+      });
+    } finally {
+      setIsCreatingDedicatedFolder(false);
+    }
+  };
 
   // Whenever selectedEventId changes, resolve its folder inside "NMO Gujarat → Events"
   useEffect(() => {
@@ -281,9 +420,10 @@ export const AdminCertificatesManager: React.FC = () => {
         folderIdToScan === NMO_ROOT_DRIVE_FOLDER_ID ? undefined : folderIdToScan
       );
       setDriveFiles(files);
-      if (getDriveAccessToken()) {
-        const folders = await listEventSubfoldersInDrive().catch(() => []);
-        setEventSubfolders(folders);
+      const res = await discoverAllEventFolders().catch(() => null);
+      if (res && Array.isArray(res.folders)) {
+        setEventSubfolders(res.folders);
+        setDiscoveredFolders(res.folders);
       }
     } catch (err: any) {
       console.warn('Scan drive files notice:', err);
@@ -908,70 +1048,159 @@ export const AdminCertificatesManager: React.FC = () => {
               </div>
             </div>
 
-            {/* Folder Resolution & Drive Safety Policy Status */}
-            <div className="p-4 rounded-2xl border text-xs transition-all">
+            {/* Google Drive Directory Discovery & Folder Mapping Status */}
+            <div className="p-4 rounded-2xl border text-xs transition-all bg-slate-50/70 space-y-3">
+              {/* Directory Discovery Header */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2.5 border-b border-slate-200/80">
+                <div className="flex items-center gap-2">
+                  <FolderOpen className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span className="font-bold text-slate-900">
+                    Google Drive Directory Discovery:
+                  </span>
+                  <span className="font-mono text-[11px] text-slate-600 bg-white px-2 py-0.5 rounded border border-slate-200">
+                    NMO Gujarat / Events / *
+                  </span>
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300">
+                    {discoveredFolders.length} Event {discoveredFolders.length === 1 ? 'Folder' : 'Folders'} Discovered
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => loadDiscoveredFolders(true)}
+                    disabled={isDiscoveringFolders}
+                    className="px-2.5 py-1 text-[11px] font-bold text-slate-700 bg-white hover:bg-slate-100 border border-slate-300 rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer shadow-2xs disabled:opacity-50"
+                    title="Re-query Google Drive live with pagination"
+                  >
+                    <RefreshCw className={`w-3 h-3 text-red-700 ${isDiscoveringFolders ? 'animate-spin' : ''}`} />
+                    <span>{isDiscoveringFolders ? 'Scanning Drive...' : 'Refresh Folders'}</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Status & Resolution State */}
               {isResolvingFolder ? (
-                <div className="flex items-center gap-2 text-slate-600">
+                <div className="flex items-center gap-2 text-slate-600 py-1">
                   <RefreshCw className="w-4 h-4 animate-spin text-red-700" />
                   <span>Resolving folder inside "NMO Gujarat → Events" in Google Drive...</span>
                 </div>
               ) : eventFolderInfo.resolved && eventFolderInfo.folder ? (
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-emerald-950 bg-emerald-50/70 p-1.5 rounded-xl">
-                  <div className="space-y-1">
-                    <div className="flex items-center gap-2 font-bold text-emerald-900">
-                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                      <span>Event Folder Successfully Resolved in Google Drive:</span>
+                <div className="space-y-3">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-emerald-950 bg-emerald-50/80 p-3 rounded-xl border border-emerald-200">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2 font-bold text-emerald-900">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                        <span>Matched Google Drive Folder:</span>
+                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-white text-emerald-800 border border-emerald-300">
+                          {currentEventMatch?.method || 'Verified via Drive'}
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-emerald-800 flex items-center gap-2 flex-wrap">
+                        <span className="font-mono bg-white px-2 py-0.5 rounded border border-emerald-300 font-bold">
+                          NMO Gujarat → Events → {eventFolderInfo.folder.name}
+                        </span>
+                        <span className="text-slate-500 font-mono text-[10px]">
+                          ID: {eventFolderInfo.folder.id}
+                        </span>
+                      </div>
                     </div>
-                    <div className="text-[11px] text-emerald-800 flex items-center gap-2 flex-wrap">
-                      <span className="font-mono bg-white px-2 py-0.5 rounded border border-emerald-300">
-                        NMO Gujarat → Events → {eventFolderInfo.folder.name}
-                      </span>
-                      <span className="text-slate-500 font-mono text-[10px]">
-                        ID: {eventFolderInfo.folder.id}
-                      </span>
+
+                    <div className="flex items-center gap-2 shrink-0 flex-wrap">
+                      {eventFolderInfo.folder.webViewLink && (
+                        <a
+                          href={eventFolderInfo.folder.webViewLink}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="px-3 py-1.5 bg-white hover:bg-emerald-100 text-emerald-900 border border-emerald-300 rounded-lg text-xs font-bold flex items-center gap-1 transition-colors cursor-pointer shadow-2xs"
+                        >
+                          <FolderOpen className="w-3.5 h-3.5 text-amber-600" />
+                          <span>Open in Drive</span>
+                          <ExternalLink className="w-3 h-3 text-slate-400" />
+                        </a>
+                      )}
+
+                      {!selectedEvent?.driveFolderId && (
+                        <button
+                          type="button"
+                          onClick={() => handleLinkFolderToEvent(eventFolderInfo.folder!.id)}
+                          disabled={isLinkingFolder}
+                          className="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-xs font-bold flex items-center gap-1 transition-colors cursor-pointer shadow-xs disabled:opacity-50"
+                          title="Save matched folder ID to event record in database"
+                        >
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          <span>{isLinkingFolder ? 'Saving...' : 'Save ID to Event'}</span>
+                        </button>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={() => setShowFolderSwitcher(!showFolderSwitcher)}
+                        className="px-2.5 py-1.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded-lg text-xs font-semibold transition-colors cursor-pointer"
+                      >
+                        {showFolderSwitcher ? 'Close Switcher' : 'Switch Folder'}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => loadEventFolderFiles(eventFolderInfo.folder!.id)}
+                        disabled={isLoadingEventFiles}
+                        className="p-1.5 text-emerald-800 hover:bg-emerald-100 rounded-lg transition-colors cursor-pointer"
+                        title="Re-scan certificates in this folder"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${isLoadingEventFiles ? 'animate-spin' : ''}`} />
+                      </button>
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2 shrink-0">
-                    {eventFolderInfo.folder.webViewLink && (
-                      <a
-                        href={eventFolderInfo.folder.webViewLink}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="px-3 py-1.5 bg-white hover:bg-emerald-100 text-emerald-900 border border-emerald-300 rounded-lg text-xs font-bold flex items-center gap-1 transition-colors cursor-pointer shadow-2xs"
-                      >
-                        <FolderOpen className="w-3.5 h-3.5 text-amber-600" />
-                        <span>Open Folder in Drive</span>
-                        <ExternalLink className="w-3 h-3 text-slate-400" />
-                      </a>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => loadEventFolderFiles(eventFolderInfo.folder!.id)}
-                      disabled={isLoadingEventFiles}
-                      className="p-1.5 text-emerald-800 hover:bg-emerald-100 rounded-lg transition-colors cursor-pointer"
-                      title="Re-scan folder"
-                    >
-                      <RefreshCw className={`w-3.5 h-3.5 ${isLoadingEventFiles ? 'animate-spin' : ''}`} />
-                    </button>
-                  </div>
+                  {/* Manual Folder Switcher Dropdown */}
+                  {showFolderSwitcher && (
+                    <div className="p-3 bg-white border border-slate-200 rounded-xl space-y-2 animate-in fade-in duration-150">
+                      <span className="font-bold text-slate-800 block text-xs">
+                        Assign a Different Discovered Drive Folder to "{selectedEvent?.title}":
+                      </span>
+                      <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                        <select
+                          value={selectedFolderToLink}
+                          onChange={(e) => setSelectedFolderToLink(e.target.value)}
+                          className="flex-1 px-3 py-2 text-xs border border-slate-300 rounded-xl bg-white focus:ring-2 focus:ring-red-600 focus:outline-hidden font-medium"
+                        >
+                          <option value="">-- Choose from {discoveredFolders.length} discovered event folders --</option>
+                          {discoveredFolders.map((f) => (
+                            <option key={f.id} value={f.id}>
+                              {f.name} (Drive ID: {f.id.slice(0, 12)}...)
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => handleLinkFolderToEvent(selectedFolderToLink)}
+                          disabled={!selectedFolderToLink || isLinkingFolder}
+                          className="px-4 py-2 bg-red-700 hover:bg-red-800 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-all cursor-pointer shadow-xs shrink-0"
+                        >
+                          {isLinkingFolder ? 'Linking...' : 'Link Selected Folder'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               ) : (
-                <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-red-950 space-y-2">
+                <div className="p-3.5 bg-amber-50/80 border border-amber-200 rounded-xl text-amber-950 space-y-3">
                   <div className="flex items-start gap-2.5">
-                    <AlertCircle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+                    <AlertCircle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
                     <div>
-                      <span className="font-bold text-sm text-red-900 block">
-                        Folder Resolution Error — Operation Paused
+                      <span className="font-bold text-sm text-amber-900 block">
+                        No Drive Folder Linked for "{selectedEvent?.title}"
                       </span>
-                      <p className="text-xs text-red-800 mt-0.5 leading-relaxed">
-                        {eventFolderInfo.error}
+                      <p className="text-xs text-amber-800 mt-0.5 leading-relaxed">
+                        {eventFolderInfo.error || 'Please link an existing discovered Google Drive folder or create a dedicated folder under "Events".'}
                       </p>
                     </div>
                   </div>
+
                   {eventFolderInfo.isAmbiguous && eventFolderInfo.matchingFolders && (
-                    <div className="pl-7 text-[11px] text-red-700">
-                      <span>Conflicting folders detected in Drive:</span>
+                    <div className="pl-7 text-[11px] text-amber-800">
+                      <span className="font-semibold">Multiple candidate folders detected:</span>
                       <ul className="list-disc list-inside mt-1 font-mono">
                         {eventFolderInfo.matchingFolders.map((f) => (
                           <li key={f.id}>{f.name} (ID: {f.id})</li>
@@ -979,6 +1208,41 @@ export const AdminCertificatesManager: React.FC = () => {
                       </ul>
                     </div>
                   )}
+
+                  {/* Manual Folder Linker & Creation Actions */}
+                  <div className="pt-2 border-t border-amber-200/80 flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                    <select
+                      value={selectedFolderToLink}
+                      onChange={(e) => setSelectedFolderToLink(e.target.value)}
+                      className="flex-1 px-3 py-2 text-xs border border-amber-300 rounded-xl bg-white focus:ring-2 focus:ring-red-600 focus:outline-hidden font-medium"
+                    >
+                      <option value="">-- Link to an Existing Discovered Drive Folder ({discoveredFolders.length} available) --</option>
+                      {discoveredFolders.map((f) => (
+                        <option key={f.id} value={f.id}>
+                          {f.name} (Drive ID: {f.id.slice(0, 12)}...)
+                        </option>
+                      ))}
+                    </select>
+
+                    <button
+                      type="button"
+                      onClick={() => handleLinkFolderToEvent(selectedFolderToLink)}
+                      disabled={!selectedFolderToLink || isLinkingFolder}
+                      className="px-3.5 py-2 bg-amber-700 hover:bg-amber-800 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-all cursor-pointer shadow-xs shrink-0"
+                    >
+                      {isLinkingFolder ? 'Linking...' : 'Link Selected Folder'}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleCreateDedicatedFolder}
+                      disabled={isCreatingDedicatedFolder}
+                      className="px-3.5 py-2 bg-red-700 hover:bg-red-800 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-all cursor-pointer shadow-xs shrink-0 flex items-center justify-center gap-1.5"
+                    >
+                      <FolderPlus className="w-3.5 h-3.5" />
+                      <span>{isCreatingDedicatedFolder ? 'Creating...' : '+ Create Dedicated Folder'}</span>
+                    </button>
+                  </div>
                 </div>
               )}
             </div>

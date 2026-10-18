@@ -39,6 +39,47 @@ export const clearMemberIdCookie = (): void => {
 };
 
 /**
+ * Strips only the file extension from a filename.
+ * e.g. "001.pdf" -> "001", "0012.pdf" -> "0012"
+ */
+export const getBaseFilename = (fileName: string): string => {
+  if (!fileName || typeof fileName !== 'string') return '';
+  const clean = fileName.trim();
+  const lastDot = clean.lastIndexOf('.');
+  return lastDot > 0 ? clean.substring(0, lastDot) : clean;
+};
+
+/**
+ * Checks whether a filename strictly matches a membership ID.
+ * - Membership IDs are strings to preserve leading zeros ("001" !== "1").
+ * - Ignores only the file extension.
+ * - Exact match: baseFilename === membershipId
+ * - Or delimited prefix: baseFilename starts with `${membershipId}_` or `${membershipId}-`
+ * - Strict check: "001" does NOT match "0012.pdf"
+ */
+export const isFilenameMatchingMembershipId = (
+  fileName: string,
+  membershipId: string
+): boolean => {
+  const targetId = String(membershipId || '').trim().toUpperCase();
+  if (!targetId) return false;
+
+  const base = getBaseFilename(fileName).trim().toUpperCase();
+  if (base === targetId) return true;
+
+  if (
+    base.startsWith(`${targetId}_`) ||
+    base.startsWith(`${targetId}-`) ||
+    base.startsWith(`${targetId} `) ||
+    base.startsWith(`${targetId}(`)
+  ) {
+    return true;
+  }
+
+  return false;
+};
+
+/**
  * Strict validator: Checks if a given certificate file or filename belongs to the member in the cookie
  */
 export const isCertificateMatchingCookie = (
@@ -49,11 +90,7 @@ export const isCertificateMatchingCookie = (
   if (!targetId) return false;
 
   const certMem = (cert.membershipNumber || '').trim().toUpperCase();
-  const certName = (cert.name || '').trim().toUpperCase();
+  if (certMem && certMem === targetId) return true;
 
-  // Must match either exact membershipNumber property or filename containing the membership ID
-  if (certMem === targetId) return true;
-  if (certName.includes(targetId)) return true;
-
-  return false;
+  return isFilenameMatchingMembershipId(cert.name, targetId);
 };
