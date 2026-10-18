@@ -25,6 +25,7 @@ import {
   connectWithManualToken
 } from '../../lib/googleDrive';
 import { auth, firebaseConfig } from '../../lib/firebase';
+import { apiUrl } from '../../lib/api';
 
 export type GuideTab =
   | 'invalid_secret'
@@ -62,7 +63,7 @@ export const DriveIntegrationGuideModal: React.FC<DriveIntegrationGuideModalProp
   const [manualFeedback, setManualFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
   const origin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000';
-  const redirectUri = `${origin}/api/auth/google/callback`;
+  const redirectUri = apiUrl('/api/auth/google/callback');
   const localhostRedirectUri = 'http://localhost:3000/api/auth/google/callback';
   const currentProjectId = firebaseConfig.projectId || auth?.app?.options?.projectId || 'nmo-india-demo';
   const currentAuthDomain = firebaseConfig.authDomain || auth?.app?.options?.authDomain || `${currentProjectId}.firebaseapp.com`;
@@ -79,7 +80,7 @@ export const DriveIntegrationGuideModal: React.FC<DriveIntegrationGuideModalProp
   const checkStatus = async () => {
     setIsLoadingStatus(true);
     try {
-      const res = await fetch('/api/drive/status');
+      const res = await fetch(apiUrl('/api/drive/status'));
       if (res.ok) {
         const data = await res.json();
         setServerStatus(data);

@@ -182,3 +182,30 @@ export interface NMOAuditLog {
   details: string;
   timestamp: string;
 }
+
+export type CertificateUploadSource = 'admin' | 'user';
+export type CertificateApprovalStatus = 'not_required' | 'pending' | 'approved' | 'rejected';
+
+export interface NMOCertificateRecord {
+  certId: string;
+  eventId: string;
+  eventTitle: string;
+  membershipNumber: string;
+  memberName: string;
+  uploaderUid: string;
+  uploadSource: CertificateUploadSource;
+  approvalStatus: CertificateApprovalStatus;
+  driveFileId: string;
+  driveFolderId: string;
+  originalFileName: string;
+  mimeType: string;
+  fileSize?: string;
+  uploadedAt: string;
+  decisionByAdminUid?: string;
+  decisionByAdminName?: string;
+  decisionAt?: string;
+  rejectionReason?: string;
+  webViewLink?: string;
+  webContentLink?: string;
+}
+

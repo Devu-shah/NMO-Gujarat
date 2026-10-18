@@ -2,6 +2,7 @@ import { GoogleAuthProvider, signInWithPopup, onAuthStateChanged, User } from 'f
 import { doc, getDoc, setDoc, getDocs, collection, query, where, deleteDoc } from 'firebase/firestore';
 import { auth, db } from './firebase';
 import { getMemberIdCookie, setMemberIdCookie, isCertificateMatchingCookie } from './memberCookie';
+import { apiUrl } from './api';
 
 /**
  * NMO Gujarat Central Google Drive Mega Folder Configuration
@@ -68,7 +69,7 @@ export const saveDriveSessionLocally = (session: SavedDriveSession) => {
  */
 export const saveDriveSessionToBackend = async (session: SavedDriveSession) => {
   try {
-    const res = await fetch('/api/drive/save-session', {
+    const res = await fetch(apiUrl('/api/drive/save-session'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(session)
@@ -101,7 +102,7 @@ export const saveDriveSessionToFirestore = async (session: SavedDriveSession) =>
  */
 export const restoreDriveSessionFromBackend = async (): Promise<SavedDriveSession | null> => {
   try {
-    const res = await fetch('/api/drive/status');
+    const res = await fetch(apiUrl('/api/drive/status'));
     if (res.ok) {
       const data = await res.json();
       if (data.connected && data.accessToken) {
@@ -202,7 +203,7 @@ export const ensureDriveAccessToken = async (forceRefresh = false): Promise<stri
   }
 
   try {
-    const url = `/api/drive/token${forceRefresh ? '?forceRefresh=true' : ''}`;
+    const url = apiUrl(`/api/drive/token${forceRefresh ? '?forceRefresh=true' : ''}`);
     const res = await fetch(url);
     if (res.ok) {
       const data = await res.json();
@@ -330,7 +331,7 @@ export const testServerTokenRefresh = async (): Promise<{
   newExpiresInSeconds?: number;
 }> => {
   try {
-    const res = await fetch('/api/drive/test-expire-and-refresh', { method: 'POST' });
+    const res = await fetch(apiUrl('/api/drive/test-expire-and-refresh'), { method: 'POST' });
     const data = await res.json().catch(() => ({}));
     if (res.ok && data.success) {
       await ensureDriveAccessToken(true);
@@ -345,7 +346,7 @@ export const testServerTokenRefresh = async (): Promise<{
       const stored = getSavedDriveAccount() || (await restoreDriveSessionFromFirestore());
       if (stored && stored.accessToken) {
         await saveDriveSessionToBackend(stored);
-        const retryRes = await fetch('/api/drive/test-expire-and-refresh', { method: 'POST' });
+        const retryRes = await fetch(apiUrl('/api/drive/test-expire-and-refresh'), { method: 'POST' });
         const retryData = await retryRes.json().catch(() => ({}));
         if (retryRes.ok && retryData.success) {
           await ensureDriveAccessToken(true);
@@ -425,7 +426,7 @@ export const initDriveAuth = (
 export const connectGoogleDriveViaServerOAuth = async (): Promise<SavedDriveSession> => {
   return new Promise(async (resolve, reject) => {
     try {
-      const urlRes = await fetch('/api/auth/google/url');
+      const urlRes = await fetch(apiUrl('/api/auth/google/url'));
       if (!urlRes.ok) {
         const errJson = await urlRes.json().catch(() => ({}));
         throw new Error(errJson.message || 'Server Google OAuth 2.0 flow is not configured.');
@@ -447,7 +448,7 @@ export const connectGoogleDriveViaServerOAuth = async (): Promise<SavedDriveSess
 
       if (!popup || popup.closed || typeof popup.closed === 'undefined') {
         // Popup was blocked by browser, redirect current window
-        window.location.href = '/api/auth/google/login';
+        window.location.href = apiUrl('/api/auth/google/login');
         return;
       }
 
@@ -521,7 +522,7 @@ export const connectGoogleDrive = async (): Promise<{
     // Check if server OAuth is configured. If so, prefer the server-side offline flow to get a refresh token!
     let statusRes: Response | null = null;
     try {
-      statusRes = await fetch('/api/drive/status');
+      statusRes = await fetch(apiUrl('/api/drive/status'));
     } catch (e) {}
 
     if (statusRes && statusRes.ok) {
@@ -673,7 +674,7 @@ export const disconnectGoogleDrive = async () => {
   cachedDriveSession = null;
   try {
     localStorage.removeItem(DRIVE_STORAGE_KEY);
-    await fetch('/api/drive/disconnect', { method: 'POST' }).catch(() => {});
+    await fetch(apiUrl('/api/drive/disconnect'), { method: 'POST' }).catch(() => {});
     await setDoc(
       doc(db, 'Settings', 'googleDriveConfig'),
       {
@@ -706,11 +707,19 @@ export interface DriveCertificateFile {
   description?: string;
   proxyViewUrl?: string;
   proxyDownloadUrl?: string;
-  approvalStatus?: 'pending_approval' | 'approved' | 'rejected';
+  uploadSource?: 'admin' | 'user';
   uploadedBy?: 'admin' | 'member';
+  approvalStatus?: 'not_required' | 'pending' | 'approved' | 'rejected' | 'pending_approval';
+  rejectionReason?: string;
+  uploaderUid?: string;
+  decisionByAdminUid?: string;
+  decisionByAdminName?: string;
+  decisionAt?: string;
   assignedAttendance?: boolean;
   approvedAt?: string;
   updatedAt?: string;
+  isAmbiguous?: boolean;
+  ambiguousMatchesCount?: number;
 }
 
 export interface DriveFolderInfo {
@@ -721,24 +730,13 @@ export interface DriveFolderInfo {
 }
 
 /**
- * Set public read permission on a Drive file or folder so anyone with the link can view/download
+ * Set read permission on a Drive file or folder if necessary.
+ * Policy: Certificate viewing is securely mediated through server proxy to protect privacy.
  */
-export const makeDriveResourcePublic = async (fileOrFolderId: string, token: string): Promise<void> => {
-  try {
-    await fetch(`https://www.googleapis.com/drive/v3/files/${fileOrFolderId}/permissions`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        role: 'reader',
-        type: 'anyone'
-      })
-    });
-  } catch (err) {
-    console.warn('Notice setting public permission:', err);
-  }
+export const makeDriveResourcePublic = async (_fileOrFolderId: string, _token: string): Promise<void> => {
+  // Respect security directive: Never make all Drive files publicly accessible to simplify viewing.
+  // Access is securely proxied through /api/drive/file/:fileId.
+  return;
 };
 
 /**
@@ -876,7 +874,125 @@ export const getDriveDirectImageUrl = (fileId: string, thumbnailLink?: string): 
 };
 
 /**
- * Upload a certificate file directly to Google Drive (in either an event subfolder or the mega folder)
+ * Helper to convert browser File object to Base64 string
+ */
+export const fileToBase64 = (file: File): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = (error) => reject(error);
+  });
+};
+
+/**
+ * Dynamically resolves "NMO Gujarat" root folder and "Events" subfolder without hardcoded IDs.
+ * Never creates duplicate folders automatically.
+ */
+export const resolveDriveHierarchy = async (): Promise<{
+  success: boolean;
+  rootFolder?: DriveFolderInfo;
+  eventsFolder?: DriveFolderInfo;
+  error?: string;
+  code?: string;
+}> => {
+  try {
+    const res = await fetch(apiUrl('/api/drive/resolve-hierarchy'));
+    const data = await res.json();
+    return data;
+  } catch (err: any) {
+    return {
+      success: false,
+      error: err.message || 'Failed to query Google Drive folder hierarchy'
+    };
+  }
+};
+
+/**
+ * Resolves the designated event folder inside "NMO Gujarat → Events".
+ * Never creates duplicate event folders automatically.
+ */
+export const resolveEventDriveFolder = async (
+  eventId: string,
+  eventTitle?: string,
+  knownDriveFolderId?: string
+): Promise<{
+  success: boolean;
+  rootFolder?: DriveFolderInfo;
+  eventsFolder?: DriveFolderInfo;
+  eventFolder?: DriveFolderInfo;
+  error?: string;
+  code?: string;
+  availableFolders?: DriveFolderInfo[];
+}> => {
+  try {
+    const params = new URLSearchParams();
+    if (eventTitle) params.set('title', eventTitle);
+    if (knownDriveFolderId) params.set('folderId', knownDriveFolderId);
+
+    const res = await fetch(apiUrl(`/api/drive/resolve-event-folder/${encodeURIComponent(eventId)}?${params.toString()}`));
+    const data = await res.json();
+    return data;
+  } catch (err: any) {
+    return {
+      success: false,
+      error: err.message || 'Failed to resolve event folder in Google Drive'
+    };
+  }
+};
+
+/**
+ * Check if a certificate for this membership ID already exists in the event folder.
+ */
+export const checkCertificateDuplicate = async (
+  folderId: string,
+  membershipNumber: string
+): Promise<{ exists: boolean; matchesCount: number; existingFiles: any[] }> => {
+  try {
+    const res = await fetch(apiUrl('/api/drive/check-duplicate'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folderId, membershipNumber })
+    });
+    if (res.ok) {
+      return await res.json();
+    }
+  } catch (err) {
+    console.warn('Notice checking certificate duplicate:', err);
+  }
+  return { exists: false, matchesCount: 0, existingFiles: [] };
+};
+
+/**
+ * Lists all certificates in a specific event folder on Google Drive.
+ * Matches filenames to membership ID strings (preserving leading zeros).
+ * Identifies duplicate/ambiguous files.
+ */
+export const listEventFolderCertificates = async (
+  folderId: string
+): Promise<{
+  success: boolean;
+  count: number;
+  files: DriveCertificateFile[];
+  memberMap: { [key: string]: any[] };
+}> => {
+  try {
+    const res = await fetch(apiUrl(`/api/drive/event-folder-files/${encodeURIComponent(folderId)}`));
+    if (res.ok) {
+      return await res.json();
+    }
+  } catch (err) {
+    console.warn('Error listing event folder certificates:', err);
+  }
+  return { success: false, count: 0, files: [], memberMap: {} };
+};
+
+/**
+ * Upload a certificate file:
+ * - Admin upload: Directly to Drive event folder. Does NOT require approval.
+ * - User upload: To Drive event folder with status "pending". Requires Admin approval.
+ * - Filename convention: Exactly ${membershipNumber}.${ext} (strings, preserving leading zeros).
+ * - Conflict detection: Prevents silent overwriting.
  */
 export const uploadCertificateToDrive = async (
   file: File,
@@ -886,38 +1002,118 @@ export const uploadCertificateToDrive = async (
     eventId?: string;
     eventTitle?: string;
     targetFolderId?: string;
+    uploadSource?: 'admin' | 'user';
     uploadedBy?: 'admin' | 'member';
-    approvalStatus?: 'pending_approval' | 'approved' | 'rejected';
+    uploaderUid?: string;
+    approvalStatus?: 'not_required' | 'pending' | 'approved' | 'rejected' | 'pending_approval';
+    overwriteExisting?: boolean;
+    existingFileId?: string;
     assignedAttendance?: boolean;
   }
 ): Promise<DriveCertificateFile> => {
+  const cleanNo = String(metadata.membershipNumber).trim().toUpperCase();
+  if (!cleanNo) {
+    throw new Error('Membership Number is required for certificate upload.');
+  }
+
+  // Validate allowed extensions (PDF, JPG, JPEG, PNG)
+  const rawExt = file.name.split('.').pop()?.toLowerCase() || 'jpg';
+  const fileExt = ['pdf', 'jpg', 'jpeg', 'png'].includes(rawExt) ? rawExt : 'jpg';
+
+  if (!['pdf', 'jpg', 'jpeg', 'png'].includes(rawExt)) {
+    throw new Error('Invalid file type: Only PDF, JPG, JPEG, and PNG files are allowed for certificates.');
+  }
+
+  if (file.size > 15 * 1024 * 1024) {
+    throw new Error('File exceeds 15MB size limit. Please upload a smaller certificate file.');
+  }
+
+  const source: 'admin' | 'user' =
+    metadata.uploadSource || (metadata.uploadedBy === 'member' ? 'user' : 'admin');
+
+  const finalApprovalStatus: 'not_required' | 'pending' =
+    source === 'admin' ? 'not_required' : 'pending';
+
+  // 1. Try server-side upload endpoint first (handles hierarchy, Drive upload, and conflict checks)
+  try {
+    const base64Content = await fileToBase64(file);
+    const serverResp = await fetch(apiUrl('/api/drive/upload-certificate'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fileBase64: base64Content,
+        fileName: file.name,
+        mimeType: file.type || (fileExt === 'pdf' ? 'application/pdf' : 'image/jpeg'),
+        membershipNumber: cleanNo,
+        memberName: metadata.memberName,
+        eventId: metadata.eventId || 'general',
+        eventTitle: metadata.eventTitle || 'NMO Event',
+        uploadSource: source,
+        uploaderUid: metadata.uploaderUid || '',
+        overwriteExisting: Boolean(metadata.overwriteExisting),
+        existingFileId: metadata.existingFileId,
+        targetFolderId: metadata.targetFolderId
+      })
+    });
+
+    if (serverResp.status === 409) {
+      const conflictData = await serverResp.json();
+      const conflictError: any = new Error(conflictData.message || `A certificate for membership ID ${cleanNo} already exists.`);
+      conflictError.conflict = true;
+      conflictError.existingFileId = conflictData.existingFileId;
+      conflictError.existingFileName = conflictData.existingFileName;
+      throw conflictError;
+    }
+
+    if (serverResp.ok) {
+      const resJson = await serverResp.json();
+      const certRecord: DriveCertificateFile = {
+        ...resJson.certificate,
+        id: resJson.certificate.driveFileId,
+        name: `${cleanNo}.${fileExt}`,
+        uploadSource: source,
+        approvalStatus: finalApprovalStatus,
+        assignedAttendance: Boolean(metadata.assignedAttendance)
+      };
+
+      // Sync Firestore collection
+      await syncCertificateToFirestore(certRecord);
+      setMemberIdCookie(cleanNo);
+      return certRecord;
+    }
+  } catch (err: any) {
+    if (err.conflict) throw err;
+    console.warn('Server upload endpoint notice, evaluating client fallback:', err);
+  }
+
+  // 2. Direct client fallback if server session is absent or direct token exists
   let token = getDriveAccessToken();
   if (!token) {
     token = await ensureDriveAccessToken();
   }
   if (!token) {
-    throw new Error('Please connect or initialize the NMO Google Drive account before uploading.');
+    throw new Error('Google Drive is not connected. Please connect Google Drive in the Admin Portal before uploading.');
   }
 
-  // Ensure target folder is either the designated event subfolder or the NMO Gujarat mega folder
-  const targetFolderId = metadata.targetFolderId && metadata.targetFolderId.trim()
-    ? metadata.targetFolderId.trim()
-    : NMO_ROOT_DRIVE_FOLDER_ID;
-
-  const cleanNo = metadata.membershipNumber.trim().toUpperCase();
-  const rawExt = file.name.split('.').pop()?.toLowerCase() || 'jpg';
-  const fileExt = ['jpg', 'jpeg', 'png', 'pdf'].includes(rawExt) ? rawExt : 'jpg';
-
-  // Save certificate using member's Membership ID only as requested
+  const targetFolderId = metadata.targetFolderId || NMO_ROOT_DRIVE_FOLDER_ID;
   const customFileName = `${cleanNo}.${fileExt}`;
 
-  const uploadedBy = metadata.uploadedBy || 'admin';
-  const approvalStatus =
-    metadata.approvalStatus || (uploadedBy === 'member' ? 'pending_approval' : 'approved');
+  // Check duplicate on client
+  if (!metadata.overwriteExisting) {
+    const dupCheck = await checkCertificateDuplicate(targetFolderId, cleanNo);
+    if (dupCheck.exists && dupCheck.existingFiles.length > 0) {
+      const existing = dupCheck.existingFiles[0];
+      const conflictErr: any = new Error(`A certificate named "${existing.name}" already exists for Membership ID ${cleanNo}.`);
+      conflictErr.conflict = true;
+      conflictErr.existingFileId = existing.id;
+      conflictErr.existingFileName = existing.name;
+      throw conflictErr;
+    }
+  }
 
   const fileMetadata = {
     name: customFileName,
-    description: `NMO Certificate for Membership ID: ${cleanNo} (${metadata.memberName}). Event: ${metadata.eventTitle || 'General CME'}. Status: ${approvalStatus}. Stored in NMO Gujarat Drive.`,
+    description: `NMO Certificate for Membership ID: ${cleanNo} (${metadata.memberName}). Event: ${metadata.eventTitle || 'Event'}. Source: ${source}. Status: ${finalApprovalStatus}.`,
     parents: [targetFolderId],
     properties: {
       membershipNumber: cleanNo,
@@ -925,64 +1121,31 @@ export const uploadCertificateToDrive = async (
       eventId: metadata.eventId || '',
       eventTitle: metadata.eventTitle || '',
       uploadedAt: new Date().toISOString(),
-      uploadedBy,
-      approvalStatus
+      uploadSource: source,
+      approvalStatus: finalApprovalStatus,
+      uploaderUid: metadata.uploaderUid || ''
     }
   };
 
   const form = new FormData();
-  form.append(
-    'metadata',
-    new Blob([JSON.stringify(fileMetadata)], { type: 'application/json' })
-  );
+  form.append('metadata', new Blob([JSON.stringify(fileMetadata)], { type: 'application/json' }));
   form.append('file', file);
 
-  let res = await fetch(
+  const res = await fetch(
     'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,mimeType,size,createdTime,webViewLink,webContentLink,thumbnailLink,description,properties',
     {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`
-      },
+      headers: { Authorization: `Bearer ${token}` },
       body: form
     }
   );
 
-  // If token expired, auto-renew from backend refresh token and retry upload once
-  if (res.status === 401) {
-    console.log('[Drive Upload] Token expired (401). Automatically refreshing via backend and retrying upload...');
-    const renewedToken = await ensureDriveAccessToken(true);
-    if (renewedToken) {
-      token = renewedToken;
-      res = await fetch(
-        'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,mimeType,size,createdTime,webViewLink,webContentLink,thumbnailLink,description,properties',
-        {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${renewedToken}`
-          },
-          body: form
-        }
-      );
-    }
-  }
-
   if (!res.ok) {
     const errData = await res.json().catch(() => ({}));
-    const rawMsg = errData.error?.message || '';
-    if (rawMsg.includes('invalid authentication credentials') || res.status === 401) {
-      throw new Error(
-        'Google Drive access token expired (401 Invalid Credentials). Please click "Authorize Google Drive" to reconnect, or configure a permanent refresh token in the Drive Setup Guide.'
-      );
-    }
-    throw new Error(rawMsg || 'Failed to upload certificate to Google Drive');
+    throw new Error(errData.error?.message || 'Failed to upload certificate to Google Drive');
   }
 
   const uploadedFile = await res.json();
-
-  // Make the file publicly accessible so end-users can download directly without login
-  await makeDriveResourcePublic(uploadedFile.id, token);
-
   const certRecord: DriveCertificateFile = {
     id: uploadedFile.id,
     name: uploadedFile.name,
@@ -998,30 +1161,56 @@ export const uploadCertificateToDrive = async (
     eventId: metadata.eventId,
     eventTitle: metadata.eventTitle,
     driveFolderId: targetFolderId,
-    approvalStatus,
-    uploadedBy,
+    uploadSource: source,
+    approvalStatus: finalApprovalStatus,
+    uploaderUid: metadata.uploaderUid || '',
+    proxyViewUrl: apiUrl(`/api/drive/file/${uploadedFile.id}`),
+    proxyDownloadUrl: apiUrl(`/api/drive/file/${uploadedFile.id}?download=true`),
     assignedAttendance: Boolean(metadata.assignedAttendance),
     updatedAt: new Date().toISOString()
   };
 
-  // Sync to Firestore for instant user retrieval
   await syncCertificateToFirestore(certRecord);
-
-  // Sync cookie
   setMemberIdCookie(cleanNo);
-
   return certRecord;
 };
 
 /**
  * Save certificate metadata in Firestore "Certificates" collection
+ * Avoids duplicate records for the same event and member by using a deterministic document ID: `${eventId}_${membershipNumber}`
  */
 export const syncCertificateToFirestore = async (cert: DriveCertificateFile): Promise<void> => {
   try {
-    await setDoc(doc(db, 'Certificates', cert.id), {
-      ...cert,
-      updatedAt: new Date().toISOString()
-    });
+    const docId = cert.eventId && cert.membershipNumber
+      ? `${cert.eventId}_${cert.membershipNumber}`
+      : cert.id;
+
+    await setDoc(
+      doc(db, 'Certificates', docId),
+      {
+        certId: docId,
+        eventId: cert.eventId || '',
+        eventTitle: cert.eventTitle || '',
+        membershipNumber: cert.membershipNumber || '',
+        memberName: cert.memberName || '',
+        uploaderUid: cert.uploaderUid || '',
+        uploadSource: cert.uploadSource || (cert.uploadedBy === 'member' ? 'user' : 'admin'),
+        approvalStatus: cert.approvalStatus || 'not_required',
+        driveFileId: cert.id,
+        driveFolderId: cert.driveFolderId || '',
+        originalFileName: cert.name,
+        mimeType: cert.mimeType || 'application/pdf',
+        fileSize: cert.size || '',
+        uploadedAt: cert.createdTime || new Date().toISOString(),
+        decisionByAdminUid: cert.decisionByAdminUid || null,
+        decisionByAdminName: cert.decisionByAdminName || null,
+        decisionAt: cert.decisionAt || null,
+        rejectionReason: cert.rejectionReason || null,
+        webViewLink: cert.webViewLink || null,
+        updatedAt: new Date().toISOString()
+      },
+      { merge: true }
+    );
   } catch (err) {
     console.warn('Notice saving certificate to Firestore:', err);
   }
@@ -1069,7 +1258,7 @@ export const deleteDriveFile = async (fileId: string): Promise<boolean> => {
 
   // 1. Try server delete endpoint
   try {
-    const res = await fetch(`/api/drive/file/${encodeURIComponent(fileId)}`, {
+    const res = await fetch(apiUrl(`/api/drive/file/${encodeURIComponent(fileId)}`), {
       method: 'DELETE'
     });
     if (res.ok) {
@@ -1100,14 +1289,37 @@ export const deleteDriveFile = async (fileId: string): Promise<boolean> => {
 
 /**
  * Admin approves a certificate submission:
- * Marks approvalStatus as 'approved' in Firestore and optionally Drive properties.
+ * Records approving admin details, approval timestamp, updates Drive properties, and marks approvalStatus as 'approved'.
  */
-export const approveCertificate = async (certId: string): Promise<void> => {
+export const approveCertificate = async (
+  certId: string,
+  adminInfo?: { uid?: string; name?: string },
+  driveFileId?: string
+): Promise<void> => {
+  if (driveFileId) {
+    try {
+      await fetch(apiUrl('/api/drive/approve-certificate'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          driveFileId,
+          adminUid: adminInfo?.uid || '',
+          adminName: adminInfo?.name || 'Administrator'
+        })
+      });
+    } catch (e) {
+      console.warn('Backend drive approval update note:', e);
+    }
+  }
+
   try {
     await setDoc(
       doc(db, 'Certificates', certId),
       {
         approvalStatus: 'approved',
+        decisionByAdminUid: adminInfo?.uid || 'admin',
+        decisionByAdminName: adminInfo?.name || 'Administrator',
+        decisionAt: new Date().toISOString(),
         approvedAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       },
@@ -1121,42 +1333,88 @@ export const approveCertificate = async (certId: string): Promise<void> => {
 
 /**
  * Admin rejects a certificate submission:
- * 1. Deletes the physical file from Google Drive
- * 2. Deletes the certificate document from Firestore
+ * 1. Permanently removes the unapproved file from Google Drive via backend
+ * 2. Records the rejection decision, reason, and admin metadata in Firestore
  */
 export const rejectAndDeleteCertificate = async (
   certId: string,
-  driveFileId: string
+  driveFileId: string,
+  rejectionReason?: string,
+  adminInfo?: { uid?: string; name?: string }
 ): Promise<void> => {
-  // 1. Permanently delete from Google Drive
-  await deleteDriveFile(driveFileId || certId).catch((e) => {
-    console.warn('Notice deleting rejected file from Drive:', e);
-  });
-
-  // 2. Remove record from Firestore
   try {
-    await deleteDoc(doc(db, 'Certificates', certId));
+    await fetch(apiUrl('/api/drive/reject-certificate'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        driveFileId: driveFileId || certId,
+        rejectionReason: rejectionReason || 'Certificate submission could not be verified by administrator',
+        adminUid: adminInfo?.uid || '',
+        adminName: adminInfo?.name || 'Administrator'
+      })
+    });
+  } catch (e) {
+    console.warn('Backend drive reject note:', e);
+    await deleteDriveFile(driveFileId || certId).catch(() => {});
+  }
+
+  try {
+    await setDoc(
+      doc(db, 'Certificates', certId),
+      {
+        approvalStatus: 'rejected',
+        rejectionReason: rejectionReason || 'Certificate submission could not be verified by administrator',
+        decisionByAdminUid: adminInfo?.uid || 'admin',
+        decisionByAdminName: adminInfo?.name || 'Administrator',
+        decisionAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      },
+      { merge: true }
+    );
   } catch (err) {
-    console.warn('Notice removing certificate record from Firestore:', err);
+    console.warn('Notice updating rejected certificate record in Firestore:', err);
   }
 };
 
 /**
- * Fetch all certificate uploads waiting for Admin Approval
+ * Fetch all user-uploaded certificate submissions waiting for Admin Approval.
+ * Strictly excludes admin-uploaded certificates from this approval queue!
  */
 export const fetchPendingCertificates = async (): Promise<DriveCertificateFile[]> => {
   try {
     const q = query(
       collection(db, 'Certificates'),
-      where('approvalStatus', '==', 'pending_approval')
+      where('uploadSource', '==', 'user')
     );
     const snap = await getDocs(q);
-    return snap.docs.map((d) => d.data() as DriveCertificateFile);
+    const certs = snap.docs.map((d) => d.data() as any);
+    return certs
+      .filter((c) => c.approvalStatus === 'pending' || c.approvalStatus === 'pending_approval')
+      .map((c) => ({
+        id: c.driveFileId || c.certId,
+        name: c.originalFileName || `${c.membershipNumber}.pdf`,
+        mimeType: c.mimeType || 'application/pdf',
+        size: c.fileSize,
+        createdTime: c.uploadedAt,
+        membershipNumber: c.membershipNumber,
+        memberName: c.memberName,
+        eventId: c.eventId,
+        eventTitle: c.eventTitle,
+        driveFolderId: c.driveFolderId,
+        uploadSource: 'user',
+        approvalStatus: 'pending',
+        uploaderUid: c.uploaderUid,
+        proxyViewUrl: apiUrl(`/api/drive/file/${c.driveFileId || c.certId}`),
+        proxyDownloadUrl: apiUrl(`/api/drive/file/${c.driveFileId || c.certId}?download=true`)
+      }));
   } catch (err: any) {
-    // If composite query fails or field unindexed, fallback to memory filter
     try {
       const all = await fetchAllCertificatesFromFirestore();
-      return all.filter((c) => c.approvalStatus === 'pending_approval');
+      return all.filter(
+        (c) =>
+          c.uploadSource === 'user' &&
+          (c.approvalStatus === 'pending' || c.approvalStatus === 'pending_approval')
+      );
     } catch {
       return [];
     }
@@ -1181,7 +1439,7 @@ export const fetchCertificatesByMembershipNumber = async (
   // The server has the active Google Drive connection and searches Drive for files
   // where the file name contains the participant's membership ID.
   try {
-    const serverResp = await fetch(`/api/drive/member-certificates/${encodeURIComponent(cleanNo)}`);
+    const serverResp = await fetch(apiUrl(`/api/drive/member-certificates/${encodeURIComponent(cleanNo)}`));
     if (serverResp.ok) {
       const serverData = await serverResp.json();
       if (serverData.certificates && Array.isArray(serverData.certificates) && serverData.certificates.length > 0) {
@@ -1372,7 +1630,7 @@ export const listCertificatesInFolder = async (
 export const downloadDriveCertificate = async (fileId: string, filename: string): Promise<void> => {
   // 1. Try server streaming proxy endpoint first
   try {
-    const res = await fetch(`/api/drive/file/${fileId}?download=true`);
+    const res = await fetch(apiUrl(`/api/drive/file/${fileId}?download=true`));
     if (res.ok) {
       const blob = await res.blob();
       const url = window.URL.createObjectURL(blob);

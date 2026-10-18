@@ -354,8 +354,8 @@ export const AdminRegistrationsManager: React.FC<AdminRegistrationsManagerProps>
       {/* Registrations & Participants Table */}
       <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
-            <thead className="bg-slate-50 text-slate-700 font-bold border-b border-slate-200">
+          <table className="w-full text-left text-xs min-w-[960px] border-collapse">
+            <thead className="bg-slate-50 text-slate-700 font-bold border-b border-slate-200 sticky top-0 z-20">
               <tr>
                 <th className="p-3.5">Event</th>
                 <th className="p-3.5">Member Details</th>
@@ -363,7 +363,9 @@ export const AdminRegistrationsManager: React.FC<AdminRegistrationsManagerProps>
                 <th className="p-3.5">Registered On</th>
                 <th className="p-3.5">Approval Status</th>
                 <th className="p-3.5">Attendance Status</th>
-                <th className="p-3.5 text-right">Committee Actions</th>
+                <th className="p-3.5 text-right sticky right-0 bg-slate-50 z-30 shadow-[-4px_0_6px_-2px_rgba(0,0,0,0.06)] min-w-[210px]">
+                  Committee Actions
+                </th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -375,7 +377,7 @@ export const AdminRegistrationsManager: React.FC<AdminRegistrationsManagerProps>
                 </tr>
               ) : (
                 filteredRegistrations.map((r: any) => (
-                  <tr key={`${r.eventId}-${r.membershipNumber}`} className="hover:bg-slate-50/80 transition-colors">
+                  <tr key={`${r.eventId}-${r.membershipNumber}`} className="hover:bg-slate-50/80 transition-colors group">
                     <td className="p-3.5">
                       <span className="font-bold text-slate-900 block">{r.eventTitle}</span>
                       <span className="text-[10px] text-slate-500 flex items-center gap-1 mt-0.5">
@@ -457,12 +459,13 @@ export const AdminRegistrationsManager: React.FC<AdminRegistrationsManagerProps>
                     </td>
 
                     {/* Quick Action Buttons */}
-                    <td className="p-3.5 text-right whitespace-nowrap">
-                      <div className="flex items-center justify-end gap-1">
+                    <td className="p-3.5 text-right whitespace-nowrap sticky right-0 bg-white group-hover:bg-slate-50 z-10 shadow-[-4px_0_6px_-2px_rgba(0,0,0,0.06)] min-w-[210px]">
+                      <div className="flex items-center justify-end gap-1.5 flex-nowrap">
                         {r.approvalStatus !== 'Approved' && (
                           <button
+                            type="button"
                             onClick={() => updateParticipantApproval(r.eventId, r.membershipNumber, 'Approved')}
-                            className="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[10px] font-bold transition-colors cursor-pointer"
+                            className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[10px] font-bold transition-colors cursor-pointer shrink-0 shadow-2xs"
                             title="Approve registration"
                           >
                             Approve
@@ -470,21 +473,23 @@ export const AdminRegistrationsManager: React.FC<AdminRegistrationsManagerProps>
                         )}
                         {r.attendanceStatus !== 'Attended' ? (
                           <button
+                            type="button"
                             onClick={async () => {
                               if (r.approvalStatus !== 'Approved') {
                                 await updateParticipantApproval(r.eventId, r.membershipNumber, 'Approved');
                               }
                               await updateParticipantAttendance(r.eventId, r.membershipNumber, 'Attended');
                             }}
-                            className="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-[10px] font-bold transition-colors cursor-pointer"
+                            className="px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-[10px] font-bold transition-colors cursor-pointer shrink-0 shadow-2xs"
                             title="Mark as Present"
                           >
                             Mark Present
                           </button>
                         ) : (
                           <button
+                            type="button"
                             onClick={() => updateParticipantAttendance(r.eventId, r.membershipNumber, 'Not Attended')}
-                            className="px-2 py-1 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded text-[10px] font-bold transition-colors cursor-pointer"
+                            className="px-2.5 py-1 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded text-[10px] font-bold transition-colors cursor-pointer shrink-0"
                             title="Mark as Absent"
                           >
                             Mark Absent
@@ -492,14 +497,16 @@ export const AdminRegistrationsManager: React.FC<AdminRegistrationsManagerProps>
                         )}
                         {r.approvalStatus === 'Pending' && (
                           <button
+                            type="button"
                             onClick={() => updateParticipantApproval(r.eventId, r.membershipNumber, 'Rejected')}
-                            className="px-2 py-1 bg-slate-200 hover:bg-red-100 hover:text-red-700 text-slate-700 rounded text-[10px] font-bold transition-colors cursor-pointer"
+                            className="px-2.5 py-1 bg-slate-200 hover:bg-red-100 hover:text-red-700 text-slate-700 rounded text-[10px] font-bold transition-colors cursor-pointer shrink-0"
                             title="Reject registration"
                           >
                             Reject
                           </button>
                         )}
                         <button
+                          type="button"
                           onClick={async () => {
                             if (
                               window.confirm(
@@ -511,7 +518,7 @@ export const AdminRegistrationsManager: React.FC<AdminRegistrationsManagerProps>
                               setTimeout(() => setFeedback(null), 3000);
                             }
                           }}
-                          className="p-1 bg-slate-100 hover:bg-rose-100 text-slate-500 hover:text-rose-700 rounded transition-colors cursor-pointer"
+                          className="p-1 bg-slate-100 hover:bg-rose-100 text-slate-500 hover:text-rose-700 rounded transition-colors cursor-pointer shrink-0"
                           title="Delete entry from attendee list"
                         >
                           <Trash2 className="w-3.5 h-3.5" />

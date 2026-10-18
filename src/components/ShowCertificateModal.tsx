@@ -75,8 +75,11 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
       setMemberIdCookie(targetMemberNo);
       // Mechanism: Call the membership ID to retrieve only this member's certificates
       const results = await fetchCertificatesByMembershipNumber(targetMemberNo);
-      // Strictly filter to ensure only this specific member's certificates are shown
+      // Strictly filter: only show verified, approved, or admin-uploaded certificates for this member
       const strictlyFiltered = results.filter((c) => {
+        if (c.approvalStatus === 'pending' || c.approvalStatus === 'pending_approval' || c.approvalStatus === 'rejected') {
+          return false;
+        }
         return isCertificateMatchingCookie(c, targetMemberNo);
       });
       setCertificates(strictlyFiltered);

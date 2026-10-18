@@ -1,0 +1,14 @@
+{
+  "projects": {
+    "default": "nmo-india-demo"
+  },
+  "targets": {
+    "nmo-india-demo": {
+      "hosting": {
+        "nmo-gujarat": [
+          "nmo-gujarat"
+        ]
+      }
+    }
+  }
+}

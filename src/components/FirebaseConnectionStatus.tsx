@@ -78,7 +78,7 @@ export const FirebaseConnectionStatus: React.FC = () => {
                 <span className="text-[11px] font-medium">Project ID:</span>
               </div>
               <span className="font-mono text-[11px] font-bold text-slate-800">
-                {firebaseConfig.projectId || 'favorable-shine-4ghtt'}
+                {firebaseConfig.projectId || 'nmo-india-demo'}
               </span>
             </div>
 

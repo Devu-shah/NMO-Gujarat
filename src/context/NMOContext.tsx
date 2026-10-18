@@ -1,4 +1,3 @@
-import { apiUrl } from '../lib/api';
 import React, { createContext, useContext, useState, useEffect, useMemo } from 'react';
 import {
   NMOUserRecord,
@@ -39,6 +38,7 @@ import {
   getDriveAccessToken
 } from '../lib/googleDrive';
 import { setMemberIdCookie, clearMemberIdCookie } from '../lib/memberCookie';
+import { apiUrl } from '../lib/api';
 
 interface NMOContextType {
   // Auth state
@@ -611,9 +611,17 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           setCurrentUser(matched);
         }
       } else {
-        // Maintain admin login: Check if Super Admin server-side cookie exists
+        // Maintain admin login: Check if Super Admin server-side cookie or session token exists
         try {
-          const resp = await fetch(apiUrl('/api/admin/session'), { credentials: 'include' });
+          const storedToken = localStorage.getItem('nmo_superadmin_session_token');
+          const headers: Record<string, string> = {};
+          if (storedToken) {
+            headers['Authorization'] = `Bearer ${storedToken}`;
+          }
+          const resp = await fetch(apiUrl('/api/admin/session'), {
+            credentials: 'include',
+            headers
+          });
           if (resp.ok) {
             const data = await resp.json();
             if (data.authenticated && data.user) {
@@ -632,6 +640,8 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               };
               setCurrentUser(sessionAdmin);
             }
+          } else if (storedToken) {
+            localStorage.removeItem('nmo_superadmin_session_token');
           }
         } catch (cookieErr) {
           // Silently proceed if server session check unavailable
@@ -735,33 +745,30 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
 
       setCurrentUser(verifiedAdmin);
-          // Request a server-side session using a verified Firebase ID token
-      try {
-        const idToken = await authUser.getIdToken();
 
-        const response = await fetch(apiUrl('/api/admin/login'), {
+      // Maintain login for admins: Store server-side cookie accessible only by superadmin
+      try {
+        const idToken = await authUser.getIdToken(true);
+        const loginResp = await fetch(apiUrl('/api/admin/login'), {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${idToken}`,
+            'Authorization': `Bearer ${idToken}`
           },
           credentials: 'include',
           body: JSON.stringify({
             membershipNumber: officialMemNo,
-            name: verifiedAdmin.name,
-          }),
+            name: verifiedAdmin.name
+          })
         });
-
-        if (!response.ok) {
-          throw new Error(
-            `Admin session creation failed: ${response.status}`
-          );
+        if (loginResp.ok) {
+          const loginData = await loginResp.json().catch(() => null);
+          if (loginData?.sessionToken) {
+            localStorage.setItem('nmo_superadmin_session_token', loginData.sessionToken);
+          }
         }
       } catch (cookieErr) {
-        console.error(
-          'Could not create verified admin session:',
-          cookieErr
-        );
+        console.warn('Notice setting server-side admin cookie:', cookieErr);
       }
 
       try {
@@ -973,6 +980,7 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const logout = async () => {
     try {
+      localStorage.removeItem('nmo_superadmin_session_token');
       await fetch(apiUrl('/api/admin/logout'), { method: 'POST', credentials: 'include' });
     } catch {}
     try {

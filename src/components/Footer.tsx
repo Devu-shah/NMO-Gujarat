@@ -131,9 +131,14 @@ export const Footer: React.FC<FooterProps> = ({ onNavigate, onOpenVerify, onOpen
         </div>
 
         {/* Bottom Bar */}
-        <div className="mt-12 pt-6 border-t border-slate-900 text-xs text-slate-500 flex flex-col sm:flex-row items-center justify-between gap-4">
-          <p>© {new Date().getFullYear()} National Medicos Organisation (NMO) Gujarat. All rights reserved.</p>
-          <div className="flex items-center gap-4 text-slate-400">
+        <div className="mt-12 pt-6 border-t border-slate-900 text-xs text-slate-500 flex flex-col md:flex-row items-center justify-between gap-4">
+          <div className="space-y-1 text-center md:text-left">
+            <p>© {new Date().getFullYear()} National Medicos Organisation (NMO) Gujarat. All rights reserved.</p>
+            <p className="text-slate-400 text-xs font-medium">
+              Developed by : Devansh Shah, 3rd MBBS, Medical College Baroda
+            </p>
+          </div>
+          <div className="flex items-center gap-4 text-slate-400 text-xs">
             <span>Gujarat Prant</span>
             <span>·</span>
             <span>Saurashtra Prant</span>

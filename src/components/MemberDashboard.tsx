@@ -1211,8 +1211,8 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
 
       {/* Show Participants Modal */}
       {selectedParticipantsEvent && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs overflow-y-auto animate-in fade-in duration-150">
-          <div className="bg-white rounded-2xl max-w-3xl w-full p-6 shadow-2xl border border-slate-200 max-h-[90vh] flex flex-col my-auto">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/70 backdrop-blur-xs overflow-y-auto animate-in fade-in duration-150">
+          <div className="bg-white rounded-2xl max-w-5xl xl:max-w-6xl w-full p-4 sm:p-6 shadow-2xl border border-slate-200 max-h-[92vh] flex flex-col my-auto">
             {/* Modal Header */}
             <div className="flex items-start justify-between pb-4 border-b border-slate-100 gap-3">
               <div>
@@ -1328,9 +1328,9 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
             </div>
 
             {/* Participants Table */}
-            <div className="flex-1 overflow-y-auto border border-slate-200 rounded-xl">
-              <table className="w-full text-left text-xs">
-                <thead className="bg-slate-50 text-slate-700 font-bold border-b border-slate-200 sticky top-0">
+            <div className="flex-1 overflow-x-auto overflow-y-auto border border-slate-200 rounded-xl min-h-[260px] bg-white">
+              <table className="w-full text-left text-xs min-w-[850px] border-collapse">
+                <thead className="bg-slate-50 text-slate-700 font-bold border-b border-slate-200 sticky top-0 z-20">
                   <tr>
                     <th className="p-3">#</th>
                     <th className="p-3">Participant Name</th>
@@ -1339,7 +1339,11 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
                     <th className="p-3">Registered On</th>
                     <th className="p-3 text-center">Status</th>
                     <th className="p-3 text-center">Attendance</th>
-                    {isAdmin && <th className="p-3 text-right">Admin Actions</th>}
+                    {isAdmin && (
+                      <th className="p-3 text-right sticky right-0 bg-slate-50 z-30 shadow-[-4px_0_6px_-2px_rgba(0,0,0,0.06)] min-w-[170px]">
+                        Admin Actions
+                      </th>
+                    )}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -1367,7 +1371,7 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
                     }
 
                     return filtered.map((p, idx) => (
-                      <tr key={p.membershipNumber || idx} className="hover:bg-slate-50/70">
+                      <tr key={p.membershipNumber || idx} className="hover:bg-slate-50/70 group">
                         <td className="p-3 text-slate-400 font-mono">{idx + 1}</td>
                         <td className="p-3 font-semibold text-slate-900">
                           <div>{p.name || 'Member'}</div>
@@ -1406,15 +1410,15 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
                           </span>
                         </td>
                         {isAdmin && (
-                          <td className="p-3 text-right whitespace-nowrap">
-                            <div className="flex items-center justify-end gap-1">
+                          <td className="p-3 text-right whitespace-nowrap sticky right-0 bg-white group-hover:bg-slate-50 z-10 shadow-[-4px_0_6px_-2px_rgba(0,0,0,0.06)] min-w-[170px]">
+                            <div className="flex items-center justify-end gap-1.5 flex-nowrap">
                               {p.approvalStatus !== 'Approved' && (
                                 <button
                                   type="button"
                                   onClick={() =>
                                     updateParticipantApproval(selectedParticipantsEvent.eventId, p.membershipNumber, 'Approved')
                                   }
-                                  className="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[10px] font-bold transition-colors cursor-pointer"
+                                  className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[11px] font-bold transition-colors cursor-pointer shrink-0 shadow-2xs"
                                   title="Approve registration"
                                 >
                                   Approve
@@ -1429,7 +1433,7 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
                                     }
                                     await updateParticipantAttendance(selectedParticipantsEvent.eventId, p.membershipNumber, 'Attended');
                                   }}
-                                  className="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-[10px] font-bold transition-colors cursor-pointer"
+                                  className="px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-[11px] font-bold transition-colors cursor-pointer shrink-0 shadow-2xs"
                                   title="Mark Present"
                                 >
                                   Present
@@ -1440,7 +1444,7 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
                                   onClick={() =>
                                     updateParticipantAttendance(selectedParticipantsEvent.eventId, p.membershipNumber, 'Not Attended')
                                   }
-                                  className="px-2 py-1 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded text-[10px] font-bold transition-colors cursor-pointer"
+                                  className="px-2.5 py-1 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded text-[11px] font-bold transition-colors cursor-pointer shrink-0"
                                   title="Mark Absent"
                                 >
                                   Absent

@@ -56,28 +56,32 @@ export const UploadCertificateModal: React.FC<UploadCertificateModalProps> = ({
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Strict JPG / PNG validation as requested
-    const validMimes = ['image/jpeg', 'image/jpg', 'image/png'];
-    const lowerName = file.name.toLowerCase();
-    const hasValidExt = lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg') || lowerName.endsWith('.png');
+    // Valid file formats: PDF, JPG, JPEG, PNG
+    const rawExt = file.name.split('.').pop()?.toLowerCase() || '';
+    const validExtensions = ['pdf', 'jpg', 'jpeg', 'png'];
+    const validMimes = ['application/pdf', 'image/jpeg', 'image/jpg', 'image/png'];
 
-    if (!validMimes.includes(file.type) && !hasValidExt) {
-      setErrorMessage('Security & Format Policy: Only JPG and PNG image files are supported for certificate upload.');
+    if (!validExtensions.includes(rawExt) && !validMimes.includes(file.type)) {
+      setErrorMessage('Security & Format Policy: Only PDF, JPG, JPEG, and PNG files are supported for certificate upload.');
       setSelectedFile(null);
       setPreviewUrl(null);
       return;
     }
 
     if (file.size > 15 * 1024 * 1024) {
-      setErrorMessage('Image size exceeds 15MB limit. Please upload a compressed JPG/PNG certificate.');
+      setErrorMessage('File size exceeds the 15MB limit. Please upload a smaller certificate file.');
       setSelectedFile(null);
       setPreviewUrl(null);
       return;
     }
 
     setSelectedFile(file);
-    const objectUrl = URL.createObjectURL(file);
-    setPreviewUrl(objectUrl);
+    if (file.type.startsWith('image/')) {
+      const objectUrl = URL.createObjectURL(file);
+      setPreviewUrl(objectUrl);
+    } else {
+      setPreviewUrl(null);
+    }
   };
 
   const handleUploadSubmit = async (e: React.FormEvent) => {
@@ -86,45 +90,38 @@ export const UploadCertificateModal: React.FC<UploadCertificateModalProps> = ({
     setSuccessMessage(null);
 
     if (!selectedFile) {
-      setErrorMessage('Please select a JPG or PNG certificate image.');
+      setErrorMessage('Please select a PDF, JPG, or PNG certificate file.');
       return;
     }
 
+    // Ensure memberNo is obtained from verified authenticated user profile only
     if (!memberNo) {
-      setErrorMessage('Authentication error: No linked membership ID found on your current session.');
+      setErrorMessage('Authentication error: No linked membership ID found on your current session. Please verify your member profile.');
       return;
     }
 
     setIsUploading(true);
     try {
-      // 1. Ensure Google Drive session is active or restored
-      let token = getDriveAccessToken();
-      if (!token) {
-        token = await ensureDriveAccessToken();
-      }
-      if (!token) {
-        // Connect and save Google Drive credentials
-        const driveRes = await connectGoogleDrive();
-        token = driveRes.accessToken;
-      }
-
-      // 2. Identify target event folder if specified
-      const matchedEvent = events.find((ev) => ev.eventId === selectedEventId);
-      const targetFolderId = matchedEvent?.driveFolderId || NMO_ROOT_DRIVE_FOLDER_ID;
+      // 1. Validate selected event if provided
+      const matchedEvent = selectedEventId ? events.find((ev) => ev.eventId === selectedEventId) : null;
+      let targetFolderId = matchedEvent?.driveFolderId || NMO_ROOT_DRIVE_FOLDER_ID;
       const eventTitle = customCertTitle.trim() || matchedEvent?.title || defaultEventTitle || 'NMO Certificate';
 
-      // 3. Upload strictly named with user's Membership ID
+      // 2. Upload strictly with user's verified Membership ID as filename
+      // uploadSource is strictly 'user', approvalStatus is strictly 'pending'
       const certResult = await uploadCertificateToDrive(selectedFile, {
         membershipNumber: memberNo,
         memberName,
-        eventId: selectedEventId || undefined,
+        eventId: selectedEventId || 'general',
         eventTitle,
         targetFolderId,
+        uploadSource: 'user',
         uploadedBy: 'member',
-        approvalStatus: 'pending_approval'
+        uploaderUid: currentUser?.uid || '',
+        approvalStatus: 'pending'
       });
 
-      setSuccessMessage(`Certificate uploaded and submitted for Admin Approval! Once verified by an administrator, it will be finalized in Google Drive. If rejected, it will be removed.`);
+      setSuccessMessage(`Certificate uploaded successfully! Your submission for ${eventTitle} is now pending admin approval. You can track its status in the Certificate Portal.`);
       if (onSuccess) {
         onSuccess(certResult);
       }
@@ -220,7 +217,7 @@ export const UploadCertificateModal: React.FC<UploadCertificateModalProps> = ({
                   type="file"
                   id="cert-file-input"
                   required
-                  accept="image/jpeg,image/png,image/jpg"
+                  accept=".pdf,application/pdf,image/jpeg,image/png,image/jpg"
                   onChange={handleFileChange}
                   className="hidden"
                 />
@@ -232,10 +229,10 @@ export const UploadCertificateModal: React.FC<UploadCertificateModalProps> = ({
                     <ImageIcon className="w-5 h-5" />
                   </div>
                   <span className="font-bold text-slate-800 text-xs">
-                    {selectedFile ? selectedFile.name : 'Click to select certificate image'}
+                    {selectedFile ? selectedFile.name : 'Click to select certificate file'}
                   </span>
                   <span className="text-[11px] text-slate-500 mt-0.5">
-                    Accepted formats: .JPG, .JPEG, .PNG (Max: 15MB)
+                    Accepted formats: .PDF, .JPG, .JPEG, .PNG (Max: 15MB)
                   </span>
                 </label>
               </div>

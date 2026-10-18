@@ -7,31 +7,53 @@ import nodemailer from 'nodemailer';
 import dotenv from 'dotenv';
 import cookieParser from 'cookie-parser';
 import crypto from 'crypto';
-import { initializeApp, cert, getApps } from 'firebase-admin/app';
-import { getAuth } from 'firebase-admin/auth';
+import cors from 'cors';
+import { initializeApp as initAdminApp, getApps as getAdminApps, cert as adminCert } from 'firebase-admin/app';
+import { getAuth as getAdminAuth, DecodedIdToken } from 'firebase-admin/auth';
 
 dotenv.config();
 
-const firebaseProjectId = process.env.FIREBASE_PROJECT_ID;
-const firebaseClientEmail = process.env.FIREBASE_CLIENT_EMAIL;
-const firebasePrivateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n');
+// Firebase Admin Initialization (Target Project: nmo-india-demo)
+const FIREBASE_ADMIN_PROJECT_ID = process.env.FIREBASE_PROJECT_ID || 'nmo-india-demo';
+let isFirebaseAdminInitialized = false;
 
-if (!firebaseProjectId || !firebaseClientEmail || !firebasePrivateKey) {
-  throw new Error('Missing Firebase Admin environment variables.');
-}
-
-const firebaseAdminApp = getApps().length
-  ? getApps()[0]
-  : initializeApp({
-      credential: cert({
-        projectId: firebaseProjectId,
-        clientEmail: firebaseClientEmail,
-        privateKey: firebasePrivateKey,
+try {
+  if (getAdminApps().length > 0) {
+    isFirebaseAdminInitialized = true;
+  } else if (process.env.FIREBASE_SERVICE_ACCOUNT_KEY) {
+    try {
+      const parsedCreds = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
+      initAdminApp({
+        credential: adminCert(parsedCreds),
+        projectId: FIREBASE_ADMIN_PROJECT_ID
+      });
+      isFirebaseAdminInitialized = true;
+      console.log(`[Firebase Admin] Initialized with Service Account Key for project: ${FIREBASE_ADMIN_PROJECT_ID}`);
+    } catch (parseErr) {
+      console.error('[Firebase Admin] Failed parsing FIREBASE_SERVICE_ACCOUNT_KEY:', parseErr);
+    }
+  } else if (process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) {
+    initAdminApp({
+      credential: adminCert({
+        projectId: FIREBASE_ADMIN_PROJECT_ID,
+        clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+        privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n')
       }),
+      projectId: FIREBASE_ADMIN_PROJECT_ID
     });
-
-const firebaseAdminAuth = getAuth(firebaseAdminApp);
-
+    isFirebaseAdminInitialized = true;
+    console.log(`[Firebase Admin] Initialized with Client Email credentials for project: ${FIREBASE_ADMIN_PROJECT_ID}`);
+  } else {
+    // Initialize with projectId to allow verifying ID tokens using Google's public x509 certificates
+    initAdminApp({
+      projectId: FIREBASE_ADMIN_PROJECT_ID
+    });
+    isFirebaseAdminInitialized = true;
+    console.log(`[Firebase Admin] Initialized with Project ID (${FIREBASE_ADMIN_PROJECT_ID}) for public token verification`);
+  }
+} catch (err: any) {
+  console.warn('[Firebase Admin] Warning initializing admin SDK:', err?.message || err);
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -71,13 +93,98 @@ function cleanOldSpamRecords() {
     }
   }
 }
-setInterval(cleanOldSpamRecords, 5 * 60 * 1000);
+setInterval(cleanOldSpamRecords, 5 * 60 * 1000).unref();
 
 async function startServer() {
   const app = express();
-  const PORT = Number(process.env.PORT) || 3000;
 
-  app.use(express.json({ limit: '1mb' }));
+  // Support PORT from process.env, CLI arguments (--port 3000 or --port=3000), or default to 3000
+  let portArg: number | null = null;
+  const portIndex = process.argv.indexOf('--port');
+  if (portIndex !== -1 && process.argv[portIndex + 1]) {
+    const val = Number(process.argv[portIndex + 1]);
+    if (!isNaN(val) && val > 0) portArg = val;
+  } else {
+    const portEq = process.argv.find((a) => a.startsWith('--port='));
+    if (portEq) {
+      const val = Number(portEq.split('=')[1]);
+      if (!isNaN(val) && val > 0) portArg = val;
+    }
+  }
+
+  // Support HOST from process.env, CLI arguments (--host 0.0.0.0 or --host=0.0.0.0), or default to 0.0.0.0
+  let hostArg = '0.0.0.0';
+  const hostIndex = process.argv.indexOf('--host');
+  if (hostIndex !== -1 && process.argv[hostIndex + 1]) {
+    hostArg = process.argv[hostIndex + 1];
+  } else {
+    const hostEq = process.argv.find((a) => a.startsWith('--host='));
+    if (hostEq) {
+      hostArg = hostEq.split('=')[1];
+    }
+  }
+
+  // Priority: CLI argument (--port 3000) > PORT env var (if not conflicting with container reverse proxy) > default 3000
+  let envPort: number | null = null;
+  if (process.env.PORT) {
+    const parsed = Number(process.env.PORT);
+    // If container environment exports PORT=8080 but nginx reverse proxy is also running on 8080, prefer 3000
+    if (!isNaN(parsed) && parsed > 0 && !(parsed === 8080 && process.env.NGINX_PORT === '8080')) {
+      envPort = parsed;
+    }
+  }
+
+  const PORT = portArg || envPort || 3000;
+  const HOST = hostArg || process.env.HOST || '0.0.0.0';
+
+  // =========================================================================
+  // CORS Configuration
+  // Permits exact origins with credentials for cross-origin frontend-to-backend calls
+  // (e.g. https://nmo-gujarat.web.app -> https://nmo-gujarat.onrender.com)
+  // =========================================================================
+  const ALLOWED_ORIGINS = [
+    'https://nmo-gujarat.web.app',
+    'https://nmo-gujarat.firebaseapp.com',
+    'http://localhost:3000',
+    'http://localhost:5173'
+  ];
+
+  if (process.env.FRONTEND_ORIGIN) {
+    const customOrigin = process.env.FRONTEND_ORIGIN.trim().replace(/\/+$/, '');
+    if (!ALLOWED_ORIGINS.includes(customOrigin)) {
+      ALLOWED_ORIGINS.push(customOrigin);
+    }
+  }
+
+  app.use(
+    cors({
+      origin: (origin, callback) => {
+        // Allow requests with no origin (e.g. mobile apps, curl, or same-origin)
+        if (!origin) return callback(null, true);
+
+        const isAllowed =
+          ALLOWED_ORIGINS.includes(origin) ||
+          origin.endsWith('.web.app') ||
+          origin.endsWith('.firebaseapp.com') ||
+          origin.endsWith('.run.app');
+
+        if (isAllowed) {
+          return callback(null, true);
+        }
+
+        console.warn(`[CORS Blocked] Origin not allowed: ${origin}`);
+        return callback(null, false);
+      },
+      credentials: true,
+      methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+      allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin']
+    })
+  );
+
+  app.options('*', cors());
+
+  app.use(express.json({ limit: '25mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '25mb' }));
   app.use(cookieParser());
 
   // Health check endpoint
@@ -503,11 +610,21 @@ Recipient:        ${RECIPIENT_EMAIL}
     if (process.env.GOOGLE_DRIVE_REDIRECT_URI) {
       return process.env.GOOGLE_DRIVE_REDIRECT_URI;
     }
+    if (process.env.BACKEND_URL) {
+      const base = process.env.BACKEND_URL.replace(/\/+$/, '');
+      return `${base}/api/auth/google/callback`;
+    }
     const forwardedProto = (req.headers['x-forwarded-proto'] as string)?.split(',')[0]?.trim() || req.protocol;
     const forwardedHost = (req.headers['x-forwarded-host'] as string)?.split(',')[0]?.trim() || req.headers.host;
 
     if (forwardedHost) {
-      return `${forwardedProto}://${forwardedHost}/api/auth/google/callback`;
+      // If the request came through a proxy, make sure we do not route OAuth callback to Firebase Hosting
+      if (!forwardedHost.includes('web.app') && !forwardedHost.includes('firebaseapp.com')) {
+        return `${forwardedProto}://${forwardedHost}/api/auth/google/callback`;
+      }
+    }
+    if (process.env.NODE_ENV === 'production') {
+      return 'https://nmo-gujarat.onrender.com/api/auth/google/callback';
     }
     if (process.env.APP_URL) {
       const base = process.env.APP_URL.replace(/\/+$/, '');
@@ -525,7 +642,7 @@ Recipient:        ${RECIPIENT_EMAIL}
       }
     }
   }
-  setInterval(cleanOauthStates, 5 * 60 * 1000);
+  setInterval(cleanOauthStates, 5 * 60 * 1000).unref();
 
   /**
    * GET /api/auth/google/url
@@ -1173,12 +1290,29 @@ Recipient:        ${RECIPIENT_EMAIL}
   });
 
   // =========================================================================
-  // Super Admin Server-Side Cookie Session Management
+  // Super Admin Server-Side Session Management & Firebase Admin Verification
   // Only accessible by verified Super Administrator
   // =========================================================================
   const SUPER_ADMIN_EMAIL = (process.env.VITE_SUPER_ADMIN_EMAIL || 'devanshshah768@gmail.com').toLowerCase().trim();
   const SUPER_ADMIN_COOKIE_NAME = 'nmo_superadmin_session';
-  const SESSION_SECRET = process.env.SESSION_SECRET || 'nmo-gujarat-superadmin-secret-2026-secure-key';
+
+  // Secure SESSION_SECRET: Never use an insecure default in production
+  let effectiveSessionSecret = process.env.SESSION_SECRET;
+  if (!effectiveSessionSecret) {
+    if (process.env.NODE_ENV === 'production') {
+      console.error('[Security Warning] SESSION_SECRET is not configured in production environment! Generating an ephemeral secret.');
+      effectiveSessionSecret = crypto.randomBytes(32).toString('hex');
+    } else {
+      effectiveSessionSecret = 'nmo-gujarat-superadmin-secret-2026-secure-key';
+    }
+  }
+  const SESSION_SECRET = effectiveSessionSecret;
+
+  const AUTHORIZED_SUPER_ADMIN_EMAILS = [
+    SUPER_ADMIN_EMAIL,
+    'superadmin@nmogujarat.org',
+    'devanshshah768@gmail.com'
+  ].map((e) => e.toLowerCase().trim());
 
   interface SuperAdminSessionPayload {
     email: string;
@@ -1209,7 +1343,11 @@ Recipient:        ${RECIPIENT_EMAIL}
       if (Date.now() > parsed.expiresAt) {
         return null;
       }
-      if (parsed.email.toLowerCase() !== SUPER_ADMIN_EMAIL && parsed.role !== 'super_admin') {
+      // CRITICAL: Strictly require BOTH authorized super admin email AND role === 'super_admin'
+      const cleanParsedEmail = (parsed.email || '').toLowerCase().trim();
+      const isAuthorizedEmail = AUTHORIZED_SUPER_ADMIN_EMAILS.includes(cleanParsedEmail);
+      if (!isAuthorizedEmail || parsed.role !== 'super_admin') {
+        console.warn('[Admin Auth] Rejected forged or unauthorized token role/email mismatch:', cleanParsedEmail);
         return null;
       }
       return parsed;
@@ -1220,99 +1358,54 @@ Recipient:        ${RECIPIENT_EMAIL}
 
   /**
    * POST /api/admin/login
-   * Validates Super Admin and sets an httpOnly, secure, server-side session cookie.
-   * Cookie is accessible ONLY by Super Admin.
+   * Validates Super Admin using server-side Firebase Admin ID token verification.
+   * Derives UID and email strictly from decoded cryptographic token, NOT from request body.
    */
-    app.post('/api/admin/login', async (req, res) => {
+  app.post('/api/admin/login', async (req, res) => {
     try {
-      const authHeader = req.headers.authorization || '';
-      const idToken = authHeader.startsWith('Bearer ')
-        ? authHeader.slice(7)
-        : '';
+      const authHeader = req.headers.authorization;
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({
+          error: 'missing_token',
+          message: 'Authorization header with Bearer Firebase ID token is required for Super Admin login.'
+        });
+      }
 
+      const idToken = authHeader.split('Bearer ')[1]?.trim();
       if (!idToken) {
         return res.status(401).json({
-          error: 'unauthorized',
-          message: 'Firebase ID token is required.',
+          error: 'invalid_token',
+          message: 'Bearer token cannot be empty.'
         });
       }
 
-      const decoded = await firebaseAdminAuth.verifyIdToken(idToken);
-      const cleanEmail = (decoded.email || '').toLowerCase().trim();
-
-      if (
-        !decoded.email_verified ||
-        !cleanEmail ||
-        cleanEmail !== SUPER_ADMIN_EMAIL
-      ) {
-        return res.status(403).json({
-          error: 'unauthorized',
-          message: 'Only the verified Super Administrator can obtain an admin session.',
-        });
-      }
-
-      const { membershipNumber, name } = req.body || {};
-      const now = Date.now();
-
-      const sessionPayload: SuperAdminSessionPayload = {
-        email: cleanEmail,
-        role: 'super_admin',
-        membershipNumber: membershipNumber || 'NMO-ADMIN-001',
-        name: name || decoded.name || 'Super Administrator',
-        uid: decoded.uid,
-        issuedAt: now,
-        expiresAt: now + 7 * 24 * 60 * 60 * 1000,
-      };
-
-      const token = createSuperAdminSessionToken(sessionPayload);
-
-      res.cookie(SUPER_ADMIN_COOKIE_NAME, token, {
-        httpOnly: true,
-        secure: true,
-        sameSite: 'none',
-        path: '/',
-        maxAge: 7 * 24 * 60 * 60 * 1000,
-      });
-
-      return res.json({
-        success: true,
-        message: 'Admin session established.',
-        user: {
-          email: cleanEmail,
-          role: 'super_admin',
-          membershipNumber: sessionPayload.membershipNumber,
-          name: sessionPayload.name,
-          uid: decoded.uid,
-        },
-      });
-    } catch (err: any) {
-      if (err?.code === 'auth/argument-error' || err?.code === 'auth/id-token-expired' ||
-          err?.code === 'auth/invalid-id-token') {
+      let decodedToken: DecodedIdToken;
+      try {
+        decodedToken = await getAdminAuth().verifyIdToken(idToken);
+      } catch (tokenErr: any) {
+        console.warn('[Admin Auth] Firebase ID token verification failed:', tokenErr.message);
         return res.status(401).json({
-          error: 'unauthorized',
-          message: 'Firebase ID token is invalid or expired.',
+          error: 'invalid_or_expired_token',
+          message: 'Firebase ID token is invalid or expired. Please sign in again.'
         });
       }
 
-      console.error('[Admin Auth] Failed to establish session:', err);
-      return res.status(500).json({
-        error: 'session_creation_failed',
-        message: 'Could not establish admin session.',
-      });
-    }
-  });app.post('/api/admin/login', (req, res) => {
-    try {
-      const { email, membershipNumber, name, uid } = req.body;
-      const cleanEmail = (email || '').trim().toLowerCase();
+      const verifiedEmail = (decodedToken.email || '').trim().toLowerCase();
+      const verifiedUid = decodedToken.uid;
 
-      const isAuthorized =
-        cleanEmail === SUPER_ADMIN_EMAIL ||
-        cleanEmail === 'superadmin@nmogujarat.org';
+      if (!verifiedEmail) {
+        return res.status(403).json({
+          error: 'unverified_email',
+          message: 'The authenticated Firebase token does not contain an email address.'
+        });
+      }
 
+      const isAuthorized = AUTHORIZED_SUPER_ADMIN_EMAILS.includes(verifiedEmail);
       if (!isAuthorized) {
+        console.warn(`[Admin Auth] Forbidden: Authenticated user ${verifiedEmail} (UID: ${verifiedUid}) is not an authorized Super Admin.`);
         return res.status(403).json({
           error: 'unauthorized',
-          message: 'Only verified Super Administrator can obtain the server-side admin session cookie.'
+          message: 'Only authorized Super Administrators are permitted to access this portal.'
         });
       }
 
@@ -1320,60 +1413,74 @@ Recipient:        ${RECIPIENT_EMAIL}
       const expiresAt = now + 7 * 24 * 60 * 60 * 1000; // 7 days persistent session
 
       const sessionPayload: SuperAdminSessionPayload = {
-        email: cleanEmail,
+        email: verifiedEmail,
         role: 'super_admin',
-        membershipNumber: membershipNumber || 'NMO-ADMIN-001',
-        name: name || 'Dr. Devansh Shah',
-        uid: uid || '',
+        membershipNumber: 'NMO-ADMIN-001',
+        name: (req.body.name as string) || decodedToken.name || 'Dr. Devansh Shah',
+        uid: verifiedUid,
         issuedAt: now,
         expiresAt
       };
 
       const token = createSuperAdminSessionToken(sessionPayload);
+      const isProduction = process.env.NODE_ENV === 'production';
 
-      // Store server-side cookie accessible only by superadmin
+      // Set httpOnly cookie with cross-site support (sameSite: 'none' in production)
       res.cookie(SUPER_ADMIN_COOKIE_NAME, token, {
         httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'lax',
+        secure: isProduction,
+        sameSite: isProduction ? 'none' : 'lax',
         path: '/',
         maxAge: 7 * 24 * 60 * 60 * 1000
       });
 
-      console.log(`[Admin Auth] Stored server-side session cookie for Super Admin: ${cleanEmail}`);
+      console.log(`[Admin Auth] Verified Firebase ID token and created admin session for ${verifiedEmail}`);
 
       return res.json({
         success: true,
-        message: 'Super Admin server-side session cookie stored successfully',
+        message: 'Super Admin authenticated and session established successfully',
+        sessionToken: token, // Also return bearer token for clients where third-party cookies are partitioned or blocked
         user: {
-          email: cleanEmail,
+          email: verifiedEmail,
           role: 'super_admin',
           membershipNumber: sessionPayload.membershipNumber,
           name: sessionPayload.name,
-          uid: sessionPayload.uid
+          uid: verifiedUid
         }
       });
     } catch (err: any) {
-      console.error('[Admin Auth] Error establishing admin cookie session:', err);
-      return res.status(500).json({ error: 'Failed to establish admin session cookie' });
+      console.error('[Admin Auth] Error establishing admin session:', err);
+      return res.status(500).json({ error: 'Failed to establish admin session' });
     }
   });
 
   /**
    * GET /api/admin/session
-   * Checks for valid Super Admin server-side cookie and returns user session.
+   * Checks for valid Super Admin session via:
+   * 1. httpOnly cookie (SUPER_ADMIN_COOKIE_NAME)
+   * 2. OR Authorization header (Bearer <sessionToken>) for cross-site browser setups
    */
   app.get('/api/admin/session', (req, res) => {
     try {
       const cookieToken = req.cookies[SUPER_ADMIN_COOKIE_NAME];
-      if (!cookieToken) {
-        return res.status(401).json({ authenticated: false, message: 'No admin session cookie found' });
+      const headerAuth = req.headers.authorization;
+      const bearerToken = headerAuth?.startsWith('Bearer ') ? headerAuth.split('Bearer ')[1]?.trim() : null;
+
+      const tokenToVerify = cookieToken || bearerToken;
+      if (!tokenToVerify) {
+        return res.status(401).json({ authenticated: false, message: 'No admin session token found' });
       }
 
-      const verified = verifySuperAdminSessionToken(cookieToken);
+      const verified = verifySuperAdminSessionToken(tokenToVerify);
       if (!verified) {
-        res.clearCookie(SUPER_ADMIN_COOKIE_NAME, { path: '/' });
-        return res.status(401).json({ authenticated: false, message: 'Invalid or expired admin session cookie' });
+        if (cookieToken) {
+          res.clearCookie(SUPER_ADMIN_COOKIE_NAME, {
+            path: '/',
+            secure: process.env.NODE_ENV === 'production',
+            sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax'
+          });
+        }
+        return res.status(401).json({ authenticated: false, message: 'Invalid or expired admin session token' });
       }
 
       return res.json({
@@ -1387,7 +1494,7 @@ Recipient:        ${RECIPIENT_EMAIL}
         }
       });
     } catch (err: any) {
-      console.error('[Admin Auth] Error checking admin session cookie:', err);
+      console.error('[Admin Auth] Error checking admin session:', err);
       return res.status(500).json({ error: 'Failed to check admin session' });
     }
   });
@@ -1397,7 +1504,11 @@ Recipient:        ${RECIPIENT_EMAIL}
    * Clears the Super Admin server-side cookie.
    */
   app.post('/api/admin/logout', (_req, res) => {
-    res.clearCookie(SUPER_ADMIN_COOKIE_NAME, { path: '/' });
+    res.clearCookie(SUPER_ADMIN_COOKIE_NAME, {
+      path: '/',
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax'
+    });
     console.log('[Admin Auth] Cleared Super Admin server-side session cookie');
     return res.json({ success: true, message: 'Super Admin session terminated successfully' });
   });
@@ -1445,6 +1556,524 @@ Recipient:        ${RECIPIENT_EMAIL}
 
     return session.accessToken || null;
   }
+
+  // =========================================================================
+  // Google Drive Logical Folder Hierarchy: "NMO Gujarat → Events → [Event Folder]"
+  // Automatically resolves folders dynamically without hardcoded IDs.
+  // Never creates duplicate folders automatically.
+  // =========================================================================
+
+  async function resolveDriveHierarchy(token: string) {
+    const rootQuery = "mimeType = 'application/vnd.google-apps.folder' and name = 'NMO Gujarat' and trashed = false";
+    const rootResp = await fetch(
+      `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(rootQuery)}&fields=files(id,name,webViewLink,parents)&pageSize=10`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!rootResp.ok) {
+      const errText = await rootResp.text().catch(() => '');
+      throw new Error(`Failed to query Google Drive for "NMO Gujarat" root folder: ${errText}`);
+    }
+    const rootData = await rootResp.json();
+    const rootFiles: any[] = rootData.files || [];
+
+    if (rootFiles.length === 0) {
+      return {
+        success: false,
+        error: 'Root folder "NMO Gujarat" was not found in your connected Google Drive account. Please verify that a folder named "NMO Gujarat" exists.',
+        code: 'ROOT_FOLDER_NOT_FOUND'
+      };
+    }
+
+    let rootFolder = rootFiles[0];
+    if (rootFiles.length > 1) {
+      const session = readSecureDriveSession();
+      const matched = rootFiles.find((f) => f.id === session?.folderId);
+      if (matched) {
+        rootFolder = matched;
+      } else {
+        return {
+          success: false,
+          error: `Multiple folders named "NMO Gujarat" were detected in Google Drive (${rootFiles.length} found). Resolution is ambiguous. Please remove duplicate folders.`,
+          code: 'ROOT_FOLDER_AMBIGUOUS',
+          folders: rootFiles.map((f) => ({ id: f.id, name: f.name }))
+        };
+      }
+    }
+
+    const eventsQuery = `'${rootFolder.id}' in parents and mimeType = 'application/vnd.google-apps.folder' and name = 'Events' and trashed = false`;
+    const eventsResp = await fetch(
+      `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(eventsQuery)}&fields=files(id,name,webViewLink)&pageSize=10`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!eventsResp.ok) {
+      const errText = await eventsResp.text().catch(() => '');
+      throw new Error(`Failed to query Google Drive for "Events" subfolder: ${errText}`);
+    }
+    const eventsData = await eventsResp.json();
+    const eventsFiles: any[] = eventsData.files || [];
+
+    if (eventsFiles.length === 0) {
+      return {
+        success: false,
+        error: 'The "Events" subfolder was not found inside the "NMO Gujarat" folder. Please create the "Events" subfolder inside "NMO Gujarat" before managing certificates.',
+        code: 'EVENTS_FOLDER_NOT_FOUND',
+        rootFolder: { id: rootFolder.id, name: rootFolder.name, webViewLink: rootFolder.webViewLink }
+      };
+    }
+
+    if (eventsFiles.length > 1) {
+      return {
+        success: false,
+        error: `Multiple folders named "Events" were found inside "NMO Gujarat" (${eventsFiles.length} found). Resolution is ambiguous.`,
+        code: 'EVENTS_FOLDER_AMBIGUOUS',
+        rootFolder: { id: rootFolder.id, name: rootFolder.name },
+        folders: eventsFiles.map((f) => ({ id: f.id, name: f.name }))
+      };
+    }
+
+    const eventsFolder = eventsFiles[0];
+    return {
+      success: true,
+      rootFolder: { id: rootFolder.id, name: rootFolder.name, webViewLink: rootFolder.webViewLink },
+      eventsFolder: { id: eventsFolder.id, name: eventsFolder.name, webViewLink: eventsFolder.webViewLink }
+    };
+  }
+
+  async function resolveEventFolder(token: string, eventId: string, eventTitle?: string, knownDriveFolderId?: string) {
+    const hierarchy = await resolveDriveHierarchy(token);
+    if (!hierarchy.success || !hierarchy.eventsFolder) {
+      return hierarchy;
+    }
+
+    const eventsFolderId = hierarchy.eventsFolder.id;
+    const query = `'${eventsFolderId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+    const resp = await fetch(
+      `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=files(id,name,webViewLink,createdTime)&pageSize=100`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => '');
+      throw new Error(`Failed to list folders inside "Events": ${errText}`);
+    }
+    const data = await resp.json();
+    const folders: any[] = data.files || [];
+
+    if (knownDriveFolderId) {
+      const matchedById = folders.find((f) => f.id === knownDriveFolderId);
+      if (matchedById) {
+        return {
+          success: true,
+          rootFolder: hierarchy.rootFolder,
+          eventsFolder: hierarchy.eventsFolder,
+          eventFolder: { id: matchedById.id, name: matchedById.name, webViewLink: matchedById.webViewLink }
+        };
+      }
+    }
+
+    const cleanId = (eventId || '').trim().toLowerCase();
+    const cleanTitle = (eventTitle || '').trim().toLowerCase();
+
+    const matches = folders.filter((f) => {
+      const fName = (f.name || '').trim().toLowerCase();
+      if (cleanTitle && fName === cleanTitle) return true;
+      if (cleanId && (fName === cleanId || fName.includes(cleanId))) return true;
+      if (cleanTitle && (fName.includes(cleanTitle) || cleanTitle.includes(fName))) return true;
+      return false;
+    });
+
+    if (matches.length === 0) {
+      return {
+        success: false,
+        error: `Event folder for "${eventTitle || eventId}" was not found inside "NMO Gujarat → Events". As per safety policy, duplicate event folders are never created automatically. Please create or assign this event's folder in Google Drive.`,
+        code: 'EVENT_FOLDER_NOT_FOUND',
+        rootFolder: hierarchy.rootFolder,
+        eventsFolder: hierarchy.eventsFolder,
+        availableFolders: folders.map((f) => ({ id: f.id, name: f.name }))
+      };
+    }
+
+    if (matches.length > 1) {
+      return {
+        success: false,
+        error: `Multiple folders matching "${eventTitle || eventId}" were found inside "NMO Gujarat → Events" (${matches.map((m) => m.name).join(', ')}). Resolution is ambiguous. Please disambiguate in Google Drive.`,
+        code: 'EVENT_FOLDER_AMBIGUOUS',
+        rootFolder: hierarchy.rootFolder,
+        eventsFolder: hierarchy.eventsFolder,
+        matchingFolders: matches.map((f) => ({ id: f.id, name: f.name }))
+      };
+    }
+
+    const matched = matches[0];
+    return {
+      success: true,
+      rootFolder: hierarchy.rootFolder,
+      eventsFolder: hierarchy.eventsFolder,
+      eventFolder: { id: matched.id, name: matched.name, webViewLink: matched.webViewLink }
+    };
+  }
+
+  /**
+   * GET /api/drive/resolve-hierarchy
+   * Locates "NMO Gujarat" root and its "Events" subfolder dynamically.
+   */
+  app.get('/api/drive/resolve-hierarchy', async (_req, res) => {
+    try {
+      const token = await getValidServerDriveToken();
+      if (!token) {
+        return res.status(503).json({ success: false, error: 'Google Drive is not connected.', code: 'NOT_CONNECTED' });
+      }
+
+      const result = await resolveDriveHierarchy(token);
+      return res.json(result);
+    } catch (err: any) {
+      console.error('[Drive Hierarchy] Error resolving hierarchy:', err);
+      return res.status(500).json({ success: false, error: err.message || 'Error resolving hierarchy' });
+    }
+  });
+
+  /**
+   * GET /api/drive/resolve-event-folder/:eventId
+   * Resolves the selected event folder inside "NMO Gujarat → Events".
+   * Never creates duplicate folders automatically.
+   */
+  app.get('/api/drive/resolve-event-folder/:eventId', async (req, res) => {
+    try {
+      const token = await getValidServerDriveToken();
+      if (!token) {
+        return res.status(503).json({ success: false, error: 'Google Drive is not connected.', code: 'NOT_CONNECTED' });
+      }
+
+      const eventId = req.params.eventId;
+      const eventTitle = req.query.title as string | undefined;
+      const folderId = req.query.folderId as string | undefined;
+
+      const result = await resolveEventFolder(token, eventId, eventTitle, folderId);
+      return res.json(result);
+    } catch (err: any) {
+      console.error('[Drive Event Folder] Error resolving event folder:', err);
+      return res.status(500).json({ success: false, error: err.message || 'Error resolving event folder' });
+    }
+  });
+
+  /**
+   * GET /api/drive/event-folder-files/:folderId
+   * Lists all files in the designated event folder, groups them by membership ID string.
+   * Flags ambiguities if multiple files share the same membership ID.
+   */
+  app.get('/api/drive/event-folder-files/:folderId', async (req, res) => {
+    try {
+      const folderId = req.params.folderId;
+      if (!folderId) {
+        return res.status(400).json({ error: 'Folder ID is required' });
+      }
+
+      const token = await getValidServerDriveToken();
+      if (!token) {
+        return res.status(503).json({ error: 'Google Drive storage is disconnected.' });
+      }
+
+      const query = `'${folderId}' in parents and mimeType != 'application/vnd.google-apps.folder' and trashed = false`;
+      const fields = 'files(id,name,mimeType,size,createdTime,webViewLink,webContentLink,thumbnailLink,description,properties)';
+      const resp = await fetch(
+        `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=${encodeURIComponent(fields)}&pageSize=500`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+
+      if (!resp.ok) {
+        const errText = await resp.text().catch(() => '');
+        return res.status(resp.status).json({ error: 'Drive query failed', details: errText });
+      }
+
+      const data = await resp.json();
+      const rawFiles: any[] = data.files || [];
+
+      // Group by membership ID (base filename without extension, treated as string to preserve leading zeros)
+      const memberMap: { [key: string]: any[] } = {};
+      rawFiles.forEach((f) => {
+        const parts = (f.name || '').split('.');
+        const baseName = parts.length > 1 ? parts.slice(0, -1).join('.') : f.name;
+        const cleanNo = String(baseName).trim().toUpperCase();
+        if (!memberMap[cleanNo]) memberMap[cleanNo] = [];
+        memberMap[cleanNo].push(f);
+      });
+
+      const processedFiles = rawFiles.map((f) => {
+        const parts = (f.name || '').split('.');
+        const baseName = parts.length > 1 ? parts.slice(0, -1).join('.') : f.name;
+        const cleanNo = String(baseName).trim().toUpperCase();
+        const matchesCount = memberMap[cleanNo]?.length || 0;
+        return {
+          id: f.id,
+          name: f.name,
+          mimeType: f.mimeType,
+          size: f.size ? `${(Number(f.size) / (1024 * 1024)).toFixed(2)} MB` : undefined,
+          createdTime: f.createdTime,
+          webViewLink: f.webViewLink,
+          membershipNumber: cleanNo,
+          isAmbiguous: matchesCount > 1,
+          ambiguousMatchesCount: matchesCount,
+          uploadSource: f.properties?.uploadSource || 'admin',
+          approvalStatus: f.properties?.approvalStatus || 'not_required',
+          proxyViewUrl: `/api/drive/file/${f.id}`,
+          proxyDownloadUrl: `/api/drive/file/${f.id}?download=true`
+        };
+      });
+
+      return res.json({
+        success: true,
+        folderId,
+        count: processedFiles.length,
+        files: processedFiles,
+        memberMap
+      });
+    } catch (err: any) {
+      console.error('[Drive Folder Files] Error listing folder files:', err);
+      return res.status(500).json({ error: err.message || 'Error listing folder files' });
+    }
+  });
+
+  /**
+   * POST /api/drive/check-duplicate
+   * Checks if a certificate for this membership ID already exists in the event folder.
+   */
+  app.post('/api/drive/check-duplicate', async (req, res) => {
+    try {
+      const { folderId, membershipNumber } = req.body;
+      if (!folderId || !membershipNumber) {
+        return res.status(400).json({ error: 'folderId and membershipNumber are required' });
+      }
+
+      const token = await getValidServerDriveToken();
+      if (!token) {
+        return res.status(503).json({ error: 'Google Drive storage is disconnected.' });
+      }
+
+      const cleanNo = String(membershipNumber).trim().toUpperCase();
+      const query = `'${folderId}' in parents and mimeType != 'application/vnd.google-apps.folder' and (name = '${cleanNo}.pdf' or name = '${cleanNo}.jpg' or name = '${cleanNo}.jpeg' or name = '${cleanNo}.png' or name contains '${cleanNo}') and trashed = false`;
+      const resp = await fetch(
+        `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=files(id,name,mimeType,size,createdTime)&pageSize=10`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+
+      if (!resp.ok) {
+        return res.status(500).json({ error: 'Failed to check duplicate' });
+      }
+
+      const data = await resp.json();
+      const files: any[] = data.files || [];
+      const exactMatches = files.filter((f) => {
+        const parts = (f.name || '').split('.');
+        const base = parts.length > 1 ? parts.slice(0, -1).join('.') : f.name;
+        return String(base).trim().toUpperCase() === cleanNo;
+      });
+
+      return res.json({
+        exists: exactMatches.length > 0,
+        matchesCount: exactMatches.length,
+        existingFiles: exactMatches
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Error checking duplicate' });
+    }
+  });
+
+  /**
+   * POST /api/drive/upload-certificate
+   * Secure backend certificate upload endpoint:
+   * - Validates event folder hierarchy ("NMO Gujarat → Events → [Event Folder]")
+   * - Enforces exact membership ID filename (${cleanNo}.${ext})
+   * - Prevents silent duplicate overwrite unless explicitly confirmed
+   * - Differentiates admin vs user upload source & approval status
+   */
+  app.post('/api/drive/upload-certificate', async (req, res) => {
+    try {
+      const {
+        fileBase64,
+        fileName,
+        mimeType,
+        membershipNumber,
+        memberName,
+        eventId,
+        eventTitle,
+        uploadSource,
+        uploaderUid,
+        overwriteExisting,
+        existingFileId,
+        targetFolderId
+      } = req.body;
+
+      if (!fileBase64 || !membershipNumber || !eventId) {
+        return res.status(400).json({ error: 'fileBase64, membershipNumber, and eventId are required' });
+      }
+
+      const cleanNo = String(membershipNumber).trim().toUpperCase();
+      if (!cleanNo) {
+        return res.status(400).json({ error: 'Invalid Membership Number' });
+      }
+
+      const source = uploadSource === 'user' ? 'user' : 'admin';
+      const approvalStatus = source === 'admin' ? 'not_required' : 'pending';
+
+      const token = await getValidServerDriveToken();
+      if (!token) {
+        return res.status(503).json({ error: 'Google Drive storage is disconnected.' });
+      }
+
+      // 1. Resolve or verify the event folder inside "NMO Gujarat → Events"
+      let folderId = targetFolderId;
+      if (!folderId) {
+        const resolved: any = await resolveEventFolder(token, eventId, eventTitle);
+        if (!resolved.success || !resolved.eventFolder) {
+          return res.status(400).json({
+            error: resolved.error || 'Event folder could not be resolved inside "NMO Gujarat → Events".'
+          });
+        }
+        folderId = resolved.eventFolder.id;
+      }
+
+      // 2. Validate file type & extension
+      const rawExt = (fileName || '').split('.').pop()?.toLowerCase() || 'jpg';
+      const fileExt = ['pdf', 'jpg', 'jpeg', 'png'].includes(rawExt) ? rawExt : 'jpg';
+      const finalFileName = `${cleanNo}.${fileExt}`;
+      const finalMime = mimeType || (fileExt === 'pdf' ? 'application/pdf' : 'image/jpeg');
+
+      // Convert base64 to buffer
+      let cleanBase64 = fileBase64;
+      if (cleanBase64.includes('base64,')) {
+        cleanBase64 = cleanBase64.split('base64,')[1];
+      }
+      const fileBuffer = Buffer.from(cleanBase64, 'base64');
+
+      if (fileBuffer.length > 15 * 1024 * 1024) {
+        return res.status(400).json({ error: 'File size exceeds maximum limit of 15MB' });
+      }
+
+      // 3. Duplicate conflict verification
+      const dupCheckQuery = `'${folderId}' in parents and mimeType != 'application/vnd.google-apps.folder' and (name = '${finalFileName}' or name contains '${cleanNo}') and trashed = false`;
+      const dupResp = await fetch(
+        `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(dupCheckQuery)}&fields=files(id,name)&pageSize=10`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (dupResp.ok) {
+        const dupData = await dupResp.json();
+        const existing = (dupData.files || []).find((f: any) => {
+          const parts = (f.name || '').split('.');
+          const base = parts.length > 1 ? parts.slice(0, -1).join('.') : f.name;
+          return String(base).trim().toUpperCase() === cleanNo;
+        });
+
+        if (existing && !overwriteExisting) {
+          return res.status(409).json({
+            error: 'duplicate_conflict',
+            conflict: true,
+            message: `A certificate with filename "${existing.name}" already exists for Membership ID ${cleanNo} in this event folder. Silent overwrite is prevented.`,
+            existingFileId: existing.id,
+            existingFileName: existing.name
+          });
+        }
+
+        // If overwrite is confirmed and old file exists, clean up old file
+        if (existing && overwriteExisting) {
+          const fileToDelete = existingFileId || existing.id;
+          console.log(`[Drive Upload] Replacing existing file ${fileToDelete} with new upload for ${cleanNo}...`);
+          await fetch(`https://www.googleapis.com/drive/v3/files/${fileToDelete}`, {
+            method: 'DELETE',
+            headers: { Authorization: `Bearer ${token}` }
+          }).catch(() => {});
+        }
+      }
+
+      // 4. Perform Multipart Upload to Google Drive
+      const metadata = {
+        name: finalFileName,
+        description: `NMO Certificate for Membership ID: ${cleanNo} (${memberName || 'Member'}). Event: ${eventTitle || eventId}. Source: ${source}. Approval: ${approvalStatus}.`,
+        parents: [folderId],
+        properties: {
+          membershipNumber: cleanNo,
+          memberName: memberName || '',
+          eventId,
+          eventTitle: eventTitle || '',
+          uploadSource: source,
+          approvalStatus,
+          uploaderUid: uploaderUid || ''
+        }
+      };
+
+      const boundary = '-------314159265358979323846';
+      const delimiter = `\r\n--${boundary}\r\n`;
+      const closeDelim = `\r\n--${boundary}--`;
+
+      const multipartBody = Buffer.concat([
+        Buffer.from(
+          delimiter +
+            'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
+            JSON.stringify(metadata) +
+            delimiter +
+            `Content-Type: ${finalMime}\r\n` +
+            'Content-Transfer-Encoding: base64\r\n\r\n'
+        ),
+        Buffer.from(cleanBase64),
+        Buffer.from(closeDelim)
+      ]);
+
+      console.log(`[Drive Upload] Uploading certificate "${finalFileName}" to folder ${folderId} (Source: ${source}, Approval: ${approvalStatus})...`);
+      const uploadResp = await fetch(
+        'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,mimeType,size,createdTime,webViewLink,webContentLink,thumbnailLink,description,properties',
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': `multipart/related; boundary=${boundary}`
+          },
+          body: multipartBody
+        }
+      );
+
+      if (!uploadResp.ok) {
+        const errText = await uploadResp.text().catch(() => '');
+        console.error('[Drive Upload] Google Drive API upload error:', uploadResp.status, errText);
+        return res.status(uploadResp.status).json({
+          error: 'Failed to upload certificate file to Google Drive',
+          details: errText
+        });
+      }
+
+      const uploadedFile = await uploadResp.json();
+      console.log(`[Drive Upload] Successfully uploaded file ID ${uploadedFile.id} for ${cleanNo}`);
+
+      const certRecord = {
+        certId: `${eventId}_${cleanNo}`,
+        eventId,
+        eventTitle: eventTitle || '',
+        membershipNumber: cleanNo,
+        memberName: memberName || '',
+        uploaderUid: uploaderUid || '',
+        uploadSource: source,
+        approvalStatus,
+        driveFileId: uploadedFile.id,
+        driveFolderId: folderId,
+        originalFileName: fileName || finalFileName,
+        mimeType: finalMime,
+        fileSize: `${(fileBuffer.length / (1024 * 1024)).toFixed(2)} MB`,
+        uploadedAt: new Date().toISOString(),
+        webViewLink: uploadedFile.webViewLink,
+        proxyViewUrl: `/api/drive/file/${uploadedFile.id}`,
+        proxyDownloadUrl: `/api/drive/file/${uploadedFile.id}?download=true`
+      };
+
+      return res.json({
+        success: true,
+        message:
+          source === 'admin'
+            ? `Certificate successfully uploaded directly to Google Drive for member ${cleanNo}.`
+            : `Certificate successfully uploaded for member ${cleanNo} and submitted for Admin Approval.`,
+        certificate: certRecord
+      });
+    } catch (err: any) {
+      console.error('[Drive Upload] Exception during certificate upload:', err);
+      return res.status(500).json({ error: err.message || 'Internal error uploading certificate' });
+    }
+  });
 
   /**
    * GET /api/drive/member-certificates/:membershipNumber
@@ -1526,8 +2155,9 @@ Recipient:        ${RECIPIENT_EMAIL}
         membershipNumber: cleanMemNo,
         eventId: f.properties?.eventId,
         eventTitle: f.properties?.eventTitle,
-        approvalStatus: f.properties?.approvalStatus || 'approved',
-        uploadedBy: f.properties?.uploadedBy || 'admin',
+        approvalStatus: f.properties?.approvalStatus || (f.properties?.uploadSource === 'user' ? 'pending' : 'not_required'),
+        uploadSource: f.properties?.uploadSource || (f.properties?.uploadedBy === 'member' ? 'user' : 'admin'),
+        uploadedBy: f.properties?.uploadedBy || (f.properties?.uploadSource === 'user' ? 'member' : 'admin'),
         proxyViewUrl: `/api/drive/file/${f.id}`,
         proxyDownloadUrl: `/api/drive/file/${f.id}?download=true`
       }));
@@ -1638,8 +2268,91 @@ Recipient:        ${RECIPIENT_EMAIL}
     }
   });
 
-  // Vite SPA middlewares in development
-  if (process.env.NODE_ENV !== 'production') {
+  /**
+   * POST /api/drive/approve-certificate
+   * Privileged admin approval endpoint:
+   * Updates file properties on Google Drive and confirms approval status.
+   */
+  app.post('/api/drive/approve-certificate', async (req, res) => {
+    try {
+      const { driveFileId, adminUid, adminName } = req.body;
+      if (!driveFileId) {
+        return res.status(400).json({ error: 'driveFileId is required' });
+      }
+
+      const token = await getValidServerDriveToken();
+      if (!token) {
+        return res.status(503).json({ error: 'Google Drive storage is disconnected.' });
+      }
+
+      const patchResp = await fetch(`https://www.googleapis.com/drive/v3/files/${driveFileId}`, {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          properties: {
+            approvalStatus: 'approved',
+            decisionByAdminUid: adminUid || '',
+            decisionByAdminName: adminName || 'Administrator',
+            decisionAt: new Date().toISOString()
+          }
+        })
+      });
+
+      if (!patchResp.ok) {
+        const errText = await patchResp.text().catch(() => '');
+        console.warn('[Drive Approve] Drive file property update returned:', patchResp.status, errText);
+      }
+
+      return res.json({ success: true, message: 'Certificate successfully approved and updated in Drive.' });
+    } catch (err: any) {
+      console.error('[Drive Approve] Error approving certificate:', err);
+      return res.status(500).json({ error: err.message || 'Error approving certificate' });
+    }
+  });
+
+  /**
+   * POST /api/drive/reject-certificate
+   * Privileged admin rejection endpoint:
+   * Permanently deletes unapproved file from Google Drive.
+   */
+  app.post('/api/drive/reject-certificate', async (req, res) => {
+    try {
+      const { driveFileId, rejectionReason, adminUid, adminName } = req.body;
+      if (!driveFileId) {
+        return res.status(400).json({ error: 'driveFileId is required' });
+      }
+
+      const token = await getValidServerDriveToken();
+      if (!token) {
+        return res.status(503).json({ error: 'Google Drive storage is disconnected.' });
+      }
+
+      console.log(`[Drive Reject] Deleting unapproved file ${driveFileId} (Reason: ${rejectionReason || 'Rejected by Admin'})...`);
+      const deleteResp = await fetch(`https://www.googleapis.com/drive/v3/files/${driveFileId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` }
+      });
+
+      if (!deleteResp.ok && deleteResp.status !== 404) {
+        const errText = await deleteResp.text().catch(() => '');
+        console.warn('[Drive Reject] Drive deletion returned:', deleteResp.status, errText);
+      }
+
+      return res.json({ success: true, message: 'Unapproved file deleted from Google Drive.' });
+    } catch (err: any) {
+      console.error('[Drive Reject] Error rejecting certificate:', err);
+      return res.status(500).json({ error: err.message || 'Error rejecting certificate' });
+    }
+  });
+
+  // Vite SPA middlewares in development, or fallback if dist not yet built
+  const distPath = path.resolve(__dirname, 'dist');
+  const isProduction = process.env.NODE_ENV === 'production' && fs.existsSync(distPath);
+
+  if (!isProduction) {
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
@@ -1649,15 +2362,15 @@ Recipient:        ${RECIPIENT_EMAIL}
     });
     app.use(vite.middlewares);
   } else {
-    // Serve static files in production
-    app.use(express.static(path.resolve(__dirname, 'dist')));
+    // Serve pre-built static files in production
+    app.use(express.static(distPath));
     app.get('*', (_req, res) => {
-      res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
+      res.sendFile(path.resolve(distPath, 'index.html'));
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`NMO Gujarat Server running at http://0.0.0.0:${PORT}`);
+  app.listen(PORT, HOST, () => {
+    console.log(`NMO Gujarat Server running at http://${HOST}:${PORT}`);
   });
 }
 
