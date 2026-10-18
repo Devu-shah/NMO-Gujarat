@@ -180,25 +180,19 @@ export const AdminCertificatesManager: React.FC = () => {
         }
       }
 
-      const active = session?.accessToken || getDriveAccessToken();
+      const active = Boolean((session && session.status === 'active') || session?.hasRefreshToken || getDriveAccessToken());
       const saved = session || getSavedDriveAccount();
 
       setSavedAccount(saved);
-      setIsConnected(Boolean(active));
+      setIsConnected(active);
 
       if (active) {
         setTokenHealth('checking');
-        const health = await checkDriveTokenHealth(active);
+        const health = await checkDriveTokenHealth();
         if (health.valid) {
           setTokenHealth('valid');
         } else {
-          const refreshed = await ensureDriveAccessToken(true);
-          if (refreshed) {
-            setTokenHealth('valid');
-            setIsConnected(true);
-          } else {
-            setTokenHealth('expired');
-          }
+          setTokenHealth('expired');
         }
       } else {
         setTokenHealth('none');

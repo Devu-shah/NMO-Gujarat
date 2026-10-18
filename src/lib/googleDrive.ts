@@ -98,16 +98,16 @@ export const saveDriveSessionToFirestore = async (session: SavedDriveSession) =>
 
 /**
  * Restore persistent drive session from backend server.
- * If backend has a stored session or refresh token, this silently restores it and auto-refreshes expired access tokens.
+ * Uses the secure server-side session and refresh token without exposing raw secrets.
  */
 export const restoreDriveSessionFromBackend = async (): Promise<SavedDriveSession | null> => {
   try {
     const res = await fetch(apiUrl('/api/drive/status'));
     if (res.ok) {
       const data = await res.json();
-      if (data.connected && data.accessToken) {
+      if (data.connected && (data.status === 'active' || data.hasRefreshToken || data.accessToken)) {
         const session: SavedDriveSession = {
-          accessToken: data.accessToken,
+          accessToken: data.accessToken || 'server-managed',
           accountEmail: data.accountEmail || 'devanshshah768@gmail.com',
           accountName: data.accountName || 'NMO Administrator',
           accountPhoto: data.accountPhoto,
@@ -122,7 +122,7 @@ export const restoreDriveSessionFromBackend = async (): Promise<SavedDriveSessio
           redirectUri: data.redirectUri
         };
         cachedDriveSession = session;
-        cachedDriveAccessToken = data.accessToken;
+        cachedDriveAccessToken = 'server-managed';
         saveDriveSessionLocally(session);
         return session;
       } else if (data.redirectUri || typeof data.oauthConfigured === 'boolean') {
@@ -188,59 +188,35 @@ if (typeof window !== 'undefined') {
     }
   }).catch(() => {});
 }
+ 
+/**
+ * Returns true if Google Drive is currently connected with a valid server session
+ */
+export const isDriveConnected = (): boolean => {
+  if (cachedDriveSession) {
+    return cachedDriveSession.status === 'active' || Boolean(cachedDriveSession.hasRefreshToken);
+  }
+  return Boolean(cachedDriveAccessToken);
+};
 
 /**
- * Asynchronously ensure a valid access token is available.
- * If expired, automatically requests token renewal from server-side refresh token flow.
+ * Asynchronously ensure a valid Drive session is available on the backend.
  */
-export const ensureDriveAccessToken = async (forceRefresh = false): Promise<string | null> => {
-  // If not forcing refresh and current token has at least 2 minutes validity, reuse it
-  if (!forceRefresh && cachedDriveAccessToken && cachedDriveSession) {
-    const now = Date.now();
-    if (cachedDriveSession.expiresAt > now + 120 * 1000) {
-      return cachedDriveAccessToken;
-    }
+export const ensureDriveAccessToken = async (_forceRefresh = false): Promise<string | null> => {
+  if (isDriveConnected()) {
+    return 'server-managed';
   }
 
   try {
-    const url = apiUrl(`/api/drive/token${forceRefresh ? '?forceRefresh=true' : ''}`);
-    const res = await fetch(url);
-    if (res.ok) {
-      const data = await res.json();
-      if (data.accessToken) {
-        cachedDriveAccessToken = data.accessToken;
-        if (cachedDriveSession) {
-          cachedDriveSession.accessToken = data.accessToken;
-          cachedDriveSession.expiresAt = data.expiresAt || Date.now() + 3600 * 1000;
-          cachedDriveSession.status = 'active';
-          saveDriveSessionLocally(cachedDriveSession);
-        } else {
-          await restoreDriveSessionFromBackend();
-        }
-        return data.accessToken;
-      }
-    } else if (res.status === 401) {
-      const errJson = await res.json().catch(() => ({}));
-      if (errJson.error === 'reauth_required') {
-        if (cachedDriveSession) {
-          cachedDriveSession.status = 'expired';
-          saveDriveSessionLocally(cachedDriveSession);
-        }
-      }
+    const session = await restoreDriveSessionFromBackend();
+    if (session && session.status === 'active') {
+      return 'server-managed';
     }
   } catch (err) {
-    console.warn('Notice requesting token from backend:', err);
+    console.debug('Notice requesting session verification:', err);
   }
 
-  // Fallback to local memory / local storage
-  const current = getDriveAccessToken();
-  if (current) return current;
-
-  const restored = await restoreDriveSessionFromBackend();
-  if (restored?.accessToken) return restored.accessToken;
-
-  const firestoreRestored = await restoreDriveSessionFromFirestore();
-  return firestoreRestored?.accessToken || null;
+  return isDriveConnected() ? 'server-managed' : null;
 };
 
 /**
@@ -286,36 +262,17 @@ export const authenticatedDriveFetch = async (
  * Check if the current Drive token is valid by querying Google TokenInfo API
  */
 export const checkDriveTokenHealth = async (
-  token?: string
+  _token?: string
 ): Promise<{ valid: boolean; email?: string; error?: string }> => {
-  let t: string | null = token || getDriveAccessToken();
-  if (!t) {
-    t = await ensureDriveAccessToken();
-  }
-  if (!t) return { valid: false, error: 'No token found' };
-
   try {
-    const res = await fetch(
-      `https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=${encodeURIComponent(t)}`
-    );
+    const res = await fetch(apiUrl('/api/drive/status'));
     if (res.ok) {
-      const info = await res.json();
-      return { valid: true, email: info.email };
-    }
-
-    // Try auto-refreshing via backend if initial token validation failed
-    const refreshedToken = await ensureDriveAccessToken(true);
-    if (refreshedToken && refreshedToken !== t) {
-      const retryRes = await fetch(
-        `https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=${encodeURIComponent(refreshedToken)}`
-      );
-      if (retryRes.ok) {
-        const info = await retryRes.json();
-        return { valid: true, email: info.email };
+      const data = await res.json();
+      if (data.connected && data.status === 'active') {
+        return { valid: true, email: data.accountEmail || 'devanshshah768@gmail.com' };
       }
     }
-
-    return { valid: false, error: 'Token expired or invalid' };
+    return { valid: false, error: 'Google Drive is disconnected or session expired' };
   } catch (err: any) {
     return { valid: false, error: err.message || 'Validation request failed' };
   }
@@ -653,15 +610,11 @@ export const connectWithManualToken = async (
 };
 
 /**
- * Return current access token from memory, local storage, or cached session
+ * Returns sentinel indicator if Drive is connected, without exposing raw tokens to frontend code.
  */
 export const getDriveAccessToken = (): string | null => {
-  if (cachedDriveAccessToken) return cachedDriveAccessToken;
-  const stored = loadStoredDriveSession();
-  if (stored?.accessToken) {
-    cachedDriveAccessToken = stored.accessToken;
-    cachedDriveSession = stored;
-    return stored.accessToken;
+  if (isDriveConnected()) {
+    return 'server-managed';
   }
   return null;
 };
@@ -741,126 +694,54 @@ export const makeDriveResourcePublic = async (_fileOrFolderId: string, _token: s
 
 /**
  * List all subfolders created under the NMO Gujarat mega folder (1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2)
+ * Routed entirely through backend Express API.
  */
-export const listEventSubfoldersInDrive = async (token?: string): Promise<DriveFolderInfo[]> => {
-  let authToken = token || getDriveAccessToken();
-  if (!authToken) {
-    authToken = await ensureDriveAccessToken();
-  }
-  if (!authToken) return [];
-
+export const listEventSubfoldersInDrive = async (_token?: string): Promise<DriveFolderInfo[]> => {
   try {
-    const q = `'${NMO_ROOT_DRIVE_FOLDER_ID}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
-    const res = await fetch(
-      `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,webViewLink,createdTime)&pageSize=100&orderBy=name`,
-      { headers: { Authorization: `Bearer ${authToken}` } }
-    );
-
-    if (!res.ok) {
-      if (res.status === 401 && !token) {
-        // Try one silent token refresh if not already explicitly passing token
-        const fresh = await ensureDriveAccessToken(true);
-        if (fresh && fresh !== authToken) {
-          return listEventSubfoldersInDrive(fresh);
-        }
+    const res = await fetch(apiUrl('/api/drive/subfolders'));
+    if (res.ok) {
+      const data = await res.json();
+      if (data.folders) {
+        return data.folders;
       }
-      return [];
     }
-
-    const data = await res.json();
-    return (data.files || []).map((f: any) => ({
-      id: f.id,
-      name: f.name,
-      webViewLink: f.webViewLink || `https://drive.google.com/drive/folders/${f.id}`,
-      createdTime: f.createdTime
-    }));
   } catch (err) {
-    return [];
+    console.debug('Backend subfolder listing notice:', err);
   }
+  return [];
 };
 
 /**
  * Generate a new event subfolder inside the NMO Gujarat mega folder
+ * Routed entirely through backend Express API.
  */
 export const createEventSubfolderInDrive = async (
   eventName: string,
-  token?: string
+  _token?: string
 ): Promise<DriveFolderInfo> => {
-  let authToken = token || getDriveAccessToken();
-  if (!authToken) {
-    throw new Error('Google Drive is not connected. Please connect with Google Drive first.');
-  }
-
   const cleanName = eventName.replace(/['"]/g, '').trim();
   if (!cleanName) {
     throw new Error('Invalid event name for Google Drive subfolder.');
   }
 
-  // Check if a subfolder with this name already exists in NMO Gujarat folder
-  const existingSubfolders = await listEventSubfoldersInDrive(authToken);
-  const existing = existingSubfolders.find((f) => f.name.toLowerCase() === cleanName.toLowerCase());
-  if (existing) {
-    return existing;
-  }
-
-  // Create new subfolder with parent set to NMO Gujarat mega folder
-  let createRes = await fetch('https://www.googleapis.com/drive/v3/files?fields=id,name,webViewLink,createdTime', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${authToken}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      name: cleanName,
-      mimeType: 'application/vnd.google-apps.folder',
-      parents: [NMO_ROOT_DRIVE_FOLDER_ID],
-      description: `Certificates subfolder for "${cleanName}" in NMO Gujarat Mega Drive`
-    })
-  });
-
-  // If 401 Unauthorized, attempt auto-refresh and retry once
-  if (createRes.status === 401) {
-    const refreshedToken = await ensureDriveAccessToken(true);
-    if (refreshedToken) {
-      authToken = refreshedToken;
-      createRes = await fetch('https://www.googleapis.com/drive/v3/files?fields=id,name,webViewLink,createdTime', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${refreshedToken}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          name: cleanName,
-          mimeType: 'application/vnd.google-apps.folder',
-          parents: [NMO_ROOT_DRIVE_FOLDER_ID],
-          description: `Certificates subfolder for "${cleanName}" in NMO Gujarat Mega Drive`
-        })
-      });
+  try {
+    const serverResp = await fetch(apiUrl('/api/drive/create-folder'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: cleanName, parentId: NMO_ROOT_DRIVE_FOLDER_ID })
+    });
+    if (serverResp.ok) {
+      const data = await serverResp.json();
+      if (data.folder) {
+        return data.folder;
+      }
     }
+    const errData = await serverResp.json().catch(() => ({}));
+    throw new Error(errData.error || 'Failed to create subfolder in Google Drive.');
+  } catch (err: any) {
+    console.error('Create subfolder error:', err);
+    throw new Error(err.message || 'Unable to create event subfolder. Please verify Drive is connected.');
   }
-
-  if (!createRes.ok) {
-    const err = await createRes.json().catch(() => ({}));
-    const rawMsg = err.error?.message || '';
-    if (rawMsg.includes('invalid authentication credentials') || createRes.status === 401) {
-      throw new Error(
-        'Google Drive access token expired (401 Invalid Credentials). Please click "Authorize Google Drive" to reconnect, or configure a permanent refresh token in the Drive Setup Guide.'
-      );
-    }
-    throw new Error(rawMsg || 'Failed to create subfolder in NMO Gujarat Google Drive');
-  }
-
-  const created = await createRes.json();
-
-  // Make the folder accessible for reading
-  await makeDriveResourcePublic(created.id, authToken);
-
-  return {
-    id: created.id,
-    name: created.name,
-    webViewLink: created.webViewLink || `https://drive.google.com/drive/folders/${created.id}`,
-    createdTime: created.createdTime
-  };
 };
 
 /**

@@ -957,7 +957,7 @@ Recipient:        ${RECIPIENT_EMAIL}
       }
 
       return res.json({
-        connected: Boolean(session.accessToken && session.status === 'active'),
+        connected: Boolean(session.status === 'active'),
         status: session.status,
         accountEmail: session.accountEmail,
         accountName: session.accountName,
@@ -967,7 +967,6 @@ Recipient:        ${RECIPIENT_EMAIL}
         folderName: session.folderName,
         folderUrl: session.folderUrl,
         hasRefreshToken: Boolean(session.refreshToken),
-        accessToken: session.accessToken, // Returned for client-side Drive API uploads
         oauthConfigured: Boolean(process.env.GOOGLE_DRIVE_CLIENT_ID && process.env.GOOGLE_DRIVE_CLIENT_SECRET),
         lastRefreshedAt: session.lastRefreshedAt
       });
@@ -979,7 +978,8 @@ Recipient:        ${RECIPIENT_EMAIL}
 
   /**
    * GET /api/drive/token
-   * Returns a valid access token for API operations, refreshing automatically if expired.
+   * Validates backend Drive session health without exposing raw access tokens to the browser.
+   * Auto-refreshes session server-side if expired.
    */
   app.get('/api/drive/token', async (req, res) => {
     try {
@@ -1002,6 +1002,7 @@ Recipient:        ${RECIPIENT_EMAIL}
 
       if (!session || session.status === 'disconnected') {
         return res.status(401).json({
+          connected: false,
           error: 'not_connected',
           message: 'Google Drive is not connected. Please connect with Google Drive first.'
         });
@@ -1010,53 +1011,34 @@ Recipient:        ${RECIPIENT_EMAIL}
       const now = Date.now();
       const needsRefresh = forceRefresh || !session.accessToken || session.expiresAt < now + 60 * 1000;
 
-      if (needsRefresh) {
-        if (!session.refreshToken) {
-          if (session.accessToken && session.expiresAt > now) {
-            // Still temporarily valid
-            return res.json({
-              accessToken: session.accessToken,
-              expiresAt: session.expiresAt,
-              refreshed: false
-            });
-          }
-          return res.status(401).json({
-            error: 'token_expired_no_refresh',
-            message: 'Access token expired and no server-side refresh token is configured. Re-authentication required.'
-          });
-        }
-
+      if (needsRefresh && session.refreshToken) {
         const refreshed = await refreshAccessTokenWithGoogle(session.refreshToken);
-        if (!refreshed) {
+        if (refreshed) {
+          session.accessToken = refreshed.accessToken;
+          session.expiresAt = now + refreshed.expiresIn * 1000;
+          session.lastRefreshedAt = new Date().toISOString();
+          session.status = 'active';
+          writeSecureDriveSession(session);
+        } else if (session.expiresAt < now) {
           session.status = 'expired';
           writeSecureDriveSession(session);
           return res.status(401).json({
+            connected: false,
             error: 'refresh_failed',
-            message: 'Failed to refresh Google Drive access token. Please re-authenticate.'
+            message: 'Failed to refresh Google Drive session.'
           });
         }
-
-        session.accessToken = refreshed.accessToken;
-        session.expiresAt = now + refreshed.expiresIn * 1000;
-        session.lastRefreshedAt = new Date().toISOString();
-        session.status = 'active';
-        writeSecureDriveSession(session);
-
-        return res.json({
-          accessToken: session.accessToken,
-          expiresAt: session.expiresAt,
-          refreshed: true
-        });
       }
 
       return res.json({
-        accessToken: session.accessToken,
-        expiresAt: session.expiresAt,
-        refreshed: false
+        connected: session.status === 'active',
+        status: session.status,
+        hasRefreshToken: Boolean(session.refreshToken),
+        message: 'Google Drive session is active and securely managed server-side. Direct token exposure is disabled.'
       });
     } catch (err: any) {
-      console.error('[Drive Auth] Error providing token:', err);
-      return res.status(500).json({ error: 'Failed to fetch access token' });
+      console.error('[Drive Auth] Error validating token health:', err);
+      return res.status(500).json({ error: 'Failed to check Drive token status' });
     }
   });
 
@@ -1829,6 +1811,89 @@ Recipient:        ${RECIPIENT_EMAIL}
     } catch (err: any) {
       console.error('[Drive Folder Files] Error listing folder files:', err);
       return res.status(500).json({ error: err.message || 'Error listing folder files' });
+    }
+  });
+
+  /**
+   * GET /api/drive/subfolders
+   * Lists subfolders inside a given parent folder (defaults to NMO Gujarat root or events folder).
+   */
+  app.get('/api/drive/subfolders', async (req, res) => {
+    try {
+      const token = await getValidServerDriveToken();
+      if (!token) {
+        return res.status(503).json({ error: 'Google Drive is disconnected.', folders: [] });
+      }
+      const parentId = (req.query.parentId as string) || '1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2';
+      const q = `'${parentId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+      const driveRes = await fetch(
+        `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,webViewLink,createdTime)&pageSize=100&orderBy=name`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (!driveRes.ok) {
+        const errText = await driveRes.text().catch(() => '');
+        return res.status(driveRes.status).json({ error: 'Failed to list subfolders', details: errText });
+      }
+      const data = await driveRes.json();
+      return res.json({
+        success: true,
+        folders: (data.files || []).map((f: any) => ({
+          id: f.id,
+          name: f.name,
+          webViewLink: f.webViewLink || `https://drive.google.com/drive/folders/${f.id}`,
+          createdTime: f.createdTime
+        }))
+      });
+    } catch (err: any) {
+      console.error('[Drive Subfolders] Error listing subfolders:', err);
+      return res.status(500).json({ error: err.message || 'Error listing subfolders' });
+    }
+  });
+
+  /**
+   * POST /api/drive/create-folder
+   * Creates a subfolder in Google Drive securely server-side.
+   */
+  app.post('/api/drive/create-folder', async (req, res) => {
+    try {
+      const { name, parentId } = req.body;
+      if (!name || typeof name !== 'string') {
+        return res.status(400).json({ error: 'Folder name is required' });
+      }
+      const token = await getValidServerDriveToken();
+      if (!token) {
+        return res.status(503).json({ error: 'Google Drive is disconnected.' });
+      }
+      const parent = parentId || '1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2';
+      const createRes = await fetch('https://www.googleapis.com/drive/v3/files?fields=id,name,webViewLink,createdTime', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          name: name.trim(),
+          mimeType: 'application/vnd.google-apps.folder',
+          parents: [parent]
+        })
+      });
+      if (!createRes.ok) {
+        const err = await createRes.text().catch(() => '');
+        return res.status(createRes.status).json({ error: 'Drive folder creation failed', details: err });
+      }
+      const folder = await createRes.json();
+      return res.json({
+        success: true,
+        folder: {
+          id: folder.id,
+          name: folder.name,
+          webViewLink: folder.webViewLink || `https://drive.google.com/drive/folders/${folder.id}`,
+          createdTime: folder.createdTime
+        }
+      });
+    } catch (err: any) {
+      console.error('[Drive Create Folder] Error creating folder:', err);
+      return res.status(500).json({ error: err.message || 'Error creating folder' });
     }
   });
 
