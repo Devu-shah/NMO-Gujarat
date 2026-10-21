@@ -355,32 +355,51 @@ async function startServer() {
     }
   }
 
-  app.use(
-    cors({
-      origin: (origin, callback) => {
-        // Allow requests with no origin (e.g. mobile apps, curl, or same-origin)
-        if (!origin) return callback(null, true);
+  const corsMiddleware = cors({
+    origin: (origin, callback) => {
+      // Allow requests with no origin (e.g. mobile apps, curl, or same-origin)
+      if (!origin) return callback(null, true);
 
-        const isAllowed =
-          ALLOWED_ORIGINS.includes(origin) ||
-          origin.endsWith('.web.app') ||
-          origin.endsWith('.firebaseapp.com') ||
-          origin.endsWith('.run.app');
+      const isAllowed =
+        ALLOWED_ORIGINS.includes(origin) ||
+        origin.endsWith('.web.app') ||
+        origin.endsWith('.firebaseapp.com') ||
+        origin.endsWith('.run.app') ||
+        origin.includes('localhost') ||
+        origin.includes('127.0.0.1');
 
-        if (isAllowed) {
-          return callback(null, true);
-        }
+      if (isAllowed) {
+        return callback(null, true);
+      }
 
-        console.warn(`[CORS Blocked] Origin not allowed: ${origin}`);
-        return callback(null, false);
-      },
-      credentials: true,
-      methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin']
-    })
-  );
+      console.warn(`[CORS Blocked] Origin not allowed: ${origin}`);
+      return callback(null, false);
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'X-Requested-With',
+      'Accept',
+      'Origin',
+      'x-admin-role',
+      'X-Admin-Role',
+      'x-admin-email',
+      'X-Admin-Email',
+      'x-admin-name',
+      'X-Admin-Name',
+      'x-user-role',
+      'X-User-Role',
+      'x-member-id',
+      'X-Member-Id',
+      'Cache-Control',
+      'Pragma'
+    ]
+  });
 
-  app.options('*', cors());
+  app.use(corsMiddleware);
+  app.options('*', corsMiddleware);
 
   app.use(express.json({ limit: '25mb' }));
   app.use(express.urlencoded({ extended: true, limit: '25mb' }));
@@ -1496,6 +1515,43 @@ Recipient:        ${RECIPIENT_EMAIL}
         }
       }
 
+      // Live verification probe: Never report Drive as connected unless backend can actually authenticate and perform an authorized Drive operation
+      let isActuallyConnected = false;
+      if (session.status === 'active' && session.accessToken) {
+        try {
+          const probeRes = await fetch('https://www.googleapis.com/drive/v3/about?fields=user', {
+            headers: { Authorization: `Bearer ${session.accessToken}` }
+          });
+          if (probeRes.ok) {
+            isActuallyConnected = true;
+          } else if (probeRes.status === 401 && session.refreshToken) {
+            // Attempt immediate recovery via refresh token
+            const fresh = await refreshAccessTokenWithGoogle(session.refreshToken);
+            if (fresh) {
+              session.accessToken = fresh.accessToken;
+              session.expiresAt = Date.now() + fresh.expiresIn * 1000;
+              session.lastRefreshedAt = new Date().toISOString();
+              session.status = 'active';
+              await saveDurableDriveSession(session);
+              const retryProbe = await fetch('https://www.googleapis.com/drive/v3/about?fields=user', {
+                headers: { Authorization: `Bearer ${fresh.accessToken}` }
+              });
+              if (retryProbe.ok) {
+                isActuallyConnected = true;
+              } else {
+                session.status = 'expired';
+                await saveDurableDriveSession(session);
+              }
+            } else {
+              session.status = 'expired';
+              await saveDurableDriveSession(session);
+            }
+          }
+        } catch (probeErr) {
+          console.warn('[Drive Auth] Live connectivity probe error:', probeErr);
+        }
+      }
+
       const persistenceMethod = session.persistedInFirestore
         ? 'firestore_encrypted'
         : fs.existsSync(SECURE_CREDENTIALS_FILE)
@@ -1505,8 +1561,8 @@ Recipient:        ${RECIPIENT_EMAIL}
         : 'in_memory';
 
       return res.json({
-        connected: Boolean(session.status === 'active'),
-        status: session.status,
+        connected: isActuallyConnected,
+        status: isActuallyConnected ? 'active' : (session.status === 'disconnected' ? 'disconnected' : 'expired'),
         accountEmail: session.accountEmail,
         accountName: session.accountName,
         accountPhoto: session.accountPhoto,
@@ -1898,6 +1954,58 @@ Recipient:        ${RECIPIENT_EMAIL}
     }
   }
 
+  function getRequesterAdminIdentity(req: express.Request): { isAdmin: boolean; email?: string } {
+    // 1. Check Super Admin session cookie
+    const cookieToken = req.cookies && req.cookies[SUPER_ADMIN_COOKIE_NAME];
+    if (cookieToken) {
+      const verified = verifySuperAdminSessionToken(cookieToken);
+      if (verified && verified.role === 'super_admin') {
+        return { isAdmin: true, email: verified.email };
+      }
+    }
+
+    // 2. Check Authorization Bearer header for HMAC admin session token
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const bearer = authHeader.split('Bearer ')[1]?.trim();
+      if (bearer) {
+        const sessionVerified = verifySuperAdminSessionToken(bearer);
+        if (sessionVerified && sessionVerified.role === 'super_admin') {
+          return { isAdmin: true, email: sessionVerified.email };
+        }
+      }
+    }
+
+    // 3. Check x-admin-role header if accompanied by super admin email
+    const adminRoleHeader = req.headers['x-admin-role'] || req.headers['X-Admin-Role'];
+    const adminEmailHeader = req.headers['x-admin-email'] || req.headers['X-Admin-Email'];
+    if (adminRoleHeader === 'super_admin' && typeof adminEmailHeader === 'string') {
+      const cleanEmail = adminEmailHeader.trim().toLowerCase();
+      if (AUTHORIZED_SUPER_ADMIN_EMAILS.includes(cleanEmail)) {
+        return { isAdmin: true, email: cleanEmail };
+      }
+    }
+
+    return { isAdmin: false };
+  }
+
+  function getRequesterMemberId(req: express.Request): string | null {
+    // Check header x-member-id
+    const headerMem = req.headers['x-member-id'] || req.headers['X-Member-Id'];
+    if (headerMem && typeof headerMem === 'string') {
+      const clean = headerMem.trim().toUpperCase();
+      if (clean) return clean;
+    }
+
+    // Check cookie nmo_member_id
+    if (req.cookies && req.cookies['nmo_member_id']) {
+      const clean = String(req.cookies['nmo_member_id']).trim().toUpperCase();
+      if (clean) return clean;
+    }
+
+    return null;
+  }
+
   /**
    * POST /api/admin/login
    * Validates Super Admin using server-side Firebase Admin ID token verification.
@@ -2137,7 +2245,29 @@ Recipient:        ${RECIPIENT_EMAIL}
       throw new Error(`Failed to query Google Drive for "NMO Gujarat" root folder: ${errText}`);
     }
     const rootData = await rootResp.json();
-    const rootFiles: any[] = rootData.files || [];
+    let rootFiles: any[] = rootData.files || [];
+
+    // Fallback: If not found by name query, check session.folderId directly
+    if (rootFiles.length === 0) {
+      const session = await getDurableDriveSession();
+      const targetFolderId = session?.folderId || '1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2';
+      if (targetFolderId) {
+        try {
+          const directResp = await fetch(
+            `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(targetFolderId)}?fields=id,name,webViewLink,parents,trashed`,
+            { headers: { Authorization: `Bearer ${token}` } }
+          );
+          if (directResp.ok) {
+            const directData = await directResp.json();
+            if (!directData.trashed) {
+              rootFiles = [directData];
+            }
+          }
+        } catch (e) {
+          console.warn('[Drive Hierarchy] Direct root lookup notice:', e);
+        }
+      }
+    }
 
     if (rootFiles.length === 0) {
       return {
@@ -2149,17 +2279,10 @@ Recipient:        ${RECIPIENT_EMAIL}
 
     let rootFolder = rootFiles[0];
     if (rootFiles.length > 1) {
-      const session = readSecureDriveSession();
+      const session = await getDurableDriveSession();
       const matched = rootFiles.find((f) => f.id === session?.folderId);
       if (matched) {
         rootFolder = matched;
-      } else {
-        return {
-          success: false,
-          error: `Multiple folders named "NMO Gujarat" were detected in Google Drive (${rootFiles.length} found). Resolution is ambiguous. Please remove duplicate folders.`,
-          code: 'ROOT_FOLDER_AMBIGUOUS',
-          folders: rootFiles.map((f) => ({ id: f.id, name: f.name }))
-        };
       }
     }
 
@@ -2175,13 +2298,34 @@ Recipient:        ${RECIPIENT_EMAIL}
     const eventsData = await eventsResp.json();
     const eventsFiles: any[] = eventsData.files || [];
 
+    // If "Events" subfolder does not yet exist inside "NMO Gujarat", auto-create it now
     if (eventsFiles.length === 0) {
-      return {
-        success: false,
-        error: 'The "Events" subfolder was not found inside the "NMO Gujarat" folder. Please create the "Events" subfolder inside "NMO Gujarat" before managing certificates.',
-        code: 'EVENTS_FOLDER_NOT_FOUND',
-        rootFolder: { id: rootFolder.id, name: rootFolder.name, webViewLink: rootFolder.webViewLink }
-      };
+      try {
+        console.log(`[Drive Hierarchy] "Events" subfolder not found under "${rootFolder.name}" (${rootFolder.id}). Automatically creating "Events" subfolder...`);
+        const createEventsResp = await fetch('https://www.googleapis.com/drive/v3/files?fields=id,name,webViewLink', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            name: 'Events',
+            mimeType: 'application/vnd.google-apps.folder',
+            parents: [rootFolder.id],
+            description: 'NMO Gujarat Event Certificates Repository'
+          })
+        });
+        if (createEventsResp.ok) {
+          const newEventsFolder = await createEventsResp.json();
+          eventsFiles.push(newEventsFolder);
+          console.log(`[Drive Hierarchy] Successfully created "Events" subfolder with ID: ${newEventsFolder.id}`);
+        } else {
+          const errBody = await createEventsResp.text().catch(() => '');
+          console.warn('[Drive Hierarchy] Could not auto-create "Events" subfolder:', createEventsResp.status, errBody);
+        }
+      } catch (err) {
+        console.warn('[Drive Hierarchy] Notice during auto-creation of "Events" folder:', err);
+      }
     }
 
     if (eventsFiles.length > 1) {
@@ -2194,7 +2338,7 @@ Recipient:        ${RECIPIENT_EMAIL}
       };
     }
 
-    const eventsFolder = eventsFiles[0];
+    const eventsFolder = eventsFiles[0] || rootFolder;
     return {
       success: true,
       rootFolder: { id: rootFolder.id, name: rootFolder.name, webViewLink: rootFolder.webViewLink },
@@ -3370,6 +3514,13 @@ Recipient:        ${RECIPIENT_EMAIL}
               alreadyExisted: true
             };
 
+            try {
+              const adminDb = getAdminFirestore();
+              if (adminDb) {
+                await adminDb.collection('Certificates').doc(existingRecord.certId).set(existingRecord, { merge: true });
+              }
+            } catch {}
+
             return res.json({
               success: true,
               alreadyExisted: true,
@@ -3457,6 +3608,17 @@ Recipient:        ${RECIPIENT_EMAIL}
         proxyViewUrl: `/api/drive/file/${uploadedFile.id}`,
         proxyDownloadUrl: `/api/drive/file/${uploadedFile.id}?download=true`
       };
+
+      // Durably record certificate submission in Firestore database
+      try {
+        const adminDb = getAdminFirestore();
+        if (adminDb) {
+          await adminDb.collection('Certificates').doc(`${eventId}_${cleanNo}`).set(certRecord, { merge: true });
+          console.log(`[Drive Upload] Persisted certificate record to Firestore (Certificates/${eventId}_${cleanNo})`);
+        }
+      } catch (dbErr: any) {
+        console.warn('[Drive Upload] Notice syncing to Firestore on backend:', dbErr?.message);
+      }
 
       return res.json({
         success: true,
@@ -3666,17 +3828,26 @@ Recipient:        ${RECIPIENT_EMAIL}
         return res.status(400).json({ error: 'Invalid Membership Number' });
       }
 
-      // Read member cookie if present to compare and enforce isolation
-      const cookieMemberId = req.cookies && req.cookies['nmo_member_id']
-        ? String(req.cookies['nmo_member_id']).trim().toUpperCase()
-        : null;
+      // Verify Authorization & Ownership:
+      const adminIdentity = getRequesterAdminIdentity(req);
+      const requesterMemberId = getRequesterMemberId(req);
 
-      // Set cookie in response header to maintain verified membership session
-      res.cookie('nmo_member_id', cleanMemNo, {
-        maxAge: 31536000 * 1000,
-        path: '/',
-        sameSite: 'lax'
-      });
+      // Non-admin members cannot query another member's certificates
+      if (!adminIdentity.isAdmin && requesterMemberId && requesterMemberId !== cleanMemNo) {
+        return res.status(403).json({
+          error: 'forbidden',
+          message: `Access denied: You are authenticated as membership ID ${requesterMemberId} and cannot query certificates for ${cleanMemNo}.`
+        });
+      }
+
+      // Maintain verified membership session cookie
+      if (!adminIdentity.isAdmin && !requesterMemberId) {
+        res.cookie('nmo_member_id', cleanMemNo, {
+          maxAge: 31536000 * 1000,
+          path: '/',
+          sameSite: 'lax'
+        });
+      }
 
       const token = await getValidServerDriveToken();
       if (!token) {
@@ -3794,9 +3965,9 @@ Recipient:        ${RECIPIENT_EMAIL}
         return res.status(503).send('Google Drive storage is currently disconnected.');
       }
 
-      // Fetch metadata first to get correct filename and mimeType
+      // Fetch metadata first to get correct filename, mimeType, and properties
       const metaResp = await fetch(
-        `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,mimeType,size`,
+        `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,mimeType,size,properties`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
 
@@ -3805,6 +3976,44 @@ Recipient:        ${RECIPIENT_EMAIL}
       }
 
       const meta = await metaResp.json();
+
+      // Enforce backend authorization & ownership
+      const adminIdentity = getRequesterAdminIdentity(req);
+      if (!adminIdentity.isAdmin) {
+        const requesterMemberId = getRequesterMemberId(req);
+        const fileMemNo = (meta.properties?.membershipNumber || '').trim().toUpperCase();
+
+        const isOwner = Boolean(
+          requesterMemberId && (
+            (fileMemNo && fileMemNo === requesterMemberId) ||
+            isFilenameMatchingMembershipId(meta.name, requesterMemberId)
+          )
+        );
+
+        if (!isOwner) {
+          return res.status(403).json({
+            error: 'forbidden',
+            message: 'Access denied: You are only authorized to access your own certificates.'
+          });
+        }
+
+        // Check approval status: regular users can only download approved certificates
+        const approvalStatus = meta.properties?.approvalStatus || (meta.properties?.uploadSource === 'user' ? 'pending' : 'not_required');
+        if (approvalStatus === 'pending' || approvalStatus === 'pending_approval') {
+          return res.status(403).json({
+            error: 'pending_approval',
+            message: 'This certificate submission is awaiting administrator review and cannot be accessed until approved.'
+          });
+        }
+
+        if (approvalStatus === 'rejected') {
+          return res.status(403).json({
+            error: 'rejected',
+            message: 'This certificate submission was rejected by the administrator.'
+          });
+        }
+      }
+
       const isDownload = req.query.download === 'true';
 
       // Stream file content
@@ -3818,7 +4027,7 @@ Recipient:        ${RECIPIENT_EMAIL}
       }
 
       res.setHeader('Content-Type', meta.mimeType || 'application/octet-stream');
-      res.setHeader('Cache-Control', 'public, max-age=86400');
+      res.setHeader('Cache-Control', 'private, max-age=3600');
       if (isDownload) {
         res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(meta.name)}"`);
       } else {
@@ -3907,6 +4116,25 @@ Recipient:        ${RECIPIENT_EMAIL}
         console.warn('[Drive Approve] Drive file property update returned:', patchResp.status, errText);
       }
 
+      // Update Firestore database record
+      try {
+        const adminDb = getAdminFirestore();
+        if (adminDb) {
+          const docId = req.body.certId || driveFileId;
+          await adminDb.collection('Certificates').doc(docId).set({
+            approvalStatus: 'approved',
+            decisionByAdminUid: adminUid || 'admin',
+            decisionByAdminName: adminName || 'Administrator',
+            decisionAt: new Date().toISOString(),
+            approvedAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          }, { merge: true });
+          console.log(`[Drive Approve] Updated Firestore certificate record for ${docId}`);
+        }
+      } catch (dbErr: any) {
+        console.warn('[Drive Approve] Notice syncing approval to Firestore:', dbErr?.message);
+      }
+
       return res.json({ success: true, message: 'Certificate successfully approved and updated in Drive.' });
     } catch (err: any) {
       console.error('[Drive Approve] Error approving certificate:', err);
@@ -3917,11 +4145,11 @@ Recipient:        ${RECIPIENT_EMAIL}
   /**
    * POST /api/drive/reject-certificate
    * Privileged admin rejection endpoint:
-   * Permanently deletes unapproved file from Google Drive.
+   * Permanently deletes unapproved file from Google Drive and updates database.
    */
   app.post('/api/drive/reject-certificate', async (req, res) => {
     try {
-      const { driveFileId, rejectionReason, adminUid, adminName } = req.body;
+      const { driveFileId, rejectionReason, adminUid, adminName, certId } = req.body;
       if (!driveFileId) {
         return res.status(400).json({ error: 'driveFileId is required' });
       }
@@ -3939,10 +4167,35 @@ Recipient:        ${RECIPIENT_EMAIL}
 
       if (!deleteResp.ok && deleteResp.status !== 404) {
         const errText = await deleteResp.text().catch(() => '');
-        console.warn('[Drive Reject] Drive deletion returned:', deleteResp.status, errText);
+        console.warn('[Drive Reject] Drive deletion failed:', deleteResp.status, errText);
+        return res.status(deleteResp.status >= 500 ? deleteResp.status : 502).json({
+          success: false,
+          error: 'drive_deletion_failed',
+          details: errText,
+          message: 'Failed to delete file from Google Drive. Submission remains pending so you can safely retry.'
+        });
       }
 
-      return res.json({ success: true, message: 'Unapproved file deleted from Google Drive.' });
+      // Record rejection status and reason in Firestore
+      try {
+        const adminDb = getAdminFirestore();
+        if (adminDb) {
+          const docId = certId || driveFileId;
+          await adminDb.collection('Certificates').doc(docId).set({
+            approvalStatus: 'rejected',
+            rejectionReason: rejectionReason || 'Certificate submission could not be verified by administrator',
+            decisionByAdminUid: adminUid || 'admin',
+            decisionByAdminName: adminName || 'Administrator',
+            decisionAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          }, { merge: true });
+          console.log(`[Drive Reject] Recorded rejection status in Firestore for ${docId}`);
+        }
+      } catch (dbErr: any) {
+        console.warn('[Drive Reject] Notice updating rejection in Firestore:', dbErr?.message);
+      }
+
+      return res.json({ success: true, message: 'Unapproved file deleted from Google Drive and rejection recorded.' });
     } catch (err: any) {
       console.error('[Drive Reject] Error rejecting certificate:', err);
       return res.status(500).json({ error: err.message || 'Error rejecting certificate' });

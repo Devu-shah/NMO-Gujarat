@@ -31,7 +31,8 @@ import {
   saveDriveSessionToBackend,
   fetchPendingCertificates,
   approveCertificate,
-  rejectAndDeleteCertificate
+  rejectAndDeleteCertificate,
+  isDriveConnected
 } from '../../lib/googleDrive';
 import { apiUrl } from '../../lib/api';
 import {
@@ -88,7 +89,7 @@ export const AdminCertificatesManager: React.FC = () => {
   const [guideInitialTab, setGuideInitialTab] = useState<GuideTab>('invalid_secret');
   const [savedAccount, setSavedAccount] = useState<SavedDriveSession | null>(getSavedDriveAccount());
   const [tokenHealth, setTokenHealth] = useState<'checking' | 'valid' | 'expired' | 'none'>('checking');
-  const [isConnected, setIsConnected] = useState<boolean>(Boolean(getDriveAccessToken()));
+  const [isConnected, setIsConnected] = useState<boolean>(() => isDriveConnected());
   const [isConnecting, setIsConnecting] = useState<boolean>(false);
   const [feedback, setFeedback] = useState<{ message: string; type: 'success' | 'error'; isInvalidSecret?: boolean } | null>(null);
   const [copiedDomain, setCopiedDomain] = useState<boolean>(false);
@@ -429,6 +430,35 @@ export const AdminCertificatesManager: React.FC = () => {
       console.warn('Scan drive files notice:', err);
     } finally {
       setIsLoadingFiles(false);
+    }
+  };
+
+  const handleCreateSubfolderSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const clean = newFolderName.trim();
+    if (!clean) return;
+    setIsCreatingFolder(true);
+    setFeedback(null);
+    try {
+      const created = await createEventSubfolderInDrive(clean);
+      if (created) {
+        setShowCreateFolderModal(false);
+        setNewFolderName('');
+        await loadDiscoveredFolders(true);
+        setActiveFolderId(created.id);
+        await handleScanFolder(created.id);
+        setFeedback({
+          message: `Successfully created subfolder "${created.name}" in Google Drive under "Events"!`,
+          type: 'success'
+        });
+      }
+    } catch (err: any) {
+      setFeedback({
+        message: err.message || 'Failed to create subfolder in Google Drive.',
+        type: 'error'
+      });
+    } finally {
+      setIsCreatingFolder(false);
     }
   };
 
@@ -2012,6 +2042,87 @@ export const AdminCertificatesManager: React.FC = () => {
                 <span>Confirm Rejection & Delete</span>
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ----------------------------------------------------------------------- */}
+      {/* CREATE SUBFOLDER MODAL */}
+      {/* ----------------------------------------------------------------------- */}
+      {showCreateFolderModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl border border-slate-200">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100 mb-4">
+              <div className="flex items-center gap-2">
+                <FolderPlus className="w-5 h-5 text-amber-700" />
+                <h3 className="font-bold text-slate-900 text-base">Create Subfolder in Drive</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowCreateFolderModal(false);
+                  setNewFolderName('');
+                }}
+                className="text-slate-400 hover:text-slate-700 p-1 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateSubfolderSubmit} className="space-y-4 text-xs">
+              <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 text-amber-950">
+                <span className="font-bold block">Location in Google Drive:</span>
+                <span className="font-mono text-[11px] block mt-0.5">
+                  NMO Gujarat → Events → [New Subfolder]
+                </span>
+              </div>
+
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">
+                  Subfolder Name *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={newFolderName}
+                  onChange={(e) => setNewFolderName(e.target.value)}
+                  placeholder="e.g. Annual State Conference 2026"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-xl text-xs focus:ring-2 focus:ring-red-600 focus:outline-hidden"
+                  autoFocus
+                />
+              </div>
+
+              <div className="pt-3 border-t border-slate-100 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowCreateFolderModal(false);
+                    setNewFolderName('');
+                  }}
+                  disabled={isCreatingFolder}
+                  className="px-4 py-2 border border-slate-200 rounded-xl text-slate-700 font-semibold cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isCreatingFolder || !newFolderName.trim()}
+                  className="px-5 py-2.5 bg-amber-700 hover:bg-amber-800 disabled:bg-slate-300 text-white font-bold rounded-xl shadow-xs transition-all flex items-center gap-2 cursor-pointer"
+                >
+                  {isCreatingFolder ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>Creating in Drive...</span>
+                    </>
+                  ) : (
+                    <>
+                      <FolderPlus className="w-3.5 h-3.5" />
+                      <span>Create Folder</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

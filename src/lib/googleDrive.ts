@@ -200,6 +200,20 @@ export const isDriveConnected = (): boolean => {
 };
 
 /**
+ * Validates whether a token string is a genuine Google OAuth Bearer token.
+ * Prevents internal sentinels like 'server-managed' from ever being transmitted
+ * in Authorization: Bearer headers.
+ */
+export const isRealGoogleBearerToken = (token?: string | null): boolean => {
+  if (!token || typeof token !== 'string') return false;
+  const clean = token.trim();
+  if (!clean || clean === 'server-managed' || clean === 'null' || clean === 'undefined') {
+    return false;
+  }
+  return clean.length > 20 && !clean.includes('server-managed');
+};
+
+/**
  * Asynchronously ensure a valid Drive session is available on the backend.
  */
 export const ensureDriveAccessToken = async (_forceRefresh = false): Promise<string | null> => {
@@ -221,15 +235,18 @@ export const ensureDriveAccessToken = async (_forceRefresh = false): Promise<str
 
 /**
  * Wrapper for Google Drive REST API calls that automatically handles Bearer authorization
- * and automatically renews expired access tokens on 401 Unauthorized via the backend refresh token.
+ * when a genuine client OAuth Bearer token is available.
+ * Strictly prevents sending the 'server-managed' sentinel to Google APIs.
  */
 export const authenticatedDriveFetch = async (
   url: string,
   options: RequestInit = {}
 ): Promise<Response> => {
-  let token = await ensureDriveAccessToken();
-  if (!token) {
-    throw new Error('Google Drive is not connected. Please connect with Google Drive first.');
+  const token = getDriveAccessToken();
+  if (!token || !isRealGoogleBearerToken(token)) {
+    throw new Error(
+      'Direct Google Drive REST access requires a client Bearer token. In server-managed mode, operations must route through backend proxy endpoints.'
+    );
   }
 
   const buildHeaders = (authToken: string): Headers => {
@@ -238,24 +255,10 @@ export const authenticatedDriveFetch = async (
     return headers;
   };
 
-  let res = await fetch(url, {
+  return fetch(url, {
     ...options,
     headers: buildHeaders(token)
   });
-
-  // If token expired, auto-renew from server refresh token and retry request once
-  if (res.status === 401) {
-    console.log('[Google Drive API] Received 401 Unauthorized. Auto-renewing token from server...');
-    const renewedToken = await ensureDriveAccessToken(true);
-    if (renewedToken) {
-      res = await fetch(url, {
-        ...options,
-        headers: buildHeaders(renewedToken)
-      });
-    }
-  }
-
-  return res;
 };
 
 /**
@@ -584,11 +587,15 @@ export const connectWithManualToken = async (
 };
 
 /**
- * Returns sentinel indicator if Drive is connected, without exposing raw tokens to frontend code.
+ * Returns a genuine Google OAuth Bearer access token if one exists in client memory.
+ * Never returns 'server-managed' as a bearer token to prevent invalid Authorization headers.
  */
 export const getDriveAccessToken = (): string | null => {
-  if (isDriveConnected()) {
-    return 'server-managed';
+  if (cachedDriveAccessToken && isRealGoogleBearerToken(cachedDriveAccessToken)) {
+    return cachedDriveAccessToken;
+  }
+  if (cachedDriveSession?.accessToken && isRealGoogleBearerToken(cachedDriveSession.accessToken)) {
+    return cachedDriveSession.accessToken;
   }
   return null;
 };
@@ -754,8 +761,9 @@ export const listEventSubfoldersInDrive = async (_token?: string): Promise<Drive
 };
 
 /**
- * Generate a new event subfolder inside the NMO Gujarat mega folder
- * Routed entirely through backend Express API.
+ * Generate a new event subfolder inside the NMO Gujarat mega folder (under "Events")
+ * Routed entirely through backend Express API (https://nmo-gujarat.onrender.com).
+ * Includes safe diagnostics and distinguishes network/CORS failures from auth/Drive errors.
  */
 export const createEventSubfolderInDrive = async (
   eventName: string,
@@ -767,30 +775,83 @@ export const createEventSubfolderInDrive = async (
     throw new Error('Invalid event name for Google Drive subfolder.');
   }
 
+  const endpoint = apiUrl('/api/drive/events/create-folder');
+  const adminRole = localStorage.getItem('nmo_user_role') || 'super_admin';
+  const adminEmail = auth?.currentUser?.email || localStorage.getItem('nmo_user_email') || '';
+  const adminName = auth?.currentUser?.displayName || localStorage.getItem('nmo_user_name') || '';
+
+  // Attach ID token if user is signed in to Firebase Auth
+  let idToken = '';
   try {
-    const adminRole = localStorage.getItem('nmo_user_role') || 'super_admin';
-    const serverResp = await fetch(apiUrl('/api/drive/events/create-folder'), {
+    if (auth?.currentUser) {
+      idToken = await auth.currentUser.getIdToken();
+    }
+  } catch {}
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'x-admin-role': adminRole
+  };
+  if (adminEmail) headers['x-admin-email'] = adminEmail;
+  if (adminName) headers['x-admin-name'] = adminName;
+  if (idToken) headers['Authorization'] = `Bearer ${idToken}`;
+
+  let serverResp: Response;
+  try {
+    serverResp = await fetch(endpoint, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-admin-role': adminRole
-      },
+      headers,
       body: JSON.stringify({
         title: cleanName,
         eventId: eventId || `EVT-${Date.now()}`,
         existingFolderId,
-        adminRole
+        adminRole,
+        adminEmail,
+        adminName
       })
     });
-    const data = await serverResp.json();
-    if (serverResp.ok && data.success && data.folder) {
-      return data.folder;
-    }
-    throw new Error(data.error || 'Failed to create subfolder in Google Drive.');
-  } catch (err: any) {
-    console.error('Create subfolder error:', err);
-    throw new Error(err.message || 'Unable to create event subfolder. Please verify Drive is connected.');
+  } catch (netErr: any) {
+    const isFetchErr = netErr?.name === 'TypeError' || netErr?.message?.toLowerCase().includes('fetch');
+    const diagnosticMsg = isFetchErr
+      ? `Network or CORS error connecting to backend at "${endpoint}". Please ensure backend is awake (Render cold start) and requests from "${typeof window !== 'undefined' ? window.location.origin : 'https://nmo-gujarat.web.app'}" are permitted.`
+      : `Network error reaching folder creation endpoint: ${netErr?.message || netErr}`;
+    console.error('[Drive Folder Creation] Network / CORS Failure:', {
+      endpoint,
+      origin: typeof window !== 'undefined' ? window.location.origin : 'n/a',
+      error: netErr?.message || netErr
+    });
+    throw new Error(diagnosticMsg);
   }
+
+  let data: any = null;
+  try {
+    data = await serverResp.json();
+  } catch {
+    const rawText = await serverResp.text().catch(() => '');
+    throw new Error(
+      `Backend returned non-JSON response (${serverResp.status}): ${rawText.slice(0, 150) || serverResp.statusText}`
+    );
+  }
+
+  if (serverResp.ok && data?.success && data?.folder) {
+    return data.folder;
+  }
+
+  const errorMsg = data?.error || data?.message || `Failed to create folder in Google Drive (HTTP ${serverResp.status}).`;
+  if (serverResp.status === 403) {
+    throw new Error(`Unauthorized (HTTP 403): ${errorMsg}`);
+  }
+  if (serverResp.status === 503 || data?.code === 'DRIVE_DISCONNECTED') {
+    throw new Error(`Google Drive Disconnected (HTTP 503): ${errorMsg}. Please connect Google Drive in the Admin Dashboard.`);
+  }
+  if (data?.code === 'EVENTS_FOLDER_NOT_FOUND' || data?.code === 'EVENTS_FOLDER_AMBIGUOUS') {
+    throw new Error(`Folder Hierarchy Notice (${data.code}): ${errorMsg}`);
+  }
+  if (data?.code === 'DRIVE_FOLDER_CREATION_FAILED') {
+    throw new Error(`Google Drive API Error: ${errorMsg}${data.details ? ` (${data.details})` : ''}`);
+  }
+
+  throw new Error(errorMsg);
 };
 
 /**
@@ -1156,9 +1217,9 @@ export const deleteDriveFile = async (fileId: string): Promise<boolean> => {
     console.warn('Server delete call notice:', err);
   }
 
-  // 2. Client fallback with live Bearer token
-  const token = getDriveAccessToken() || (await ensureDriveAccessToken());
-  if (token) {
+  // 2. Client fallback with live Bearer token (only if a genuine Google OAuth Bearer token exists)
+  const token = getDriveAccessToken();
+  if (token && isRealGoogleBearerToken(token)) {
     try {
       const res = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`, {
         method: 'DELETE',
@@ -1188,9 +1249,14 @@ export const approveCertificate = async (
     try {
       await fetch(apiUrl('/api/drive/approve-certificate'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-role': 'super_admin'
+        },
+        credentials: 'include',
         body: JSON.stringify({
           driveFileId,
+          certId,
           adminUid: adminInfo?.uid || '',
           adminName: adminInfo?.name || 'Administrator'
         })
@@ -1222,7 +1288,8 @@ export const approveCertificate = async (
 /**
  * Admin rejects a certificate submission:
  * 1. Permanently removes the unapproved file from Google Drive via backend
- * 2. Records the rejection decision, reason, and admin metadata in Firestore
+ * 2. If deletion fails, throws error to prevent false success and allow retry
+ * 3. Records the rejection decision, reason, and admin metadata in Firestore
  */
 export const rejectAndDeleteCertificate = async (
   certId: string,
@@ -1230,20 +1297,25 @@ export const rejectAndDeleteCertificate = async (
   rejectionReason?: string,
   adminInfo?: { uid?: string; name?: string }
 ): Promise<void> => {
-  try {
-    await fetch(apiUrl('/api/drive/reject-certificate'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        driveFileId: driveFileId || certId,
-        rejectionReason: rejectionReason || 'Certificate submission could not be verified by administrator',
-        adminUid: adminInfo?.uid || '',
-        adminName: adminInfo?.name || 'Administrator'
-      })
-    });
-  } catch (e) {
-    console.warn('Backend drive reject note:', e);
-    await deleteDriveFile(driveFileId || certId).catch(() => {});
+  const resp = await fetch(apiUrl('/api/drive/reject-certificate'), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-admin-role': 'super_admin'
+    },
+    credentials: 'include',
+    body: JSON.stringify({
+      driveFileId: driveFileId || certId,
+      certId,
+      rejectionReason: rejectionReason || 'Certificate submission could not be verified by administrator',
+      adminUid: adminInfo?.uid || '',
+      adminName: adminInfo?.name || 'Administrator'
+    })
+  });
+
+  if (!resp.ok && resp.status !== 404) {
+    const errData = await resp.json().catch(() => ({}));
+    throw new Error(errData.message || errData.error || 'Failed to delete unapproved file from Google Drive');
   }
 
   try {
@@ -1358,8 +1430,8 @@ export const fetchCertificatesByMembershipNumber = async (
 
   const token = getDriveAccessToken();
 
-  // 2. If client Drive token is available, query live Drive directly
-  if (token) {
+  // 2. If a genuine client Drive Bearer token is available, query live Drive directly
+  if (token && isRealGoogleBearerToken(token)) {
     try {
       // Get all subfolders of NMO Gujarat folder
       const subfolders = await listEventSubfoldersInDrive(token);
@@ -1445,11 +1517,28 @@ export const fetchCertificatesByMembershipNumber = async (
 export const listCertificatesInFolder = async (
   folderId?: string
 ): Promise<DriveCertificateFile[]> => {
+  const targetFolder = folderId && folderId.trim() ? folderId.trim() : '';
+
+  // 1. Try server-side proxy endpoint for specific event folder
+  if (targetFolder && targetFolder !== NMO_ROOT_DRIVE_FOLDER_ID) {
+    try {
+      const serverResp = await fetch(apiUrl(`/api/drive/event-folder-files/${encodeURIComponent(targetFolder)}`));
+      if (serverResp.ok) {
+        const data = await serverResp.json();
+        if (data.files && Array.isArray(data.files) && data.files.length > 0) {
+          return data.files;
+        }
+      }
+    } catch (err) {
+      console.debug('Backend event-folder-files query note:', err);
+    }
+  }
+
   const token = getDriveAccessToken();
 
-  if (token) {
+  if (token && isRealGoogleBearerToken(token)) {
     try {
-      const targetFolder = folderId && folderId.trim() ? folderId.trim() : NMO_ROOT_DRIVE_FOLDER_ID;
+      const folderTarget = targetFolder || NMO_ROOT_DRIVE_FOLDER_ID;
       
       // If root folder, gather files from root and subfolders
       const subfolders = await listEventSubfoldersInDrive(token);
@@ -1544,8 +1633,8 @@ export const downloadDriveCertificate = async (fileId: string, filename: string)
 
   const token = getDriveAccessToken();
 
-  // 2. If token is present, fetch media stream with bearer token
-  if (token) {
+  // 2. If a genuine client Bearer token is present, fetch media stream with bearer token
+  if (token && isRealGoogleBearerToken(token)) {
     try {
       const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
         headers: { Authorization: `Bearer ${token}` }
