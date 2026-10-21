@@ -476,53 +476,27 @@ export const connectGoogleDrive = async (): Promise<{
   try {
     isSigningIn = true;
 
-    // Check if server OAuth is configured. If so, prefer the server-side offline flow to get a refresh token!
-    let statusRes: Response | null = null;
+    // Always execute the dedicated server OAuth 2.0 flow via the Render backend.
+    // The frontend calls /api/auth/google/url and redirects to Google with:
+    // redirect_uri = https://nmo-gujarat.onrender.com/api/auth/google/callback (never Firebase's __/auth/handler)
+    console.log('[Google Drive] Initiating server-side offline OAuth flow via Render backend...');
     try {
-      statusRes = await fetch(apiUrl('/api/drive/status'));
-    } catch (e) {}
-
-    if (statusRes && statusRes.ok) {
-      const statusData = await statusRes.json().catch(() => ({}));
-      if (statusData.oauthConfigured) {
-        console.log('[Google Drive] Initiating server-side offline OAuth flow...');
-        const session = await connectGoogleDriveViaServerOAuth();
-        return { accessToken: session.accessToken, session };
+      const session = await connectGoogleDriveViaServerOAuth();
+      return { accessToken: session.accessToken, session };
+    } catch (serverOAuthErr: any) {
+      const errMsg = serverOAuthErr?.message || '';
+      console.warn('[Google Drive] Server OAuth initialization notice:', errMsg);
+      if (
+        errMsg.includes('GOOGLE_DRIVE_CLIENT_ID') ||
+        errMsg.includes('missing_client_id') ||
+        errMsg.includes('not configured')
+      ) {
+        throw new Error(
+          'Google Drive OAuth credentials are not configured on the Render backend. Please add GOOGLE_DRIVE_CLIENT_ID and GOOGLE_DRIVE_CLIENT_SECRET to your Render environment variables with Redirect URI "https://nmo-gujarat.onrender.com/api/auth/google/callback", or use the "Quick Connect via Token" tab in the Drive Setup Guide.'
+        );
       }
+      throw serverOAuthErr;
     }
-
-    // Fallback: Firebase Auth popup sign-in
-    const provider = createDriveProvider();
-    const result = await signInWithPopup(auth, provider);
-    const credential = GoogleAuthProvider.credentialFromResult(result);
-
-    if (!credential?.accessToken) {
-      throw new Error(
-        'Could not acquire Google Drive access token. Please ensure the popup was approved.'
-      );
-    }
-
-    cachedDriveAccessToken = credential.accessToken;
-
-    const session: SavedDriveSession = {
-      accessToken: credential.accessToken,
-      accountEmail: result.user.email || 'devanshshah768@gmail.com',
-      accountName: result.user.displayName || 'Devansh Shah',
-      accountPhoto: result.user.photoURL || undefined,
-      savedAt: new Date().toISOString(),
-      expiresAt: Date.now() + 3600 * 1000,
-      folderId: NMO_ROOT_DRIVE_FOLDER_ID,
-      folderName: NMO_ROOT_DRIVE_FOLDER_NAME,
-      folderUrl: NMO_ROOT_DRIVE_URL,
-      status: 'active'
-    };
-
-    cachedDriveSession = session;
-    saveDriveSessionLocally(session);
-    await saveDriveSessionToBackend(session);
-    await saveDriveSessionToFirestore(session);
-
-    return { user: result.user, accessToken: cachedDriveAccessToken, session };
   } catch (err: any) {
     console.error('Google Drive connection error:', err);
     if (err?.code === 'auth/unauthorized-domain' || err?.message?.includes('unauthorized-domain')) {

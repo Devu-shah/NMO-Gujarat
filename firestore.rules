@@ -102,7 +102,7 @@ service cloud.firestore {
     // Read: Public & Members (to retrieve Google Drive CME link configurations)
     // Write: State & Super Administrators
     match /Settings/{settingId} {
-      allow read: if true;
+      allow read: if settingId != 'googleDriveAuth' || isStateAdmin();
       allow write: if isStateAdmin() || isAuthenticated();
     }
 

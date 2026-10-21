@@ -9,50 +9,249 @@ import cookieParser from 'cookie-parser';
 import crypto from 'crypto';
 import cors from 'cors';
 import { initializeApp as initAdminApp, getApps as getAdminApps, cert as adminCert } from 'firebase-admin/app';
-import { getAuth as getAdminAuth, DecodedIdToken } from 'firebase-admin/auth';
+import type { App as AdminApp } from 'firebase-admin/app';
+import { getAuth as getAdminAuth } from 'firebase-admin/auth';
+import type { DecodedIdToken } from 'firebase-admin/auth';
+import { getFirestore as getAdminFirestoreSdk } from 'firebase-admin/firestore';
+import type { Firestore as AdminFirestore } from 'firebase-admin/firestore';
 
 dotenv.config();
 
-// Firebase Admin Initialization (Target Project: nmo-india-demo)
+// Global process-level safety net: prevent unhandled library rejections or exceptions from crashing the server
+process.on('unhandledRejection', (reason: any) => {
+  const errMsg = reason?.message || String(reason || 'Unknown unhandled rejection');
+  console.error('[Process Safety] Handled unhandled promise rejection safely:', errMsg);
+});
+
+process.on('uncaughtException', (err: any) => {
+  const errMsg = err?.message || String(err || 'Unknown uncaught exception');
+  console.error('[Process Safety] Handled uncaught exception safely:', errMsg);
+});
+
+// =========================================================================
+// Firebase Admin SDK Robust Configuration Loader
+// Strict separation: Public ID Token Verification vs Privileged Firestore/Admin Access
+// Target Project: nmo-india-demo (Preserved)
+// =========================================================================
 const FIREBASE_ADMIN_PROJECT_ID = process.env.FIREBASE_PROJECT_ID || 'nmo-india-demo';
+
+// Safe diagnostic state variables (no tokens or secrets exposed)
+let isPublicTokenVerificationReady = false;
+let hasPrivilegedServiceAccount = false;
+let privilegedAuthType: 'service_account_json' | 'client_email_and_key' | 'project_id_only' | 'uninitialized' = 'uninitialized';
+let privilegedInitError: string | null = null;
+let adminAppInstance: AdminApp | null = null;
+let cachedAdminFirestore: AdminFirestore | null = null;
+
+// Backward-compatible alias for existing code
 let isFirebaseAdminInitialized = false;
 
-try {
-  if (getAdminApps().length > 0) {
-    isFirebaseAdminInitialized = true;
-  } else if (process.env.FIREBASE_SERVICE_ACCOUNT_KEY) {
-    try {
-      const parsedCreds = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
-      initAdminApp({
-        credential: adminCert(parsedCreds),
-        projectId: FIREBASE_ADMIN_PROJECT_ID
-      });
-      isFirebaseAdminInitialized = true;
-      console.log(`[Firebase Admin] Initialized with Service Account Key for project: ${FIREBASE_ADMIN_PROJECT_ID}`);
-    } catch (parseErr) {
-      console.error('[Firebase Admin] Failed parsing FIREBASE_SERVICE_ACCOUNT_KEY:', parseErr);
-    }
-  } else if (process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) {
-    initAdminApp({
-      credential: adminCert({
-        projectId: FIREBASE_ADMIN_PROJECT_ID,
-        clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-        privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n')
-      }),
-      projectId: FIREBASE_ADMIN_PROJECT_ID
-    });
-    isFirebaseAdminInitialized = true;
-    console.log(`[Firebase Admin] Initialized with Client Email credentials for project: ${FIREBASE_ADMIN_PROJECT_ID}`);
-  } else {
-    // Initialize with projectId to allow verifying ID tokens using Google's public x509 certificates
-    initAdminApp({
-      projectId: FIREBASE_ADMIN_PROJECT_ID
-    });
-    isFirebaseAdminInitialized = true;
-    console.log(`[Firebase Admin] Initialized with Project ID (${FIREBASE_ADMIN_PROJECT_ID}) for public token verification`);
+/**
+ * Normalizes and validates a PEM private key from environment variables:
+ * - Strips surrounding single or double quotes
+ * - Resolves escaped newlines (\n, \\n, \r\n, \r)
+ * - Reconstructs proper 64-column PEM format if spaces replaced newlines
+ * - Verifies key validity using Node crypto engine without leaking secrets
+ */
+function normalizePrivateKey(rawKey: string): { key: string; valid: boolean; error?: string } {
+  if (!rawKey || typeof rawKey !== 'string') {
+    return { key: '', valid: false, error: 'Private key is empty or not a string.' };
   }
-} catch (err: any) {
-  console.warn('[Firebase Admin] Warning initializing admin SDK:', err?.message || err);
+
+  let cleaned = rawKey.trim();
+  // Strip surrounding quotes
+  if ((cleaned.startsWith('"') && cleaned.endsWith('"')) || (cleaned.startsWith("'") && cleaned.endsWith("'"))) {
+    cleaned = cleaned.slice(1, -1).trim();
+  }
+
+  // Normalize all escaped newline formats
+  cleaned = cleaned
+    .replace(/\\r\\n/g, '\n')
+    .replace(/\\n/g, '\n')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n');
+
+  // Check for standard PEM header and footer
+  const headerMatch = cleaned.match(/-----BEGIN [A-Z0-9 ]+-----/);
+  const footerMatch = cleaned.match(/-----END [A-Z0-9 ]+-----/);
+
+  if (headerMatch && footerMatch) {
+    const header = headerMatch[0];
+    const footer = footerMatch[0];
+    const headerIdx = cleaned.indexOf(header);
+    const footerIdx = cleaned.indexOf(footer);
+    const rawBody = cleaned.slice(headerIdx + header.length, footerIdx).replace(/\s+/g, '');
+    const chunked = rawBody.match(/.{1,64}/g)?.join('\n') || rawBody;
+    cleaned = `${header}\n${chunked}\n${footer}\n`;
+  } else if (!headerMatch && !footerMatch) {
+    // Wrap raw base64 payload if user omitted PEM boundaries
+    const rawBody = cleaned.replace(/\s+/g, '');
+    const chunked = rawBody.match(/.{1,64}/g)?.join('\n') || rawBody;
+    cleaned = `-----BEGIN PRIVATE KEY-----\n${chunked}\n-----END PRIVATE KEY-----\n`;
+  }
+
+  // Validate with Node's crypto engine without logging the key
+  try {
+    crypto.createPrivateKey(cleaned);
+    return { key: cleaned, valid: true };
+  } catch (err: any) {
+    return {
+      key: cleaned,
+      valid: false,
+      error: `Crypto key parser error: ${err?.message || 'Invalid PEM private key'}`
+    };
+  }
+}
+
+/**
+ * Safely parses FIREBASE_SERVICE_ACCOUNT_KEY from JSON, base64-encoded JSON, or quoted strings.
+ */
+function parseServiceAccountJson(val: string): any | null {
+  if (!val || typeof val !== 'string') return null;
+  let str = val.trim();
+  if ((str.startsWith('"') && str.endsWith('"')) || (str.startsWith("'") && str.endsWith("'"))) {
+    str = str.slice(1, -1).trim();
+  }
+  // Detect and decode base64
+  if (!str.startsWith('{') && /^[A-Za-z0-9+/=]+$/.test(str)) {
+    try {
+      const decoded = Buffer.from(str, 'base64').toString('utf8');
+      if (decoded.trim().startsWith('{')) {
+        str = decoded.trim();
+      }
+    } catch {}
+  }
+  return JSON.parse(str);
+}
+
+function initFirebaseAdminSDK() {
+  const existingApps = getAdminApps();
+  if (existingApps.length > 0) {
+    adminAppInstance = existingApps[0];
+    isPublicTokenVerificationReady = true;
+    isFirebaseAdminInitialized = true;
+    return;
+  }
+
+  let privilegedCreds: { projectId: string; clientEmail: string; privateKey: string } | null = null;
+
+  // Strategy 1: FIREBASE_SERVICE_ACCOUNT_KEY (JSON service account)
+  if (process.env.FIREBASE_SERVICE_ACCOUNT_KEY) {
+    try {
+      const parsed = parseServiceAccountJson(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
+      if (parsed && typeof parsed === 'object') {
+        const clientEmail = (parsed.client_email || '').trim();
+        const rawPrivateKey = parsed.private_key || '';
+        const keyResult = normalizePrivateKey(rawPrivateKey);
+
+        if (!clientEmail || !clientEmail.includes('@')) {
+          privilegedInitError = 'FIREBASE_SERVICE_ACCOUNT_KEY is missing a valid client_email.';
+        } else if (!keyResult.valid) {
+          privilegedInitError = `FIREBASE_SERVICE_ACCOUNT_KEY private_key validation failed: ${keyResult.error}`;
+        } else {
+          privilegedCreds = {
+            projectId: parsed.project_id || FIREBASE_ADMIN_PROJECT_ID,
+            clientEmail,
+            privateKey: keyResult.key
+          };
+          privilegedAuthType = 'service_account_json';
+        }
+      } else {
+        privilegedInitError = 'FIREBASE_SERVICE_ACCOUNT_KEY does not contain a valid JSON object.';
+      }
+    } catch (parseErr: any) {
+      privilegedInitError = `Failed to parse FIREBASE_SERVICE_ACCOUNT_KEY JSON: ${parseErr?.message || parseErr}`;
+    }
+  }
+
+  // Strategy 2: FIREBASE_CLIENT_EMAIL & FIREBASE_PRIVATE_KEY
+  if (!privilegedCreds && (process.env.FIREBASE_CLIENT_EMAIL || process.env.FIREBASE_PRIVATE_KEY)) {
+    const rawEmail = (process.env.FIREBASE_CLIENT_EMAIL || '').trim();
+    const rawKey = process.env.FIREBASE_PRIVATE_KEY || '';
+
+    if (!rawEmail || !rawEmail.includes('@')) {
+      privilegedInitError = 'FIREBASE_CLIENT_EMAIL is missing or not a valid service account email.';
+    } else if (!rawKey) {
+      privilegedInitError = 'FIREBASE_PRIVATE_KEY is missing.';
+    } else {
+      const keyResult = normalizePrivateKey(rawKey);
+      if (!keyResult.valid) {
+        privilegedInitError = `FIREBASE_PRIVATE_KEY format error: ${keyResult.error}`;
+      } else {
+        privilegedCreds = {
+          projectId: FIREBASE_ADMIN_PROJECT_ID,
+          clientEmail: rawEmail,
+          privateKey: keyResult.key
+        };
+        privilegedAuthType = 'client_email_and_key';
+      }
+    }
+  }
+
+  // If valid service account credentials were prepared, initialize privileged app
+  if (privilegedCreds) {
+    try {
+      adminAppInstance = initAdminApp({
+        credential: adminCert(privilegedCreds),
+        projectId: privilegedCreds.projectId || FIREBASE_ADMIN_PROJECT_ID
+      });
+      hasPrivilegedServiceAccount = true;
+      isPublicTokenVerificationReady = true;
+      isFirebaseAdminInitialized = true;
+      privilegedInitError = null;
+      console.log(
+        `[Firebase Admin] Privileged Service Account initialized (${privilegedAuthType}) for project: ${FIREBASE_ADMIN_PROJECT_ID}`
+      );
+      return;
+    } catch (certErr: any) {
+      privilegedInitError = `Firebase Admin cert initialization error: ${certErr?.message || certErr}`;
+      console.error(`[Firebase Admin] Privileged initialization failed: ${certErr?.message || certErr}`);
+      adminAppInstance = null;
+    }
+  }
+
+  // Fallback: Initialize with Project ID only for verifying public Firebase ID tokens
+  // NOTE: This intentionally has NO privileged service account attached.
+  try {
+    adminAppInstance = initAdminApp({
+      projectId: FIREBASE_ADMIN_PROJECT_ID
+    });
+    isPublicTokenVerificationReady = true;
+    hasPrivilegedServiceAccount = false;
+    privilegedAuthType = 'project_id_only';
+    isFirebaseAdminInitialized = true;
+    if (!privilegedInitError) {
+      privilegedInitError =
+        'No service account credentials configured. Public Firebase ID token verification is active. Server-side privileged Firestore requires FIREBASE_SERVICE_ACCOUNT_KEY or FIREBASE_CLIENT_EMAIL & FIREBASE_PRIVATE_KEY.';
+    }
+    console.log(
+      `[Firebase Admin] Initialized with Project ID "${FIREBASE_ADMIN_PROJECT_ID}" for public ID token verification ONLY. (Privileged operations disabled; ADC will not be invoked).`
+    );
+  } catch (fallbackErr: any) {
+    console.error('[Firebase Admin] Fallback initialization error:', fallbackErr?.message || fallbackErr);
+  }
+}
+
+initFirebaseAdminSDK();
+
+/**
+ * Returns the privileged Firestore instance if and only if explicit service account
+ * credentials have been configured and verified.
+ * Never calls getFirestore() without explicit credentials, preventing NO_ADC_FOUND errors on Render.
+ */
+function getAdminFirestore(): AdminFirestore | null {
+  if (!hasPrivilegedServiceAccount || !adminAppInstance) {
+    return null;
+  }
+  if (!cachedAdminFirestore) {
+    try {
+      cachedAdminFirestore = getAdminFirestoreSdk(adminAppInstance);
+    } catch (err: any) {
+      console.warn('[Firebase Firestore] Failed to instantiate Admin Firestore with service account:', err?.message || err);
+      return null;
+    }
+  }
+  return cachedAdminFirestore;
 }
 
 const __filename = fileURLToPath(import.meta.url);
@@ -187,12 +386,48 @@ async function startServer() {
   app.use(express.urlencoded({ extended: true, limit: '25mb' }));
   app.use(cookieParser());
 
-  // Health check endpoint
-  app.get('/api/health', (_req, res) => {
+  // Comprehensive Health and Diagnostic Check
+  // Reports operational status of Firebase Admin SDK and Google Drive OAuth without leaking secrets
+  app.get('/api/health', async (req, res) => {
+    let driveSession: SecureDriveSessionRecord | null = null;
+    try {
+      driveSession = await getDurableDriveSession();
+    } catch {
+      driveSession = readSecureDriveSession();
+    }
+
+    const envRefreshToken = Boolean(process.env.GOOGLE_DRIVE_REFRESH_TOKEN);
+    const clientId = Boolean(process.env.GOOGLE_DRIVE_CLIENT_ID || process.env.GOOGLE_CLIENT_ID);
+    const clientSecret = Boolean(process.env.GOOGLE_DRIVE_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET);
+    let redirectUri = '';
+    try {
+      redirectUri = getOAuthRedirectUri(req);
+    } catch {}
+
     res.json({
       status: 'ok',
       service: 'NMO Gujarat API',
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      firebaseAdmin: {
+        projectId: FIREBASE_ADMIN_PROJECT_ID,
+        publicTokenVerificationReady: isPublicTokenVerificationReady,
+        hasPrivilegedServiceAccount,
+        authMethod: privilegedAuthType,
+        serviceAccountKeyConfigured: Boolean(process.env.FIREBASE_SERVICE_ACCOUNT_KEY),
+        clientEmailConfigured: Boolean(process.env.FIREBASE_CLIENT_EMAIL),
+        privateKeyConfigured: Boolean(process.env.FIREBASE_PRIVATE_KEY),
+        privilegedInitNotice: privilegedInitError || undefined
+      },
+      googleDrive: {
+        oauthConfigured: clientId && clientSecret,
+        clientIdConfigured: clientId,
+        clientSecretConfigured: clientSecret,
+        hasRefreshToken: Boolean(driveSession?.refreshToken || envRefreshToken),
+        redirectUri,
+        status: driveSession?.status || (envRefreshToken ? 'active' : 'disconnected'),
+        durableStorage: Boolean(envRefreshToken || driveSession?.refreshToken),
+        persistedInFirestore: Boolean(driveSession?.persistedInFirestore)
+      }
     });
   });
 
@@ -502,6 +737,7 @@ Recipient:        ${RECIPIENT_EMAIL}
 
   // =========================================================================
   // Google Drive Secure Persistent Session & Auto-Refresh Backend Service
+  // Encrypted Firestore Storage (Firebase Admin SDK) + Local Container Cache
   // =========================================================================
   const SECURE_CREDENTIALS_DIR = path.resolve(__dirname, '.credentials');
   const SECURE_CREDENTIALS_FILE = path.join(SECURE_CREDENTIALS_DIR, 'drive_session_secure.json');
@@ -519,9 +755,99 @@ Recipient:        ${RECIPIENT_EMAIL}
     status: 'active' | 'expired' | 'disconnected';
     updatedAt: string;
     lastRefreshedAt?: string;
+    persistedInFirestore?: boolean;
   }
 
-  function readSecureDriveSession(): SecureDriveSessionRecord | null {
+  // Active in-memory session cache
+  let inMemoryDriveSession: SecureDriveSessionRecord | null = null;
+  // Mutex lock to deduplicate concurrent refresh requests across parallel API calls
+  let tokenRefreshPromise: Promise<string | null> | null = null;
+
+  /**
+   * Resolves the 32-byte encryption key for AES-256-GCM authenticated encryption.
+   * Prioritizes DRIVE_TOKEN_ENCRYPTION_KEY, TOKEN_ENCRYPTION_KEY, ENCRYPTION_KEY, or SESSION_SECRET.
+   * Employs a deterministic project salt fallback so encrypted storage in Firestore always functions safely.
+   */
+  function getDriveEncryptionKey(): Buffer {
+    const secret = (
+      process.env.DRIVE_TOKEN_ENCRYPTION_KEY ||
+      process.env.TOKEN_ENCRYPTION_KEY ||
+      process.env.ENCRYPTION_KEY ||
+      process.env.SESSION_SECRET ||
+      ''
+    ).trim();
+
+    if (!secret) {
+      return crypto.createHash('sha256').update(`nmo-gujarat-secure-salt-${FIREBASE_ADMIN_PROJECT_ID}`).digest();
+    }
+    return crypto.createHash('sha256').update(secret).digest();
+  }
+
+  /**
+   * Encrypts a plaintext refresh token using AES-256-GCM authenticated encryption.
+   * Output format: enc:v1:<iv_hex>:<tag_hex>:<ciphertext_hex>
+   */
+  function encryptRefreshToken(token: string): string | null {
+    if (!token) return null;
+    const key = getDriveEncryptionKey();
+
+    try {
+      const iv = crypto.randomBytes(12);
+      const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+      const ciphertext = Buffer.concat([cipher.update(token, 'utf8'), cipher.final()]);
+      const tag = cipher.getAuthTag();
+      return `enc:v1:${iv.toString('hex')}:${tag.toString('hex')}:${ciphertext.toString('hex')}`;
+    } catch (err: any) {
+      console.error('[Drive Encryption] Error encrypting refresh token:', err?.message || err);
+      return null;
+    }
+  }
+
+  /**
+   * Decrypts an encrypted refresh token from AES-256-GCM format.
+   * Tests all available configured keys and fallbacks to handle key rotation or environment updates.
+   */
+  function decryptRefreshToken(payload: string): string | null {
+    if (!payload || !payload.startsWith('enc:v1:')) {
+      return null;
+    }
+
+    const candidateSecrets: string[] = [
+      process.env.DRIVE_TOKEN_ENCRYPTION_KEY,
+      process.env.TOKEN_ENCRYPTION_KEY,
+      process.env.ENCRYPTION_KEY,
+      process.env.SESSION_SECRET,
+      `nmo-gujarat-secure-salt-${FIREBASE_ADMIN_PROJECT_ID}`
+    ].filter((s): s is string => Boolean(s && s.trim()));
+
+    const uniqueKeys = Array.from(new Set(candidateSecrets)).map((s) =>
+      crypto.createHash('sha256').update(s.trim()).digest()
+    );
+
+    for (const key of uniqueKeys) {
+      try {
+        const parts = payload.split(':');
+        if (parts.length !== 5) {
+          continue;
+        }
+        const iv = Buffer.from(parts[2], 'hex');
+        const tag = Buffer.from(parts[3], 'hex');
+        const ciphertext = Buffer.from(parts[4], 'hex');
+
+        const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+        decipher.setAuthTag(tag);
+        const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+        return decrypted.toString('utf8');
+      } catch {
+        // Try next candidate key
+      }
+    }
+
+    console.warn('[Drive Decryption] Failed to decrypt refresh token with any configured or fallback keys.');
+    return null;
+  }
+
+  function readSecureDriveSessionFromFileCache(): SecureDriveSessionRecord | null {
     try {
       if (!fs.existsSync(SECURE_CREDENTIALS_FILE)) {
         return null;
@@ -530,12 +856,11 @@ Recipient:        ${RECIPIENT_EMAIL}
       const data = JSON.parse(raw) as SecureDriveSessionRecord;
       return data;
     } catch (err) {
-      console.warn('[Drive Auth] Notice reading secure session file:', err);
       return null;
     }
   }
 
-  function writeSecureDriveSession(session: SecureDriveSessionRecord) {
+  function writeSecureDriveSessionFileCache(session: SecureDriveSessionRecord) {
     try {
       if (!fs.existsSync(SECURE_CREDENTIALS_DIR)) {
         fs.mkdirSync(SECURE_CREDENTIALS_DIR, { recursive: true, mode: 0o700 });
@@ -544,8 +869,210 @@ Recipient:        ${RECIPIENT_EMAIL}
         mode: 0o600
       });
     } catch (err) {
-      console.error('[Drive Auth] Error writing secure session file:', err);
+      console.warn('[Drive Auth] Notice writing local session cache file:', err);
     }
+  }
+
+  /**
+   * Synchronous accessor for in-memory / cached Drive session.
+   */
+  function readSecureDriveSession(): SecureDriveSessionRecord | null {
+    if (inMemoryDriveSession) {
+      return inMemoryDriveSession;
+    }
+    const cached = readSecureDriveSessionFromFileCache();
+    if (cached) {
+      inMemoryDriveSession = cached;
+      return cached;
+    }
+    if (process.env.GOOGLE_DRIVE_REFRESH_TOKEN) {
+      return {
+        refreshToken: process.env.GOOGLE_DRIVE_REFRESH_TOKEN,
+        expiresAt: 0,
+        accountEmail: process.env.VITE_SUPER_ADMIN_EMAIL || 'devanshshah768@gmail.com',
+        accountName: 'NMO Gujarat Admin',
+        folderId: '1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2',
+        folderName: 'NMO Gujarat',
+        folderUrl: 'https://drive.google.com/drive/folders/1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2',
+        status: 'active',
+        updatedAt: new Date().toISOString()
+      };
+    }
+    return null;
+  }
+
+  /**
+   * Durable async loader: checks in-memory, Firestore Settings/googleDriveAuth (decrypting refresh token),
+   * local cache file, and environment variable.
+   */
+  async function getDurableDriveSession(forceReload = false): Promise<SecureDriveSessionRecord | null> {
+    if (inMemoryDriveSession && !forceReload) {
+      return inMemoryDriveSession;
+    }
+
+    // 1. Try reading encrypted session from Firestore using Firebase Admin SDK
+    const adminDb = getAdminFirestore();
+    if (adminDb) {
+      try {
+        const docSnap = await adminDb.collection('Settings').doc('googleDriveAuth').get();
+        if (docSnap.exists) {
+          const data = docSnap.data();
+          if (data) {
+            if (data.status === 'disconnected') {
+              inMemoryDriveSession = {
+                status: 'disconnected',
+                expiresAt: 0,
+                accountEmail: data.accountEmail || '',
+                folderId: data.folderId || '',
+                folderName: data.folderName || '',
+                folderUrl: data.folderUrl || '',
+                updatedAt: data.updatedAt || new Date().toISOString(),
+                persistedInFirestore: true
+              };
+              return inMemoryDriveSession;
+            }
+
+            let decryptedRefreshToken: string | undefined = undefined;
+            if (data.encryptedRefreshToken) {
+              decryptedRefreshToken = decryptRefreshToken(data.encryptedRefreshToken) || undefined;
+            } else if (data.refreshToken) {
+              decryptedRefreshToken = data.refreshToken;
+            }
+
+            const effectiveRefreshToken = decryptedRefreshToken || process.env.GOOGLE_DRIVE_REFRESH_TOKEN;
+            if (effectiveRefreshToken || data.accessToken) {
+              const restored: SecureDriveSessionRecord = {
+                refreshToken: effectiveRefreshToken,
+                accessToken: data.accessToken,
+                expiresAt: data.expiresAt || 0,
+                accountEmail: data.accountEmail || process.env.VITE_SUPER_ADMIN_EMAIL || 'devanshshah768@gmail.com',
+                accountName: data.accountName || 'NMO Gujarat Admin',
+                accountPhoto: data.accountPhoto,
+                folderId: data.folderId || '1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2',
+                folderName: data.folderName || 'NMO Gujarat',
+                folderUrl: data.folderUrl || 'https://drive.google.com/drive/folders/1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2',
+                status: data.status || 'active',
+                updatedAt: data.updatedAt || new Date().toISOString(),
+                lastRefreshedAt: data.lastRefreshedAt,
+                persistedInFirestore: true
+              };
+
+              inMemoryDriveSession = restored;
+              writeSecureDriveSessionFileCache(restored);
+              return inMemoryDriveSession;
+            }
+          }
+        }
+      } catch (fsErr: any) {
+        console.warn('[Drive Auth] Notice loading session from Firestore:', fsErr?.message || fsErr);
+      }
+    }
+
+    // 2. Fallback to local cache file
+    const fileRecord = readSecureDriveSessionFromFileCache();
+    if (fileRecord) {
+      inMemoryDriveSession = fileRecord;
+      return inMemoryDriveSession;
+    }
+
+    // 3. Fallback to environment variable GOOGLE_DRIVE_REFRESH_TOKEN
+    const envRefreshToken = process.env.GOOGLE_DRIVE_REFRESH_TOKEN;
+    if (envRefreshToken) {
+      inMemoryDriveSession = {
+        refreshToken: envRefreshToken,
+        expiresAt: 0,
+        accountEmail: process.env.VITE_SUPER_ADMIN_EMAIL || 'devanshshah768@gmail.com',
+        accountName: 'NMO Gujarat Admin',
+        folderId: '1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2',
+        folderName: 'NMO Gujarat',
+        folderUrl: 'https://drive.google.com/drive/folders/1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2',
+        status: 'active',
+        updatedAt: new Date().toISOString()
+      };
+      return inMemoryDriveSession;
+    }
+
+    return null;
+  }
+
+  /**
+   * Durably saves Drive credentials:
+   * - Encrypts the refresh token using AES-256-GCM.
+   * - Saves to Firestore (Settings/googleDriveAuth) via Firebase Admin SDK.
+   * - Updates non-sensitive public metadata in Firestore (Settings/googleDriveConfig).
+   * - Caches to in-memory state and local filesystem.
+   */
+  async function saveDurableDriveSession(session: SecureDriveSessionRecord): Promise<void> {
+    if (!session.refreshToken && inMemoryDriveSession?.refreshToken && session.status !== 'disconnected') {
+      session.refreshToken = inMemoryDriveSession.refreshToken;
+    }
+
+    inMemoryDriveSession = session;
+    if (session.status === 'disconnected') {
+      try {
+        if (fs.existsSync(SECURE_CREDENTIALS_FILE)) {
+          fs.unlinkSync(SECURE_CREDENTIALS_FILE);
+        }
+      } catch {}
+    } else {
+      writeSecureDriveSessionFileCache(session);
+    }
+
+    const adminDb = getAdminFirestore();
+    if (adminDb) {
+      try {
+        const encrypted = session.refreshToken ? encryptRefreshToken(session.refreshToken) : null;
+        const firestorePayload: any = {
+          accountEmail: session.accountEmail,
+          accountName: session.accountName,
+          accountPhoto: session.accountPhoto || null,
+          folderId: session.folderId,
+          folderName: session.folderName,
+          folderUrl: session.folderUrl,
+          status: session.status,
+          expiresAt: session.expiresAt,
+          updatedAt: session.updatedAt || new Date().toISOString(),
+          lastRefreshedAt: session.lastRefreshedAt || null,
+          hasRefreshToken: Boolean(session.refreshToken),
+          encrypted: Boolean(encrypted)
+        };
+
+        if (encrypted) {
+          firestorePayload.encryptedRefreshToken = encrypted;
+        } else if (session.status === 'disconnected') {
+          firestorePayload.encryptedRefreshToken = null;
+          firestorePayload.accessToken = null;
+        }
+
+        await adminDb.collection('Settings').doc('googleDriveAuth').set(firestorePayload, { merge: true });
+        session.persistedInFirestore = true;
+        console.log(`[Drive Auth] Durably stored encrypted Drive session in Firestore (Settings/googleDriveAuth) for ${session.accountEmail}`);
+
+        // Update public config doc with safe metadata (no tokens)
+        await adminDb.collection('Settings').doc('googleDriveConfig').set({
+          accountEmail: session.accountEmail,
+          accountName: session.accountName,
+          folderId: session.folderId,
+          folderName: session.folderName,
+          folderUrl: session.folderUrl,
+          status: session.status,
+          hasRefreshToken: Boolean(session.refreshToken),
+          updatedAt: new Date().toISOString()
+        }, { merge: true });
+      } catch (fsErr: any) {
+        console.error('[Drive Auth] Error writing session to Firestore:', fsErr?.message || fsErr);
+        session.persistedInFirestore = false;
+      }
+    } else {
+      console.info('[Drive Auth] Firebase Admin Firestore not configured with service account; session cached in local container storage.');
+      session.persistedInFirestore = false;
+    }
+  }
+
+  function writeSecureDriveSession(session: SecureDriveSessionRecord) {
+    saveDurableDriveSession(session).catch((err) => {
+      console.warn('[Drive Auth] Background durable save notice:', err?.message || err);
+    });
   }
 
   async function refreshAccessTokenWithGoogle(
@@ -608,11 +1135,16 @@ Recipient:        ${RECIPIENT_EMAIL}
 
   function getOAuthRedirectUri(req: express.Request): string {
     if (process.env.GOOGLE_DRIVE_REDIRECT_URI) {
-      return process.env.GOOGLE_DRIVE_REDIRECT_URI;
+      const uri = process.env.GOOGLE_DRIVE_REDIRECT_URI.trim();
+      // Refuse misconfigured GOOGLE_DRIVE_REDIRECT_URI targeting Firebase Auth handler
+      if (!uri.includes('__/auth/handler') && !uri.includes('firebaseapp.com') && !uri.includes('web.app')) {
+        return uri;
+      }
+      console.warn(`[Drive OAuth] Ignoring misconfigured GOOGLE_DRIVE_REDIRECT_URI ("${uri}") pointing to Firebase. Using Render backend callback.`);
     }
-    if (process.env.BACKEND_URL) {
-      const base = process.env.BACKEND_URL.replace(/\/+$/, '');
-      return `${base}/api/auth/google/callback`;
+    const renderExternal = (process.env.RENDER_EXTERNAL_URL || process.env.BACKEND_URL || '').trim().replace(/\/+$/, '');
+    if (renderExternal) {
+      return `${renderExternal}/api/auth/google/callback`;
     }
     const forwardedProto = (req.headers['x-forwarded-proto'] as string)?.split(',')[0]?.trim() || req.protocol;
     const forwardedHost = (req.headers['x-forwarded-host'] as string)?.split(',')[0]?.trim() || req.headers.host;
@@ -834,8 +1366,8 @@ Recipient:        ${RECIPIENT_EMAIL}
       }
 
       // Read existing record to preserve any existing refresh token if omitted in this exchange
-      const existing = readSecureDriveSession();
-      const effectiveRefreshToken = tokenData.refresh_token || existing?.refreshToken;
+      const existing = await getDurableDriveSession();
+      const effectiveRefreshToken = tokenData.refresh_token || existing?.refreshToken || process.env.GOOGLE_DRIVE_REFRESH_TOKEN;
 
       const updatedSession: SecureDriveSessionRecord = {
         refreshToken: effectiveRefreshToken,
@@ -852,7 +1384,7 @@ Recipient:        ${RECIPIENT_EMAIL}
         lastRefreshedAt: new Date().toISOString()
       };
 
-      writeSecureDriveSession(updatedSession);
+      await saveDurableDriveSession(updatedSession);
       console.log(`[Google OAuth Callback] Session persisted securely on server for ${accountEmail}. Has refresh token: ${Boolean(effectiveRefreshToken)}`);
 
       res.setHeader('Content-Type', 'text/html');
@@ -910,8 +1442,11 @@ Recipient:        ${RECIPIENT_EMAIL}
    */
   app.get('/api/drive/status', async (req, res) => {
     try {
-      let session = readSecureDriveSession();
+      let session = await getDurableDriveSession();
       const redirectUri = getOAuthRedirectUri(req);
+      const clientId = process.env.GOOGLE_DRIVE_CLIENT_ID || process.env.GOOGLE_CLIENT_ID;
+      const clientSecret = process.env.GOOGLE_DRIVE_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET;
+      const oauthConfigured = Boolean(clientId && clientSecret);
 
       // Check environment fallback refresh token if no file session exists
       const envRefreshToken = process.env.GOOGLE_DRIVE_REFRESH_TOKEN;
@@ -934,12 +1469,17 @@ Recipient:        ${RECIPIENT_EMAIL}
           connected: false,
           status: 'disconnected',
           hasRefreshToken: false,
-          oauthConfigured: Boolean(process.env.GOOGLE_DRIVE_CLIENT_ID && process.env.GOOGLE_DRIVE_CLIENT_SECRET)
+          oauthConfigured,
+          redirectUri,
+          persistedInFirestore: false,
+          persistenceMethod: 'none',
+          encryptionKeyConfigured: Boolean(process.env.DRIVE_TOKEN_ENCRYPTION_KEY || process.env.TOKEN_ENCRYPTION_KEY || process.env.ENCRYPTION_KEY || process.env.SESSION_SECRET),
+          firebaseAdminPrivileged: hasPrivilegedServiceAccount
         });
       }
 
       const now = Date.now();
-      const isExpiringSoon = session.expiresAt < now + 5 * 60 * 1000; // less than 5 min left or expired
+      const isExpiringSoon = !session.accessToken || session.expiresAt < now + 5 * 60 * 1000; // less than 5 min left or expired
 
       // If token is expiring soon or expired and we have a refresh token, auto-renew now!
       if (isExpiringSoon && session.refreshToken) {
@@ -949,12 +1489,20 @@ Recipient:        ${RECIPIENT_EMAIL}
           session.expiresAt = now + refreshed.expiresIn * 1000;
           session.lastRefreshedAt = new Date().toISOString();
           session.status = 'active';
-          writeSecureDriveSession(session);
+          await saveDurableDriveSession(session);
         } else if (session.expiresAt < now) {
           session.status = 'expired';
-          writeSecureDriveSession(session);
+          await saveDurableDriveSession(session);
         }
       }
+
+      const persistenceMethod = session.persistedInFirestore
+        ? 'firestore_encrypted'
+        : fs.existsSync(SECURE_CREDENTIALS_FILE)
+        ? 'local_file'
+        : envRefreshToken
+        ? 'environment'
+        : 'in_memory';
 
       return res.json({
         connected: Boolean(session.status === 'active'),
@@ -967,7 +1515,12 @@ Recipient:        ${RECIPIENT_EMAIL}
         folderName: session.folderName,
         folderUrl: session.folderUrl,
         hasRefreshToken: Boolean(session.refreshToken),
-        oauthConfigured: Boolean(process.env.GOOGLE_DRIVE_CLIENT_ID && process.env.GOOGLE_DRIVE_CLIENT_SECRET),
+        oauthConfigured,
+        redirectUri,
+        persistedInFirestore: Boolean(session.persistedInFirestore),
+        persistenceMethod,
+        encryptionKeyConfigured: Boolean(process.env.DRIVE_TOKEN_ENCRYPTION_KEY || process.env.TOKEN_ENCRYPTION_KEY || process.env.ENCRYPTION_KEY || process.env.SESSION_SECRET),
+        firebaseAdminPrivileged: hasPrivilegedServiceAccount,
         lastRefreshedAt: session.lastRefreshedAt
       });
     } catch (err: any) {
@@ -984,7 +1537,7 @@ Recipient:        ${RECIPIENT_EMAIL}
   app.get('/api/drive/token', async (req, res) => {
     try {
       const forceRefresh = req.query.forceRefresh === 'true';
-      let session = readSecureDriveSession();
+      let session = await getDurableDriveSession();
 
       if (!session && process.env.GOOGLE_DRIVE_REFRESH_TOKEN) {
         session = {
@@ -1018,10 +1571,10 @@ Recipient:        ${RECIPIENT_EMAIL}
           session.expiresAt = now + refreshed.expiresIn * 1000;
           session.lastRefreshedAt = new Date().toISOString();
           session.status = 'active';
-          writeSecureDriveSession(session);
+          await saveDurableDriveSession(session);
         } else if (session.expiresAt < now) {
           session.status = 'expired';
-          writeSecureDriveSession(session);
+          await saveDurableDriveSession(session);
           return res.status(401).json({
             connected: false,
             error: 'refresh_failed',
@@ -1112,9 +1665,9 @@ Recipient:        ${RECIPIENT_EMAIL}
         console.warn('[Drive Auth] Could not fetch user profile info:', e);
       }
 
-      const existing = readSecureDriveSession();
+      const existing = await getDurableDriveSession();
       const updatedSession: SecureDriveSessionRecord = {
-        refreshToken: tokenData.refresh_token || existing?.refreshToken,
+        refreshToken: tokenData.refresh_token || existing?.refreshToken || process.env.GOOGLE_DRIVE_REFRESH_TOKEN,
         accessToken: tokenData.access_token,
         expiresAt: Date.now() + (tokenData.expires_in || 3600) * 1000,
         accountEmail: userEmail,
@@ -1128,7 +1681,7 @@ Recipient:        ${RECIPIENT_EMAIL}
         lastRefreshedAt: new Date().toISOString()
       };
 
-      writeSecureDriveSession(updatedSession);
+      await saveDurableDriveSession(updatedSession);
       console.log(`[Drive Auth] Google Drive session saved securely for ${userEmail}. Has refresh token: ${Boolean(updatedSession.refreshToken)}`);
 
       return res.json({
@@ -1168,7 +1721,7 @@ Recipient:        ${RECIPIENT_EMAIL}
         return res.status(400).json({ error: 'accessToken and accountEmail are required' });
       }
 
-      const existing = readSecureDriveSession();
+      const existing = await getDurableDriveSession();
       const newSession: SecureDriveSessionRecord = {
         refreshToken: refreshToken || existing?.refreshToken || process.env.GOOGLE_DRIVE_REFRESH_TOKEN,
         accessToken,
@@ -1183,7 +1736,7 @@ Recipient:        ${RECIPIENT_EMAIL}
         updatedAt: new Date().toISOString()
       };
 
-      writeSecureDriveSession(newSession);
+      await saveDurableDriveSession(newSession);
       console.log(`[Drive Auth] Session saved on backend for ${accountEmail}`);
 
       return res.json({
@@ -1202,10 +1755,17 @@ Recipient:        ${RECIPIENT_EMAIL}
    */
   app.post('/api/drive/disconnect', async (_req, res) => {
     try {
-      if (fs.existsSync(SECURE_CREDENTIALS_FILE)) {
-        fs.unlinkSync(SECURE_CREDENTIALS_FILE);
-      }
-      console.log('[Drive Auth] Drive session disconnected and backend credentials file deleted.');
+      const disconnectedSession: SecureDriveSessionRecord = {
+        status: 'disconnected',
+        expiresAt: 0,
+        accountEmail: '',
+        folderId: '',
+        folderName: '',
+        folderUrl: '',
+        updatedAt: new Date().toISOString()
+      };
+      await saveDurableDriveSession(disconnectedSession);
+      console.log('[Drive Auth] Drive session disconnected and backend credentials wiped.');
       return res.json({ success: true, message: 'Google Drive disconnected successfully' });
     } catch (err: any) {
       console.error('[Drive Auth] Error disconnecting:', err);
@@ -1222,7 +1782,7 @@ Recipient:        ${RECIPIENT_EMAIL}
    */
   app.post('/api/drive/test-expire-and-refresh', async (_req, res) => {
     try {
-      const session = readSecureDriveSession();
+      const session = await getDurableDriveSession();
       if (!session) {
         return res.status(404).json({ error: 'No stored session found to test' });
       }
@@ -1231,7 +1791,7 @@ Recipient:        ${RECIPIENT_EMAIL}
       // Force expiration
       session.expiresAt = Date.now() - 1000;
       session.status = 'expired';
-      writeSecureDriveSession(session);
+      await saveDurableDriveSession(session);
 
       if (!session.refreshToken) {
         return res.json({
@@ -1255,7 +1815,7 @@ Recipient:        ${RECIPIENT_EMAIL}
       session.expiresAt = Date.now() + refreshed.expiresIn * 1000;
       session.lastRefreshedAt = new Date().toISOString();
       session.status = 'active';
-      writeSecureDriveSession(session);
+      await saveDurableDriveSession(session);
 
       return res.json({
         success: true,
@@ -1500,7 +2060,7 @@ Recipient:        ${RECIPIENT_EMAIL}
   // Calls Drive by Membership ID and shows ONLY the member's certificates
   // =========================================================================
   async function getValidServerDriveToken(): Promise<string | null> {
-    let session = readSecureDriveSession();
+    let session = await getDurableDriveSession();
     if (!session && process.env.GOOGLE_DRIVE_REFRESH_TOKEN) {
       session = {
         refreshToken: process.env.GOOGLE_DRIVE_REFRESH_TOKEN,
@@ -1520,20 +2080,41 @@ Recipient:        ${RECIPIENT_EMAIL}
     }
 
     const now = Date.now();
-    if (session.accessToken && session.expiresAt > now + 60 * 1000) {
+    // Return existing token if valid for at least 2 minutes
+    if (session.accessToken && session.expiresAt > now + 2 * 60 * 1000) {
       return session.accessToken;
     }
 
+    // Auto-refresh access token if refresh token is present, using tokenRefreshPromise mutex
     if (session.refreshToken) {
-      const refreshed = await refreshAccessTokenWithGoogle(session.refreshToken);
-      if (refreshed) {
-        session.accessToken = refreshed.accessToken;
-        session.expiresAt = now + refreshed.expiresIn * 1000;
-        session.lastRefreshedAt = new Date().toISOString();
-        session.status = 'active';
-        writeSecureDriveSession(session);
-        return session.accessToken;
+      if (tokenRefreshPromise) {
+        const refreshedToken = await tokenRefreshPromise;
+        if (refreshedToken) return refreshedToken;
       }
+
+      tokenRefreshPromise = (async () => {
+        try {
+          const refreshed = await refreshAccessTokenWithGoogle(session!.refreshToken!);
+          if (refreshed) {
+            session!.accessToken = refreshed.accessToken;
+            session!.expiresAt = Date.now() + refreshed.expiresIn * 1000;
+            session!.lastRefreshedAt = new Date().toISOString();
+            session!.status = 'active';
+            await saveDurableDriveSession(session!);
+            return session!.accessToken;
+          } else {
+            if (session!.expiresAt < Date.now()) {
+              session!.status = 'expired';
+              await saveDurableDriveSession(session!);
+            }
+            return session!.accessToken || null;
+          }
+        } finally {
+          tokenRefreshPromise = null;
+        }
+      })();
+
+      return await tokenRefreshPromise;
     }
 
     return session.accessToken || null;
@@ -2436,24 +3017,29 @@ Recipient:        ${RECIPIENT_EMAIL}
         });
       }
 
-      // Safe Firestore database update on backend if Admin SDK is initialized
+      // Safe Firestore database update on backend if privileged Admin SDK is initialized
       let dbUpdated = false;
       if (cleanId) {
         try {
-          const { getFirestore } = await import('firebase-admin/firestore');
-          const adminDb = getFirestore();
-          await adminDb.collection('Events').doc(cleanId).set(
-            {
-              driveFolderId: result.folder.id,
-              driveFolderName: result.folder.name,
-              driveFolderLink: result.folder.webViewLink,
-              driveFolderCreated: true,
-              updatedAt: new Date().toISOString()
-            },
-            { merge: true }
-          );
-          dbUpdated = true;
-          console.log(`[Event Folder] Saved folder ${result.folder.id} to Firestore event ${cleanId}`);
+          const adminDb = getAdminFirestore();
+          if (adminDb) {
+            await adminDb.collection('Events').doc(cleanId).set(
+              {
+                driveFolderId: result.folder.id,
+                driveFolderName: result.folder.name,
+                driveFolderLink: result.folder.webViewLink,
+                driveFolderCreated: true,
+                updatedAt: new Date().toISOString()
+              },
+              { merge: true }
+            );
+            dbUpdated = true;
+            console.log(`[Event Folder] Saved folder ${result.folder.id} to Firestore event ${cleanId}`);
+          } else {
+            console.info(
+              `[Event Folder] Backend Firestore write skipped: privileged service account not configured on Render. Client SDK will persist folder association.`
+            );
+          }
         } catch (dbErr: any) {
           console.warn('[Event Folder] Backend Firestore write notice (client will also persist):', dbErr?.message);
         }
@@ -3383,6 +3969,19 @@ Recipient:        ${RECIPIENT_EMAIL}
       res.sendFile(path.resolve(distPath, 'index.html'));
     });
   }
+
+  // Pre-warm durable Google Drive session from Firestore / local cache
+  getDurableDriveSession()
+    .then((session) => {
+      if (session && session.status !== 'disconnected') {
+        console.log(`[Drive Auth] Pre-warmed Drive session for ${session.accountEmail}. Has refresh token: ${Boolean(session.refreshToken)}, persistedInFirestore: ${Boolean(session.persistedInFirestore)}`);
+      } else {
+        console.log('[Drive Auth] Pre-warming check complete: No active session stored in Firestore or container.');
+      }
+    })
+    .catch((err) => {
+      console.warn('[Drive Auth] Pre-warming notice:', err?.message || err);
+    });
 
   app.listen(PORT, HOST, () => {
     console.log(`NMO Gujarat Server running at http://${HOST}:${PORT}`);
