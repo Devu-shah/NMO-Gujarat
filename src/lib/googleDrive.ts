@@ -626,10 +626,15 @@ export interface DriveCertificateFile {
   webContentLink?: string;
   thumbnailLink?: string;
   membershipNumber?: string;
+  membershipId?: string;
   memberName?: string;
+  membershipName?: string;
+  memberUid?: string;
   eventId?: string;
   eventTitle?: string;
   eventName?: string;
+  googleDriveLink?: string;
+  status?: string;
   driveFolderId?: string;
   driveFolderName?: string;
   description?: string;
@@ -1062,8 +1067,13 @@ export const uploadCertificateToDrive = async (
 };
 
 /**
- * Save certificate metadata in Firestore "Certificates" collection
- * Avoids duplicate records for the same event and member by using a deterministic document ID: `${eventId}_${membershipNumber}`
+ * Save certificate metadata in Firestore "Certificates" and "certificates" collections
+ * Ensures all four mandatory fields are always stored:
+ * - "eventName": Event name from parent event folder or Events collection
+ * - "membershipName": Certificate owner's membership name resolved via membership-ID mapping
+ * - "eventId": Unique event ID from Firestore
+ * - "googleDriveLink": Google Drive file link
+ * Also stores "driveFileId", "membershipId", "memberUid", "uploadedAt", and "status".
  */
 export const syncCertificateToFirestore = async (cert: DriveCertificateFile): Promise<void> => {
   try {
@@ -1071,34 +1081,54 @@ export const syncCertificateToFirestore = async (cert: DriveCertificateFile): Pr
       ? `${cert.eventId}_${cert.membershipNumber}`
       : cert.id;
 
-    await setDoc(
-      doc(db, 'Certificates', docId),
-      {
-        certId: docId,
-        eventId: cert.eventId || '',
-        eventTitle: cert.eventTitle || '',
-        eventName: cert.eventName || '',
-        driveFolderName: cert.driveFolderName || '',
-        membershipNumber: cert.membershipNumber || '',
-        memberName: cert.memberName || '',
-        uploaderUid: cert.uploaderUid || '',
-        uploadSource: cert.uploadSource || (cert.uploadedBy === 'member' ? 'user' : 'admin'),
-        approvalStatus: cert.approvalStatus || 'not_required',
-        driveFileId: cert.id,
-        driveFolderId: cert.driveFolderId || '',
-        originalFileName: cert.name,
-        mimeType: cert.mimeType || 'application/pdf',
-        fileSize: cert.size || '',
-        uploadedAt: cert.createdTime || new Date().toISOString(),
-        decisionByAdminUid: cert.decisionByAdminUid || null,
-        decisionByAdminName: cert.decisionByAdminName || null,
-        decisionAt: cert.decisionAt || null,
-        rejectionReason: cert.rejectionReason || null,
-        webViewLink: cert.webViewLink || null,
-        updatedAt: new Date().toISOString()
-      },
-      { merge: true }
-    );
+    const dataToSave = {
+      // 4 mandatory fields
+      eventName: cert.eventName || cert.eventTitle || 'General Certificate',
+      membershipName: cert.membershipName || cert.memberName || 'NMO Member',
+      eventId: cert.eventId || '',
+      googleDriveLink: cert.googleDriveLink || cert.webViewLink || (cert.id ? `https://drive.google.com/file/d/${cert.id}/view` : ''),
+
+      // Core schema identifiers
+      driveFileId: cert.id,
+      membershipId: cert.membershipNumber || (cert as any).membershipId || '',
+      memberUid: cert.uploaderUid || (cert as any).memberUid || '',
+      uploadedAt: cert.createdTime || new Date().toISOString(),
+      status: cert.approvalStatus || (cert as any).status || 'not_required',
+
+      // Backward compatibility fields
+      certId: docId,
+      eventTitle: cert.eventTitle || cert.eventName || '',
+      driveFolderName: cert.driveFolderName || '',
+      membershipNumber: cert.membershipNumber || (cert as any).membershipId || '',
+      memberName: cert.memberName || cert.membershipName || '',
+      uploaderUid: cert.uploaderUid || (cert as any).memberUid || '',
+      uploadSource: cert.uploadSource || (cert.uploadedBy === 'member' ? 'user' : 'admin'),
+      approvalStatus: cert.approvalStatus || (cert as any).status || 'not_required',
+      driveFolderId: cert.driveFolderId || '',
+      originalFileName: cert.name,
+      mimeType: cert.mimeType || 'application/pdf',
+      fileSize: cert.size || '',
+      decisionByAdminUid: cert.decisionByAdminUid || null,
+      decisionByAdminName: cert.decisionByAdminName || null,
+      decisionAt: cert.decisionAt || null,
+      rejectionReason: cert.rejectionReason || null,
+      webViewLink: cert.webViewLink || cert.googleDriveLink || null,
+      updatedAt: new Date().toISOString()
+    };
+
+    const promises: Promise<any>[] = [
+      setDoc(doc(db, 'Certificates', docId), dataToSave, { merge: true }).catch(() => {}),
+      setDoc(doc(db, 'certificates', docId), dataToSave, { merge: true }).catch(() => {})
+    ];
+
+    if (cert.id && cert.id !== docId) {
+      promises.push(
+        setDoc(doc(db, 'Certificates', cert.id), dataToSave, { merge: true }).catch(() => {}),
+        setDoc(doc(db, 'certificates', cert.id), dataToSave, { merge: true }).catch(() => {})
+      );
+    }
+
+    await Promise.all(promises);
   } catch (err) {
     console.warn('Notice saving certificate to Firestore:', err);
   }
@@ -1266,46 +1296,75 @@ export const rejectAndDeleteCertificate = async (
 
 /**
  * Fetch all user-uploaded certificate submissions waiting for Admin Approval.
- * Strictly excludes admin-uploaded certificates from this approval queue!
+ * Uses backend endpoint first (with Admin SDK privileges), falling back to
+ * querying both 'Certificates' and 'certificates' collections in Firestore.
  */
 export const fetchPendingCertificates = async (): Promise<DriveCertificateFile[]> => {
+  // 1. Try server endpoint first (has privileged admin Firestore access)
   try {
-    const q = query(
-      collection(db, 'Certificates'),
-      where('uploadSource', '==', 'user')
-    );
-    const snap = await getDocs(q);
-    const certs = snap.docs.map((d) => d.data() as any);
-    return certs
-      .filter((c) => c.approvalStatus === 'pending' || c.approvalStatus === 'pending_approval')
-      .map((c) => ({
-        id: c.driveFileId || c.certId,
-        name: c.originalFileName || `${c.membershipNumber}.pdf`,
-        mimeType: c.mimeType || 'application/pdf',
-        size: c.fileSize,
-        createdTime: c.uploadedAt,
-        membershipNumber: c.membershipNumber,
-        memberName: c.memberName,
-        eventId: c.eventId,
-        eventTitle: c.eventTitle,
-        driveFolderId: c.driveFolderId,
-        uploadSource: 'user',
-        approvalStatus: 'pending',
-        uploaderUid: c.uploaderUid,
-        proxyViewUrl: apiUrl(`/api/drive/file/${c.driveFileId || c.certId}`),
-        proxyDownloadUrl: apiUrl(`/api/drive/file/${c.driveFileId || c.certId}?download=true`)
-      }));
-  } catch (err: any) {
-    try {
-      const all = await fetchAllCertificatesFromFirestore();
-      return all.filter(
-        (c) =>
-          c.uploadSource === 'user' &&
-          (c.approvalStatus === 'pending' || c.approvalStatus === 'pending_approval')
-      );
-    } catch {
-      return [];
+    const serverRes = await fetch(apiUrl('/api/drive/pending-certificates'), {
+      credentials: 'include'
+    });
+    if (serverRes.ok) {
+      const data = await serverRes.json();
+      if (Array.isArray(data.pending) && data.pending.length > 0) {
+        return data.pending;
+      }
     }
+  } catch (e) {
+    console.debug('Backend pending certificates endpoint note:', e);
+  }
+
+  // 2. Query Firestore directly from both 'Certificates' and 'certificates' collections
+  try {
+    const [snapCap, snapLower] = await Promise.all([
+      getDocs(collection(db, 'Certificates')).catch(() => ({ docs: [] } as any)),
+      getDocs(collection(db, 'certificates')).catch(() => ({ docs: [] } as any))
+    ]);
+
+    const allDocs = [...snapCap.docs, ...snapLower.docs];
+    const pendingMap = new Map<string, DriveCertificateFile>();
+
+    allDocs.forEach((d) => {
+      const c = d.data() as any;
+      if (!c) return;
+
+      const rawStatus = String(c.status || c.approvalStatus || '').trim().toLowerCase();
+      const isPending = rawStatus === 'pending' || rawStatus === 'pending_approval';
+
+      if (isPending) {
+        const fileId = c.driveFileId || c.certId || d.id;
+        if (!pendingMap.has(fileId)) {
+          const memNo = c.membershipId || c.membershipNumber || '';
+          const memName = c.membershipName || c.memberName || 'NMO Member';
+          const evtName = c.eventName || c.eventTitle || 'General Certificate';
+
+          pendingMap.set(fileId, {
+            id: fileId,
+            name: c.originalFileName || `${memNo || 'Certificate'}.pdf`,
+            mimeType: c.mimeType || 'application/pdf',
+            size: c.size || c.fileSize,
+            createdTime: c.uploadedAt || c.createdTime,
+            membershipNumber: memNo,
+            memberName: memName,
+            eventId: c.eventId,
+            eventTitle: evtName,
+            eventName: evtName,
+            driveFolderId: c.driveFolderId,
+            uploadSource: c.uploadSource || 'user',
+            approvalStatus: 'pending',
+            uploaderUid: c.memberUid || c.uploaderUid,
+            proxyViewUrl: apiUrl(`/api/drive/file/${fileId}`),
+            proxyDownloadUrl: apiUrl(`/api/drive/file/${fileId}?download=true`)
+          });
+        }
+      }
+    });
+
+    return Array.from(pendingMap.values());
+  } catch (err: any) {
+    console.warn('Notice loading pending member certificates:', err);
+    return [];
   }
 };
 

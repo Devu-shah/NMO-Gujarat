@@ -179,6 +179,35 @@ export const AdminCertificatesManager: React.FC = () => {
     }
   };
 
+  const [isSyncingDrive, setIsSyncingDrive] = useState<boolean>(false);
+
+  const handleSyncDriveUploads = async () => {
+    setIsSyncingDrive(true);
+    try {
+      const resp = await fetch(apiUrl('/api/drive/sync-certificates'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-admin-role': 'super_admin' },
+        credentials: 'include'
+      });
+      const data = await resp.json().catch(() => ({}));
+      setFeedback({
+        message: data.message || `Reconciled ${data.syncedCount || 0} certificates from Google Drive into Firestore!`,
+        type: 'success'
+      });
+      await loadPendingCertificates();
+      if (selectedEvent && selectedEvent.driveFolderId) {
+        await loadEventFolderFiles(selectedEvent.driveFolderId);
+      }
+    } catch (err: any) {
+      setFeedback({
+        message: 'Direct Drive reconciliation warning: ' + (err.message || 'Check server connection.'),
+        type: 'error'
+      });
+    } finally {
+      setIsSyncingDrive(false);
+    }
+  };
+
   // Initialize Drive session and token
   useEffect(() => {
     const initDrive = async () => {
@@ -568,7 +597,7 @@ export const AdminCertificatesManager: React.FC = () => {
       const pendingSub = pendingCertificates.find(
         (c) =>
           c.eventId === selectedEvent?.eventId &&
-          String(c.membershipNumber).trim().toUpperCase() === participant.membershipNumber
+          String(c.membershipNumber || (c as any).membershipId || '').trim().toUpperCase() === participant.membershipNumber
       );
 
       let statusType: 'admin_issued' | 'user_approved' | 'pending' | 'missing' = 'missing';
@@ -593,6 +622,31 @@ export const AdminCertificatesManager: React.FC = () => {
       };
     });
   }, [eventParticipants, eventFilesMap, pendingCertificates, selectedEvent]);
+
+  // Scoped pending certificates based on admin's permissions (State vs Prant vs City)
+  const scopedPendingCertificates = useMemo(() => {
+    const userRole = currentUser?.role || 'member';
+    if (userRole === 'super_admin' || userRole === 'state_admin') {
+      return pendingCertificates;
+    }
+    if (userRole === 'prant_admin') {
+      const myPrant = currentUser?.prant;
+      return pendingCertificates.filter((cert) => {
+        if (!myPrant || myPrant === 'All') return true;
+        const evt = events.find((e) => e.eventId === cert.eventId);
+        return evt ? (evt.prant === myPrant || evt.prant === 'All') : true;
+      });
+    }
+    if (userRole === 'city_admin') {
+      const myCity = currentUser?.city;
+      return pendingCertificates.filter((cert) => {
+        if (!myCity) return true;
+        const evt = events.find((e) => e.eventId === cert.eventId);
+        return evt ? evt.city === myCity : true;
+      });
+    }
+    return pendingCertificates;
+  }, [pendingCertificates, currentUser, events]);
 
   // Filtered rows based on search and status filter
   const filteredParticipantRows = useMemo(() => {
@@ -977,9 +1031,9 @@ export const AdminCertificatesManager: React.FC = () => {
           >
             <Clock className="w-4 h-4 text-amber-500" />
             <span>Pending Certificate Approvals</span>
-            {pendingCertificates.length > 0 && (
+            {scopedPendingCertificates.length > 0 && (
               <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-amber-400 text-slate-950 shadow-xs">
-                {pendingCertificates.length}
+                {scopedPendingCertificates.length}
               </span>
             )}
           </button>
@@ -1507,7 +1561,7 @@ export const AdminCertificatesManager: React.FC = () => {
                   <h3 className="font-black text-amber-950 text-base sm:text-lg flex items-center gap-2">
                     <span>User-Uploaded Certificates Pending Admin Approval</span>
                     <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-amber-200 text-amber-900 border border-amber-300">
-                      {pendingCertificates.length} Awaiting Review
+                      {scopedPendingCertificates.length} Awaiting Review
                     </span>
                   </h3>
                   <p className="text-xs text-amber-800 mt-0.5">
@@ -1516,18 +1570,31 @@ export const AdminCertificatesManager: React.FC = () => {
                 </div>
               </div>
 
-              <button
-                type="button"
-                onClick={loadPendingCertificates}
-                disabled={isLoadingPending}
-                className="px-3.5 py-2 bg-white hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer self-start sm:self-auto shadow-2xs"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${isLoadingPending ? 'animate-spin' : ''}`} />
-                <span>Refresh Review Queue</span>
-              </button>
+              <div className="flex items-center gap-2 self-start sm:self-auto">
+                <button
+                  type="button"
+                  onClick={handleSyncDriveUploads}
+                  disabled={isSyncingDrive}
+                  className="px-3.5 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs disabled:opacity-50"
+                  title="Discover direct Drive uploads and synchronize them to Firestore"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isSyncingDrive ? 'animate-spin' : ''}`} />
+                  <span>{isSyncingDrive ? 'Syncing...' : 'Sync Drive Uploads'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={loadPendingCertificates}
+                  disabled={isLoadingPending}
+                  className="px-3.5 py-2 bg-white hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shadow-2xs"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isLoadingPending ? 'animate-spin' : ''}`} />
+                  <span>Refresh Review Queue</span>
+                </button>
+              </div>
             </div>
 
-            {pendingCertificates.length === 0 ? (
+            {scopedPendingCertificates.length === 0 ? (
               <div className="py-12 text-center text-amber-800 space-y-2">
                 <CheckCircle2 className="w-10 h-10 text-emerald-600 mx-auto" />
                 <h4 className="font-bold text-slate-800 text-sm">No Pending Approvals</h4>
@@ -1549,7 +1616,7 @@ export const AdminCertificatesManager: React.FC = () => {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-amber-100">
-                    {pendingCertificates.map((cert) => {
+                    {scopedPendingCertificates.map((cert) => {
                       const isProcessing = processingPendingId === cert.id;
 
                       return (
