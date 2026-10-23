@@ -59,10 +59,21 @@ export const getBaseFilename = (fileName: string): string => {
  */
 export const isFilenameMatchingMembershipId = (
   fileName: string,
-  membershipId: string
+  membershipId: string,
+  fileProperties?: Record<string, any>
 ): boolean => {
   const targetId = String(membershipId || '').trim().toUpperCase();
   if (!targetId) return false;
+
+  // Check file property if available
+  if (fileProperties?.membershipNumber) {
+    const propId = String(fileProperties.membershipNumber).trim().toUpperCase();
+    if (propId === targetId) return true;
+  }
+  if (fileProperties?.membershipId) {
+    const propId = String(fileProperties.membershipId).trim().toUpperCase();
+    if (propId === targetId) return true;
+  }
 
   let base = getBaseFilename(fileName).trim().toUpperCase();
   if (base.startsWith('PENDING_')) {
@@ -71,6 +82,8 @@ export const isFilenameMatchingMembershipId = (
 
   if (base === targetId) return true;
 
+  // Delimited prefix formats (e.g. 9521_EVT, 9521-EVT, 9521 EVT, 9521(1))
+  // Strict requirement: "9521" must NEVER match "95210_EVT" or "95210.jpg"
   if (
     base.startsWith(`${targetId}_`) ||
     base.startsWith(`${targetId}-`) ||
@@ -84,10 +97,92 @@ export const isFilenameMatchingMembershipId = (
 };
 
 /**
+ * Extracts a membership ID from a filename by matching against known membership IDs
+ * or detecting valid numeric / NMO- format prefixes with supported delimiters.
+ * - Supports IDs of any length (including short numeric IDs like "9521").
+ * - Preserves leading zeros (e.g. "001").
+ * - Requires a valid delimiter ('_', '-', space, or '(') or an exact match.
+ * - Prevents partial matches (e.g. "9521" does NOT match "95210_EVT-1.jpg").
+ * - Preserves "NMO-" format support.
+ */
+export const extractMembershipIdFromFilename = (
+  fileName: string,
+  knownMembershipIds?: Set<string> | Map<string, any> | string[],
+  fileProperties?: Record<string, any>
+): string | null => {
+  if (fileProperties?.membershipNumber) {
+    const propId = String(fileProperties.membershipNumber).trim().toUpperCase();
+    if (propId) return propId;
+  }
+  if (fileProperties?.membershipId) {
+    const propId = String(fileProperties.membershipId).trim().toUpperCase();
+    if (propId) return propId;
+  }
+
+  if (!fileName || typeof fileName !== 'string') return null;
+  let base = getBaseFilename(fileName).trim().toUpperCase();
+  if (base.startsWith('PENDING_')) {
+    base = base.replace(/^PENDING_/, '').trim();
+  }
+  if (!base) return null;
+
+  // 1. If known membership IDs from Users collection are provided:
+  if (knownMembershipIds) {
+    const hasId = (id: string) => {
+      if (knownMembershipIds instanceof Set || knownMembershipIds instanceof Map) {
+        return knownMembershipIds.has(id);
+      }
+      return (knownMembershipIds as string[]).includes(id);
+    };
+
+    // 1a. Exact match
+    if (hasId(base)) {
+      return base;
+    }
+
+    // 1b. Check if base matches any candidate prefix before delimiter
+    // Format: numeric ID of ANY length (\d+) or NMO format (NMO-[A-Z0-9-]+)
+    const delimMatch = base.match(/^(NMO-[A-Z0-9-]+|\d+)(?:[_ \-(]|$)/i);
+    if (delimMatch && delimMatch[1]) {
+      const candidate = delimMatch[1].toUpperCase();
+      if (hasId(candidate)) {
+        return candidate;
+      }
+    }
+
+    // 1c. Scan known IDs (supporting arbitrary custom format IDs), sorted longest first
+    const idList = knownMembershipIds instanceof Set || knownMembershipIds instanceof Map
+      ? Array.from(knownMembershipIds.keys())
+      : (knownMembershipIds as string[]);
+
+    const sorted = [...idList].sort((a, b) => b.length - a.length);
+    for (const rawId of sorted) {
+      const id = String(rawId).trim().toUpperCase();
+      if (!id) continue;
+      if (isFilenameMatchingMembershipId(base, id)) {
+        return id;
+      }
+    }
+  }
+
+  // 2. Pattern-based extraction when knownMembershipIds is not provided:
+  // Must match either:
+  // - NMO-[A-Z0-9-]+
+  // - \d+ (any length, preserving leading zeros)
+  // followed by delimiter [_ - (] or end of string
+  const match = base.match(/^(NMO-[A-Z0-9-]+|\d+)(?:[_ \-(]|$)/i);
+  if (match && match[1]) {
+    return match[1].toUpperCase();
+  }
+
+  return null;
+};
+
+/**
  * Strict validator: Checks if a given certificate file or filename belongs to the member in the cookie
  */
 export const isCertificateMatchingCookie = (
-  cert: { membershipNumber?: string; name: string },
+  cert: { membershipNumber?: string; name: string; properties?: Record<string, any> },
   cookieMemberId?: string | null
 ): boolean => {
   const targetId = (cookieMemberId || getMemberIdCookie() || '').trim().toUpperCase();
@@ -96,5 +191,6 @@ export const isCertificateMatchingCookie = (
   const certMem = (cert.membershipNumber || '').trim().toUpperCase();
   if (certMem && certMem === targetId) return true;
 
-  return isFilenameMatchingMembershipId(cert.name, targetId);
+  return isFilenameMatchingMembershipId(cert.name, targetId, cert.properties);
 };
+

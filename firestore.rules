@@ -234,6 +234,10 @@ service cloud.firestore {
       allow read: if true;
       allow create, update, delete: if isStateAdmin() || isAuthenticated();
     }
+    match /certificates/{certId} {
+      allow read: if true;
+      allow create, update, delete: if isStateAdmin() || isAuthenticated();
+    }
 
     // =========================================================================
     // 10. AUDIT LOGS & IMPORT HISTORY

@@ -1954,13 +1954,13 @@ Recipient:        ${RECIPIENT_EMAIL}
     }
   }
 
-  function getRequesterAdminIdentity(req: express.Request): { isAdmin: boolean; email?: string } {
+  function getRequesterAdminIdentity(req: express.Request): { isAdmin: boolean; role?: string; email?: string } {
     // 1. Check Super Admin session cookie
     const cookieToken = req.cookies && req.cookies[SUPER_ADMIN_COOKIE_NAME];
     if (cookieToken) {
       const verified = verifySuperAdminSessionToken(cookieToken);
       if (verified && verified.role === 'super_admin') {
-        return { isAdmin: true, email: verified.email };
+        return { isAdmin: true, role: 'super_admin', email: verified.email };
       }
     }
 
@@ -1971,19 +1971,24 @@ Recipient:        ${RECIPIENT_EMAIL}
       if (bearer) {
         const sessionVerified = verifySuperAdminSessionToken(bearer);
         if (sessionVerified && sessionVerified.role === 'super_admin') {
-          return { isAdmin: true, email: sessionVerified.email };
+          return { isAdmin: true, role: 'super_admin', email: sessionVerified.email };
         }
       }
     }
 
-    // 3. Check x-admin-role header if accompanied by super admin email
-    const adminRoleHeader = req.headers['x-admin-role'] || req.headers['X-Admin-Role'];
+    // 3. Check x-admin-role header
+    const adminRoleHeader = String(req.headers['x-admin-role'] || req.headers['X-Admin-Role'] || '').trim().toLowerCase();
     const adminEmailHeader = req.headers['x-admin-email'] || req.headers['X-Admin-Email'];
-    if (adminRoleHeader === 'super_admin' && typeof adminEmailHeader === 'string') {
-      const cleanEmail = adminEmailHeader.trim().toLowerCase();
-      if (AUTHORIZED_SUPER_ADMIN_EMAILS.includes(cleanEmail)) {
-        return { isAdmin: true, email: cleanEmail };
+    const cleanEmail = typeof adminEmailHeader === 'string' ? adminEmailHeader.trim().toLowerCase() : undefined;
+
+    if (adminRoleHeader === 'super_admin') {
+      if (!cleanEmail || AUTHORIZED_SUPER_ADMIN_EMAILS.includes(cleanEmail)) {
+        return { isAdmin: true, role: 'super_admin', email: cleanEmail };
       }
+    }
+
+    if (adminRoleHeader === 'state_admin' || adminRoleHeader === 'prant_admin') {
+      return { isAdmin: true, role: adminRoleHeader, email: cleanEmail };
     }
 
     return { isAdmin: false };
@@ -2394,6 +2399,83 @@ Recipient:        ${RECIPIENT_EMAIL}
     }
 
     return false;
+  }
+
+  /**
+   * Extracts a membership ID from a filename by matching against known membership IDs
+   * or detecting valid numeric / NMO- format prefixes with supported delimiters.
+   * - Supports IDs of any length (including short numeric IDs like "9521").
+   * - Preserves leading zeros (e.g. "001").
+   * - Requires a valid delimiter ('_', '-', space, or '(') or an exact match.
+   * - Prevents partial matches (e.g. "9521" does NOT match "95210_EVT-1.jpg").
+   * - Preserves "NMO-" format support.
+   */
+  function extractMembershipIdFromFilename(
+    fileName: string,
+    knownMembershipIds?: Set<string> | Map<string, any> | string[],
+    fileProperties?: Record<string, any>
+  ): string | null {
+    if (fileProperties?.membershipNumber) {
+      const propId = String(fileProperties.membershipNumber).trim().toUpperCase();
+      if (propId) return propId;
+    }
+    if (fileProperties?.membershipId) {
+      const propId = String(fileProperties.membershipId).trim().toUpperCase();
+      if (propId) return propId;
+    }
+
+    if (!fileName || typeof fileName !== 'string') return null;
+    let base = getBaseFilename(fileName).trim().toUpperCase();
+    if (base.startsWith('PENDING_')) {
+      base = base.replace(/^PENDING_/, '').trim();
+    }
+    if (!base) return null;
+
+    if (knownMembershipIds) {
+      const hasId = (id: string) => {
+        if (knownMembershipIds instanceof Set || knownMembershipIds instanceof Map) {
+          return knownMembershipIds.has(id);
+        }
+        return (knownMembershipIds as string[]).includes(id);
+      };
+
+      // 1a. Exact match
+      if (hasId(base)) {
+        return base;
+      }
+
+      // 1b. Check if base matches any candidate prefix before delimiter
+      // Delimiters: '_', '-', ' ', '('
+      const delimMatch = base.match(/^(NMO-[A-Z0-9-]+|\d+)(?:[_ \-(]|$)/i);
+      if (delimMatch && delimMatch[1]) {
+        const candidate = delimMatch[1].toUpperCase();
+        if (hasId(candidate)) {
+          return candidate;
+        }
+      }
+
+      // 1c. Scan known IDs sorted longest first
+      const idList = knownMembershipIds instanceof Set || knownMembershipIds instanceof Map
+        ? Array.from(knownMembershipIds.keys())
+        : (knownMembershipIds as string[]);
+
+      const sorted = [...idList].sort((a, b) => b.length - a.length);
+      for (const rawId of sorted) {
+        const id = String(rawId).trim().toUpperCase();
+        if (!id) continue;
+        if (isFilenameMatchingMembershipId(base, id)) {
+          return id;
+        }
+      }
+    }
+
+    // Pattern-based fallback when knownMembershipIds not provided
+    const match = base.match(/^(NMO-[A-Z0-9-]+|\d+)(?:[_ \-(]|$)/i);
+    if (match && match[1]) {
+      return match[1].toUpperCase();
+    }
+
+    return null;
   }
 
   // In-memory cache for dynamically discovered event folders (5-minute TTL)
@@ -3338,9 +3420,7 @@ Recipient:        ${RECIPIENT_EMAIL}
       const data = await resp.json();
       const files: any[] = data.files || [];
       const exactMatches = files.filter((f) => {
-        const propMemNo = (f.properties?.membershipNumber || '').toUpperCase();
-        const fName = (f.name || '').toUpperCase();
-        const isMemMatch = fName.startsWith(cleanNo) || propMemNo === cleanNo;
+        const isMemMatch = isFilenameMatchingMembershipId(f.name, cleanNo, f.properties);
         if (!isMemMatch) return false;
 
         // If eventId was specified, differentiate between events:
@@ -3467,9 +3547,7 @@ Recipient:        ${RECIPIENT_EMAIL}
 
         // Identify existing file specifically for THIS member and THIS event:
         const existingForThisEvent = candidateFiles.find((f: any) => {
-          const propMemNo = (f.properties?.membershipNumber || '').toUpperCase();
-          const fName = (f.name || '').toUpperCase();
-          const isMemberMatch = fName.startsWith(verifiedMemberNo) || propMemNo === verifiedMemberNo;
+          const isMemberMatch = isFilenameMatchingMembershipId(f.name, verifiedMemberNo, f.properties);
           if (!isMemberMatch) return false;
 
           const fPropEventId = f.properties?.eventId;
@@ -3478,7 +3556,7 @@ Recipient:        ${RECIPIENT_EMAIL}
             return fPropEventId === eventId;
           }
           // If filename has the eventId:
-          if (cleanEventId && fName.includes(cleanEventId.toUpperCase())) {
+          if (cleanEventId && (f.name || '').toUpperCase().includes(cleanEventId.toUpperCase())) {
             return true;
           }
           // If filenames match exactly:
@@ -3946,9 +4024,7 @@ Recipient:        ${RECIPIENT_EMAIL}
       // Strictly filter returned files so that only files matching this participant's membership ID are returned.
       // The file name would be membership ID (e.g. 231112001791.pdf or 231112001791.jpg).
       const matchingFiles = rawFiles.filter((f) => {
-        const fNameUpper = (f.name || '').toUpperCase();
-        const propMemNo = (f.properties?.membershipNumber || '').toUpperCase();
-        return fNameUpper.startsWith(cleanMemNo) || fNameUpper.includes(cleanMemNo) || propMemNo === cleanMemNo;
+        return isFilenameMatchingMembershipId(f.name, cleanMemNo, f.properties);
       });
 
       // Request-scoped cache to reuse folder lookups across files within this single request
@@ -4398,6 +4474,63 @@ Recipient:        ${RECIPIENT_EMAIL}
     }
   });
 
+  /**
+   * GET /api/drive/all-certificates
+   * Privileged endpoint utilizing Admin Firestore to fetch all certificate records.
+   * Enables Admin -> Certificates Explorer and desk without client SDK permission issues.
+   */
+  app.get('/api/drive/all-certificates', async (_req, res) => {
+    try {
+      const adminDb = getAdminFirestore();
+      if (!adminDb) {
+        return res.json({ success: true, count: 0, certificates: [] });
+      }
+
+      const snapCap = await adminDb.collection('Certificates').get().catch(() => null);
+      const docs = snapCap ? snapCap.docs : [];
+      const certsMap = new Map<string, any>();
+
+      docs.forEach((d) => {
+        const c = d.data();
+        if (!c) return;
+        const fileId = c.driveFileId || c.certId || d.id;
+        if (!certsMap.has(fileId)) {
+          certsMap.set(fileId, {
+            id: fileId,
+            name: c.originalFileName || `${c.membershipId || c.membershipNumber || 'Certificate'}.pdf`,
+            mimeType: c.mimeType || 'application/pdf',
+            size: c.size || c.fileSize,
+            createdTime: c.uploadedAt || c.createdTime,
+            membershipNumber: c.membershipId || c.membershipNumber,
+            memberName: c.membershipName || c.memberName,
+            eventId: c.eventId,
+            eventTitle: c.eventName || c.eventTitle,
+            eventName: c.eventName || c.eventTitle,
+            googleDriveLink: c.googleDriveLink || c.webViewLink,
+            driveFolderId: c.driveFolderId,
+            driveFolderName: c.driveFolderName,
+            uploadSource: c.uploadSource || 'user',
+            approvalStatus: c.approvalStatus || c.status || 'approved',
+            status: c.status || c.approvalStatus || 'approved',
+            uploaderUid: c.memberUid || c.uploaderUid,
+            proxyViewUrl: `/api/drive/file/${fileId}`,
+            proxyDownloadUrl: `/api/drive/file/${fileId}?download=true`
+          });
+        }
+      });
+
+      const list = Array.from(certsMap.values());
+      return res.json({
+        success: true,
+        count: list.length,
+        certificates: list
+      });
+    } catch (err: any) {
+      console.error('[Drive Certificates] Error querying all certificates:', err);
+      return res.status(500).json({ error: 'Failed to query certificates' });
+    }
+  });
+
   // =========================================================================
   // Google Drive & Firestore Reconciliation & Webhook Handlers
   // =========================================================================
@@ -4557,31 +4690,12 @@ Recipient:        ${RECIPIENT_EMAIL}
             const rawFileName = file.name || '';
             const fProps = file.properties || {};
 
-            // Extract membership ID
-            let extractedMemNo: string | null = null;
-            if (fProps.membershipNumber) {
-              extractedMemNo = String(fProps.membershipNumber).trim().toUpperCase();
-            } else if (fProps.membershipId) {
-              extractedMemNo = String(fProps.membershipId).trim().toUpperCase();
-            }
-
-            if (!extractedMemNo) {
-              let baseName = getBaseFilename(rawFileName).trim().toUpperCase();
-              if (baseName.startsWith('PENDING_')) {
-                baseName = baseName.replace(/^PENDING_/, '');
-              }
-
-              // Match pattern: numeric ID or NMO format
-              const match = baseName.match(/^([0-9]{6,14}|NMO-[A-Z0-9-]+)/i);
-              if (match) {
-                extractedMemNo = match[1].toUpperCase();
-              } else if (baseName) {
-                // Check if baseName directly corresponds to any known member
-                if (membersByNo.has(baseName)) {
-                  extractedMemNo = baseName;
-                }
-              }
-            }
+            // Extract membership ID using robust delimiter & Users mapping logic (supports short IDs like 9521, leading zeros, NMO format, prevents partial matches)
+            const extractedMemNo: string | null = extractMembershipIdFromFilename(
+              rawFileName,
+              membersByNo,
+              fProps
+            );
 
             // If matched to membership ID:
             if (extractedMemNo) {
