@@ -35,6 +35,7 @@ import {
 } from 'firebase/firestore';
 import {
   createEventSubfolderInDrive,
+  ensureEventDriveFolders,
   getDriveAccessToken
 } from '../lib/googleDrive';
 import { setMemberIdCookie, clearMemberIdCookie } from '../lib/memberCookie';
@@ -1705,13 +1706,16 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       createdBy: currentUser?.name || currentUser?.email || 'Admin'
     };
 
-    // Automatically create or link dedicated Google Drive folder inside "Events" root folder via backend API
+    // Automatically create or link dedicated Google Drive folders (Approved & Pending) via backend API
     try {
-      const subfolder = await createEventSubfolderInDrive(eventData.title, newId);
-      if (subfolder?.id) {
-        fullEvent.driveFolderId = subfolder.id;
-        fullEvent.driveFolderLink = subfolder.webViewLink;
-        fullEvent.driveFolderName = subfolder.name;
+      const folders = await ensureEventDriveFolders(eventData.title, newId);
+      if (folders?.approvedFolder?.id) {
+        fullEvent.driveFolderId = folders.approvedFolder.id;
+        fullEvent.driveFolderLink = folders.approvedFolder.webViewLink;
+        fullEvent.driveFolderName = folders.approvedFolder.name;
+        fullEvent.pendingDriveFolderId = folders.pendingFolder?.id;
+        fullEvent.pendingDriveFolderLink = folders.pendingFolder?.webViewLink;
+        fullEvent.pendingDriveFolderName = folders.pendingFolder?.name;
         fullEvent.driveFolderCreated = true;
       }
     } catch (err: any) {
@@ -1733,7 +1737,7 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       'EVENT_CREATE',
       'EVENT',
       newId,
-      `Created event: "${fullEvent.title}" (${fullEvent.prant})${fullEvent.driveFolderId ? ' with Drive folder' : ' (Drive folder pending)'}`
+      `Created event: "${fullEvent.title}" (${fullEvent.prant})${fullEvent.driveFolderId ? ' with Drive folders (Approved & Pending)' : ' (Drive folders pending)'}`
     );
 
     return newId;
@@ -1745,8 +1749,9 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     existingFolderId?: string
   ): Promise<{ id: string; name: string; webViewLink?: string } | null> => {
     try {
-      const folder = await createEventSubfolderInDrive(eventTitle, eventId, existingFolderId);
-      if (folder?.id) {
+      const folders = await ensureEventDriveFolders(eventTitle, eventId, existingFolderId);
+      if (folders?.approvedFolder?.id) {
+        const folder = folders.approvedFolder;
         setEvents((prev) =>
           prev.map((e) =>
             e.eventId === eventId
@@ -1755,6 +1760,9 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                   driveFolderId: folder.id,
                   driveFolderLink: folder.webViewLink,
                   driveFolderName: folder.name,
+                  pendingDriveFolderId: folders.pendingFolder?.id,
+                  pendingDriveFolderLink: folders.pendingFolder?.webViewLink,
+                  pendingDriveFolderName: folders.pendingFolder?.name,
                   driveFolderCreated: true,
                   driveFolderError: undefined
                 }
@@ -1766,6 +1774,9 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             driveFolderId: folder.id,
             driveFolderLink: folder.webViewLink,
             driveFolderName: folder.name,
+            pendingDriveFolderId: folders.pendingFolder?.id || null,
+            pendingDriveFolderLink: folders.pendingFolder?.webViewLink || null,
+            pendingDriveFolderName: folders.pendingFolder?.name || null,
             driveFolderCreated: true,
             driveFolderError: null
           });
@@ -1776,7 +1787,7 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           'EVENT_UPDATE',
           'EVENT',
           eventId,
-          `Linked Google Drive subfolder "${folder.name}" inside "Events" root folder`
+          `Linked Google Drive folders for "${folder.name}" (Approved & Pending)`
         );
         return folder;
       }

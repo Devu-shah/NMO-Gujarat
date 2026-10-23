@@ -124,10 +124,13 @@ export interface NMOEvent {
   createdAt?: string;
   updatedAt?: string;
 
-  // Google Drive folder integration
+  // Google Drive folder integration (Approved and Pending)
   driveFolderId?: string;
   driveFolderLink?: string;
   driveFolderName?: string;
+  pendingDriveFolderId?: string;
+  pendingDriveFolderLink?: string;
+  pendingDriveFolderName?: string;
   driveFolderCreated?: boolean;
   driveFolderError?: string;
 

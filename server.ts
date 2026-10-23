@@ -3120,193 +3120,237 @@ Recipient:        ${RECIPIENT_EMAIL}
     };
   }
 
-  async function createOrReuseEventDriveFolder(
+  const ROOT_DRIVE_FOLDER_ID = '1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2';
+
+  /**
+   * Resolves or creates the "pending" root folder directly under "NMO GUJARAT/" (1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2).
+   */
+  async function getOrCreatePendingRootFolder(token: string): Promise<{ id: string; name: string; webViewLink?: string }> {
+    const query = `'${ROOT_DRIVE_FOLDER_ID}' in parents and mimeType = 'application/vnd.google-apps.folder' and name = 'pending' and trashed = false`;
+    const resp = await fetch(
+      `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=files(id,name,webViewLink)&pageSize=5`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (resp.ok) {
+      const data = await resp.json();
+      if (data.files && data.files.length > 0) {
+        return data.files[0];
+      }
+    }
+
+    console.log(`[Drive Folder Structure] Creating "pending" folder under root ${ROOT_DRIVE_FOLDER_ID}...`);
+    const createResp = await fetch('https://www.googleapis.com/drive/v3/files?fields=id,name,webViewLink', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        name: 'pending',
+        mimeType: 'application/vnd.google-apps.folder',
+        parents: [ROOT_DRIVE_FOLDER_ID],
+        description: 'NMO Gujarat Pending Member Submissions Root'
+      })
+    });
+    if (!createResp.ok) {
+      const err = await createResp.text().catch(() => '');
+      throw new Error(`Failed to create pending root folder in Google Drive: ${err}`);
+    }
+    return await createResp.json();
+  }
+
+  /**
+   * Ensures both folders exist for an event in Google Drive:
+   * 1. Approved event folder: "NMO GUJARAT/{Exact Event Name}" (or under "Events/{Exact Event Name}")
+   * 2. Pending event folder: "NMO GUJARAT/pending/{Exact Event Name}"
+   * Idempotent: checks before creating and never duplicates.
+   */
+  async function ensureEventDriveFolders(
     token: string,
-    eventId: string,
     eventTitle: string,
-    existingFolderId?: string
+    eventId?: string,
+    knownFolderId?: string
   ): Promise<{
     success: boolean;
-    folder?: { id: string; name: string; webViewLink?: string; createdTime?: string };
+    approvedFolder: { id: string; name: string; webViewLink?: string; createdTime?: string };
+    pendingFolder: { id: string; name: string; webViewLink?: string; createdTime?: string };
     alreadyExisted?: boolean;
-    eventsFolder?: { id: string; name: string };
     error?: string;
     code?: string;
-    details?: string;
   }> {
     const cleanTitle = (eventTitle || '').trim();
     const cleanId = (eventId || '').trim();
     if (!cleanTitle) {
-      return { success: false, error: 'Event title is required to create a Google Drive folder', code: 'INVALID_TITLE' };
-    }
-
-    // 1. Locate the configured Google Drive "Events" root folder
-    const hierarchy = await resolveDriveHierarchy(token);
-    if (!hierarchy.success || !hierarchy.eventsFolder) {
       return {
         success: false,
-        error: hierarchy.error || 'The "Events" root folder could not be resolved inside "NMO Gujarat".',
-        code: hierarchy.code || 'EVENTS_FOLDER_NOT_FOUND'
+        error: 'Event title is required to create a Google Drive folder',
+        code: 'INVALID_TITLE',
+        approvedFolder: {} as any,
+        pendingFolder: {} as any
       };
     }
 
-    const eventsFolderId = hierarchy.eventsFolder.id;
+    // 1. Resolve or create Approved Event Folder
+    let approvedFolder: { id: string; name: string; webViewLink?: string; createdTime?: string } | null = null;
+    let approvedAlreadyExisted = false;
 
-    // 2. Query existing folders inside "Events" to avoid creating duplicates
-    const query = `'${eventsFolderId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
-    const resp = await fetch(
-      `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=files(id,name,webViewLink,createdTime,properties)&pageSize=100`,
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-
-    if (!resp.ok) {
-      const errText = await resp.text().catch(() => '');
-      return {
-        success: false,
-        error: 'Failed to inspect existing event folders in Google Drive',
-        details: errText,
-        code: 'DRIVE_QUERY_FAILED'
-      };
-    }
-
-    const data = await resp.json();
-    const existingFolders: any[] = data.files || [];
-
-    // Priority 1: Match by existingFolderId if provided
-    if (existingFolderId) {
-      const matchById = existingFolders.find((f) => f.id === existingFolderId);
-      if (matchById) {
-        return {
-          success: true,
-          alreadyExisted: true,
-          eventsFolder: hierarchy.eventsFolder,
-          folder: {
-            id: matchById.id,
-            name: matchById.name,
-            webViewLink: matchById.webViewLink || `https://drive.google.com/drive/folders/${matchById.id}`,
-            createdTime: matchById.createdTime
+    // Check if knownFolderId was provided and valid
+    if (knownFolderId) {
+      try {
+        const kResp = await fetch(
+          `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(knownFolderId)}?fields=id,name,webViewLink,createdTime,trashed`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        if (kResp.ok) {
+          const kData = await kResp.json();
+          if (!kData.trashed) {
+            approvedFolder = kData;
+            approvedAlreadyExisted = true;
           }
-        };
-      }
-    }
-
-    // Priority 2: Exact case-insensitive title match
-    const exactTitleMatches = existingFolders.filter(
-      (f) => (f.name || '').trim().toLowerCase() === cleanTitle.toLowerCase()
-    );
-    if (exactTitleMatches.length >= 1) {
-      const matched = exactTitleMatches[0];
-      return {
-        success: true,
-        alreadyExisted: true,
-        eventsFolder: hierarchy.eventsFolder,
-        folder: {
-          id: matched.id,
-          name: matched.name,
-          webViewLink: matched.webViewLink || `https://drive.google.com/drive/folders/${matched.id}`,
-          createdTime: matched.createdTime
         }
-      };
+      } catch {}
     }
 
-    // Priority 3: Match by eventId property or folder name equal to eventId
-    if (cleanId) {
-      const idMatch = existingFolders.find(
-        (f) =>
-          f.properties?.eventId === cleanId ||
-          (f.name || '').trim().toLowerCase() === cleanId.toLowerCase()
-      );
-      if (idMatch) {
-        return {
-          success: true,
-          alreadyExisted: true,
-          eventsFolder: hierarchy.eventsFolder,
-          folder: {
-            id: idMatch.id,
-            name: idMatch.name,
-            webViewLink: idMatch.webViewLink || `https://drive.google.com/drive/folders/${idMatch.id}`,
-            createdTime: idMatch.createdTime
+    if (!approvedFolder) {
+      // Check for existing folder matching cleanTitle (case-insensitive) under root or Events subfolder
+      const hierarchy = await resolveDriveHierarchy(token).catch(() => null);
+      const searchParentIds = [ROOT_DRIVE_FOLDER_ID];
+      if (hierarchy?.success && hierarchy?.eventsFolder?.id && hierarchy.eventsFolder.id !== ROOT_DRIVE_FOLDER_ID) {
+        searchParentIds.push(hierarchy.eventsFolder.id);
+      }
+
+      for (const parentId of searchParentIds) {
+        const query = `'${parentId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+        const qResp = await fetch(
+          `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=files(id,name,webViewLink,createdTime,properties)&pageSize=100`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        if (qResp.ok) {
+          const qData = await qResp.json();
+          const list: any[] = qData.files || [];
+          const matched = list.find(
+            (f) =>
+              (f.name || '').trim().toLowerCase() === cleanTitle.toLowerCase() ||
+              (cleanId && f.properties?.eventId === cleanId)
+          );
+          if (matched) {
+            approvedFolder = matched;
+            approvedAlreadyExisted = true;
+            break;
           }
-        };
+        }
       }
     }
 
-    // Priority 4: Normalized title match (alphanumeric only)
-    const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
-    const normTitle = normalize(cleanTitle);
-    if (normTitle && normTitle.length >= 5) {
-      const normMatches = existingFolders.filter((f) => normalize(f.name || '') === normTitle);
-      if (normMatches.length === 1) {
-        const matched = normMatches[0];
-        return {
-          success: true,
-          alreadyExisted: true,
-          eventsFolder: hierarchy.eventsFolder,
-          folder: {
-            id: matched.id,
-            name: matched.name,
-            webViewLink: matched.webViewLink || `https://drive.google.com/drive/folders/${matched.id}`,
-            createdTime: matched.createdTime
-          }
-        };
-      }
-    }
-
-    // 3. No duplicate found -> Create new dedicated subfolder inside "Events"
-    console.log(`[Drive Event Folder] Creating dedicated folder "${cleanTitle}" under "Events" (${eventsFolderId})...`);
-    const createResp = await fetch(
-      'https://www.googleapis.com/drive/v3/files?fields=id,name,webViewLink,createdTime',
-      {
+    // If still not found, create approved folder under ROOT_DRIVE_FOLDER_ID (or events folder)
+    if (!approvedFolder) {
+      const hierarchy = await resolveDriveHierarchy(token).catch(() => null);
+      const targetApprovedParent = hierarchy?.success && hierarchy?.eventsFolder?.id ? hierarchy.eventsFolder.id : ROOT_DRIVE_FOLDER_ID;
+      console.log(`[Drive Event Folders] Creating approved folder "${cleanTitle}" under ${targetApprovedParent}...`);
+      const createResp = await fetch('https://www.googleapis.com/drive/v3/files?fields=id,name,webViewLink,createdTime', {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        },
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: cleanTitle,
           mimeType: 'application/vnd.google-apps.folder',
-          parents: [eventsFolderId],
-          description: `NMO Gujarat Event Folder for "${cleanTitle}" (Event ID: ${cleanId || 'N/A'})`,
-          properties: {
-            eventId: cleanId,
-            eventTitle: cleanTitle,
-            createdAt: new Date().toISOString()
-          }
+          parents: [targetApprovedParent],
+          description: `NMO Gujarat Approved Certificates Folder for "${cleanTitle}"`,
+          properties: { eventId: cleanId || '', eventTitle: cleanTitle }
         })
+      });
+      if (!createResp.ok) {
+        const err = await createResp.text().catch(() => '');
+        return {
+          success: false,
+          error: `Failed to create approved event folder: ${err}`,
+          code: 'APPROVED_FOLDER_CREATION_FAILED',
+          approvedFolder: {} as any,
+          pendingFolder: {} as any
+        };
       }
-    );
-
-    if (!createResp.ok) {
-      const errText = await createResp.text().catch(() => '');
-      console.error('[Drive Event Folder] Failed to create folder in Google Drive:', createResp.status, errText);
-      return {
-        success: false,
-        error: 'Failed to create dedicated event folder in Google Drive',
-        details: errText,
-        code: 'DRIVE_FOLDER_CREATION_FAILED'
-      };
+      approvedFolder = await createResp.json();
     }
 
-    const createdFolder = await createResp.json();
-    console.log(`[Drive Event Folder] Successfully created folder "${createdFolder.name}" with ID ${createdFolder.id}`);
+    // 2. Resolve or create Pending Event Folder inside "NMO GUJARAT/pending/{Exact Event Name}"
+    const pendingRoot = await getOrCreatePendingRootFolder(token);
+    let pendingFolder: { id: string; name: string; webViewLink?: string; createdTime?: string } | null = null;
+
+    const pendingQuery = `'${pendingRoot.id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+    const pResp = await fetch(
+      `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(pendingQuery)}&fields=files(id,name,webViewLink,createdTime,properties)&pageSize=100`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (pResp.ok) {
+      const pData = await pResp.json();
+      const pList: any[] = pData.files || [];
+      const pMatched = pList.find(
+        (f) =>
+          (f.name || '').trim().toLowerCase() === cleanTitle.toLowerCase() ||
+          (cleanId && f.properties?.eventId === cleanId)
+      );
+      if (pMatched) {
+        pendingFolder = pMatched;
+      }
+    }
+
+    if (!pendingFolder) {
+      console.log(`[Drive Event Folders] Creating pending folder "${cleanTitle}" under pending root ${pendingRoot.id}...`);
+      const createPendingResp = await fetch('https://www.googleapis.com/drive/v3/files?fields=id,name,webViewLink,createdTime', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: cleanTitle,
+          mimeType: 'application/vnd.google-apps.folder',
+          parents: [pendingRoot.id],
+          description: `NMO Gujarat Pending Certificates Folder for "${cleanTitle}"`,
+          properties: { eventId: cleanId || '', eventTitle: cleanTitle, isPendingFolder: 'true' }
+        })
+      });
+      if (!createPendingResp.ok) {
+        const err = await createPendingResp.text().catch(() => '');
+        return {
+          success: false,
+          error: `Failed to create pending event folder: ${err}`,
+          code: 'PENDING_FOLDER_CREATION_FAILED',
+          approvedFolder: approvedFolder || ({} as any),
+          pendingFolder: {} as any
+        };
+      }
+      pendingFolder = await createPendingResp.json();
+    }
 
     return {
       success: true,
-      alreadyExisted: false,
-      eventsFolder: hierarchy.eventsFolder,
-      folder: {
-        id: createdFolder.id,
-        name: createdFolder.name,
-        webViewLink: createdFolder.webViewLink || `https://drive.google.com/drive/folders/${createdFolder.id}`,
-        createdTime: createdFolder.createdTime
-      }
+      alreadyExisted: approvedAlreadyExisted,
+      approvedFolder: approvedFolder || ({} as any),
+      pendingFolder: pendingFolder || ({} as any)
     };
   }
 
+  // Backward compatibility alias for legacy callers
+  const createOrReuseEventDriveFolder = async (
+    token: string,
+    eventId: string,
+    eventTitle: string,
+    existingFolderId?: string
+  ) => {
+    const res = await ensureEventDriveFolders(token, eventTitle, eventId, existingFolderId);
+    return {
+      success: res.success,
+      folder: res.approvedFolder,
+      pendingFolder: res.pendingFolder,
+      alreadyExisted: res.alreadyExisted,
+      error: res.error,
+      code: res.code
+    };
+  };
+
   /**
-   * POST /api/drive/events/create-folder (and alias /api/events/create-folder)
-   * Automatically creates or safely reuses a dedicated Google Drive folder inside "Events"
-   * for a new or existing event.
+   * POST /api/drive/events/ensure-folders
+   * POST /api/drive/events/create-folder
+   * POST /api/events/create-folder
+   * Automatically creates or safely reuses BOTH "NMO GUJARAT/{Event}" (approved)
+   * and "NMO GUJARAT/pending/{Event}" (pending) folders for an event.
    */
   const handleEventFolderCreation = async (req: express.Request, res: express.Response) => {
     try {
@@ -3326,7 +3370,7 @@ Recipient:        ${RECIPIENT_EMAIL}
       if (!cleanTitle) {
         return res.status(400).json({
           success: false,
-          error: 'Event title is required to create a Google Drive folder.',
+          error: 'Event title is required to create Google Drive folders.',
           code: 'INVALID_TITLE'
         });
       }
@@ -3340,13 +3384,12 @@ Recipient:        ${RECIPIENT_EMAIL}
         });
       }
 
-      const result = await createOrReuseEventDriveFolder(token, cleanId, cleanTitle, existingFolderId);
-      if (!result.success || !result.folder) {
-        return res.status(result.code === 'EVENTS_FOLDER_NOT_FOUND' || result.code === 'EVENTS_FOLDER_AMBIGUOUS' ? 409 : 502).json({
+      const result = await ensureEventDriveFolders(token, cleanTitle, cleanId, existingFolderId);
+      if (!result.success || !result.approvedFolder) {
+        return res.status(502).json({
           success: false,
           error: result.error,
           code: result.code,
-          details: result.details,
           eventId: cleanId
         });
       }
@@ -3359,36 +3402,37 @@ Recipient:        ${RECIPIENT_EMAIL}
           if (adminDb) {
             await adminDb.collection('Events').doc(cleanId).set(
               {
-                driveFolderId: result.folder.id,
-                driveFolderName: result.folder.name,
-                driveFolderLink: result.folder.webViewLink,
+                driveFolderId: result.approvedFolder.id,
+                driveFolderName: result.approvedFolder.name,
+                driveFolderLink: result.approvedFolder.webViewLink,
+                pendingDriveFolderId: result.pendingFolder.id,
+                pendingDriveFolderName: result.pendingFolder.name,
+                pendingDriveFolderLink: result.pendingFolder.webViewLink,
                 driveFolderCreated: true,
                 updatedAt: new Date().toISOString()
               },
               { merge: true }
             );
             dbUpdated = true;
-            console.log(`[Event Folder] Saved folder ${result.folder.id} to Firestore event ${cleanId}`);
-          } else {
-            console.info(
-              `[Event Folder] Backend Firestore write skipped: privileged service account not configured on Render. Client SDK will persist folder association.`
-            );
+            console.log(`[Event Folder] Saved approved folder ${result.approvedFolder.id} and pending folder ${result.pendingFolder.id} to Firestore event ${cleanId}`);
           }
         } catch (dbErr: any) {
-          console.warn('[Event Folder] Backend Firestore write notice (client will also persist):', dbErr?.message);
+          console.warn('[Event Folder] Backend Firestore write notice:', dbErr?.message);
         }
       }
 
       return res.json({
         success: true,
         alreadyExisted: Boolean(result.alreadyExisted),
-        folder: result.folder,
+        folder: result.approvedFolder,
+        approvedFolder: result.approvedFolder,
+        pendingFolder: result.pendingFolder,
         eventId: cleanId,
         eventTitle: cleanTitle,
         dbUpdated,
         message: result.alreadyExisted
-          ? `Reused existing Google Drive folder "${result.folder.name}" inside "Events".`
-          : `Created dedicated Google Drive folder "${result.folder.name}" inside "Events".`
+          ? `Reused existing Google Drive folders for "${cleanTitle}".`
+          : `Created dedicated Google Drive folders (Approved and Pending) for "${cleanTitle}".`
       });
     } catch (err: any) {
       console.error('[Event Folder] Exception during event folder creation:', err);
@@ -3400,8 +3444,80 @@ Recipient:        ${RECIPIENT_EMAIL}
     }
   };
 
+  app.post('/api/drive/events/ensure-folders', handleEventFolderCreation);
   app.post('/api/drive/events/create-folder', handleEventFolderCreation);
   app.post('/api/events/create-folder', handleEventFolderCreation);
+
+  /**
+   * POST /api/drive/events/reconcile-all-folders
+   * Privileged endpoint: iterates through all events in Firestore and ensures both
+   * approved and pending Google Drive folders exist without creating duplicates.
+   */
+  app.post('/api/drive/events/reconcile-all-folders', async (req, res) => {
+    try {
+      const authResult = await verifyAdminAuthorization(req);
+      if (!authResult.authorized) {
+        return res.status(403).json({ error: 'Unauthorized: Administrator access required.' });
+      }
+
+      const token = await getValidServerDriveToken();
+      if (!token) {
+        return res.status(503).json({ error: 'Google Drive is disconnected on server.' });
+      }
+
+      const adminDb = getAdminFirestore();
+      if (!adminDb) {
+        return res.status(500).json({ error: 'Firestore Admin is not initialized.' });
+      }
+
+      const snap = await adminDb.collection('Events').get();
+      let reconciledCount = 0;
+      const details: any[] = [];
+
+      for (const d of snap.docs) {
+        const evtData = d.data();
+        const eventTitle = evtData.title || evtData.name || d.id;
+        try {
+          const resFolder = await ensureEventDriveFolders(token, eventTitle, d.id, evtData.driveFolderId);
+          if (resFolder.success) {
+            await adminDb.collection('Events').doc(d.id).set(
+              {
+                driveFolderId: resFolder.approvedFolder.id,
+                driveFolderName: resFolder.approvedFolder.name,
+                driveFolderLink: resFolder.approvedFolder.webViewLink,
+                pendingDriveFolderId: resFolder.pendingFolder.id,
+                pendingDriveFolderName: resFolder.pendingFolder.name,
+                pendingDriveFolderLink: resFolder.pendingFolder.webViewLink,
+                driveFolderCreated: true,
+                updatedAt: new Date().toISOString()
+              },
+              { merge: true }
+            );
+            reconciledCount++;
+            details.push({
+              eventId: d.id,
+              eventTitle,
+              approvedFolderId: resFolder.approvedFolder.id,
+              pendingFolderId: resFolder.pendingFolder.id
+            });
+          }
+        } catch (e: any) {
+          console.warn(`[Reconcile Event Folders] Failed for event ${d.id}:`, e.message);
+        }
+      }
+
+      return res.json({
+        success: true,
+        reconciledCount,
+        totalEvents: snap.docs.length,
+        details,
+        message: `Successfully reconciled Google Drive folders for ${reconciledCount} events.`
+      });
+    } catch (err: any) {
+      console.error('[Reconcile Folders] Error reconciling all event folders:', err);
+      return res.status(500).json({ error: err.message || 'Error reconciling event folders' });
+    }
+  });
 
   /**
    * POST /api/drive/create-folder
@@ -3591,22 +3707,19 @@ Recipient:        ${RECIPIENT_EMAIL}
         return res.status(503).json({ error: 'Google Drive storage is disconnected.' });
       }
 
-      // 1. Resolve or verify the event folder inside "NMO Gujarat → Events"
+      // 1. Resolve or verify event folders (Approved and Pending)
+      const eventFoldersRes = await ensureEventDriveFolders(token, eventTitle || 'General', eventId);
       let folderId = targetFolderId;
-      if (!folderId || folderId === '1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2') {
-        const resolved: any = await resolveEventFolder(token, eventId, eventTitle);
-        if (!resolved.success || !resolved.eventFolder) {
-          return res.status(400).json({
-            error: resolved.error || 'Event folder could not be resolved inside "NMO Gujarat → Events".'
-          });
-        }
-        folderId = resolved.eventFolder.id;
+      if (source === 'user') {
+        // Member uploads MUST enter the pending folder directly: NMO GUJARAT/pending/{Event}/
+        folderId = eventFoldersRes.pendingFolder.id;
+        console.log(`[Drive Upload] User upload directed to pending folder "${eventFoldersRes.pendingFolder.name}" (${folderId})`);
       } else {
-        // If targetFolderId is provided, verify it inside "Events"
-        const verified: any = await resolveEventFolder(token, eventId, eventTitle, targetFolderId);
-        if (verified.success && verified.eventFolder) {
-          folderId = verified.eventFolder.id;
+        // Admin uploads enter approved folder directly: NMO GUJARAT/{Event}/
+        if (!folderId || folderId === '1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2') {
+          folderId = eventFoldersRes.approvedFolder.id;
         }
+        console.log(`[Drive Upload] Admin upload directed to approved folder "${eventFoldersRes.approvedFolder.name}" (${folderId})`);
       }
 
       // 2. Validate file type & extension
@@ -4319,13 +4432,24 @@ Recipient:        ${RECIPIENT_EMAIL}
 
   /**
    * POST /api/drive/approve-certificate
-   * Privileged admin approval endpoint:
-   * Strips PENDING_ filename prefix in Google Drive (never adds APPROVED_),
-   * updates file properties on Google Drive, and updates approval status in both Firestore collections.
+   * Explicit State Committee administrator approval endpoint:
+   * 1. Authenticates admin authorization on backend.
+   * 2. Moves file from "NMO GUJARAT/pending/{Event}/" to "NMO GUJARAT/{Event}/" via Google Drive API (addParents, removeParents).
+   * 3. Preserves original Drive file ID and filename (strips legacy PENDING_ prefix if present, never adds APPROVED_).
+   * 4. Verifies approved folder is parent and pending folder is removed before updating Firestore.
+   * 5. Updates authoritative Firestore records in both 'Certificates' and 'certificates'.
    */
   app.post('/api/drive/approve-certificate', async (req, res) => {
     try {
-      const { driveFileId, adminUid, adminName, certId } = req.body;
+      // 1. Authorize Administrator on backend
+      const authResult = await verifyAdminAuthorization(req);
+      if (!authResult.authorized) {
+        return res.status(403).json({
+          error: authResult.error || 'Unauthorized: State Committee administrator access required.'
+        });
+      }
+
+      const { driveFileId, adminUid, adminName, certId, eventId, eventTitle } = req.body;
       if (!driveFileId) {
         return res.status(400).json({ error: 'driveFileId is required' });
       }
@@ -4335,30 +4459,50 @@ Recipient:        ${RECIPIENT_EMAIL}
         return res.status(503).json({ error: 'Google Drive storage is disconnected.' });
       }
 
-      // 1. Fetch current file metadata to check for PENDING_ prefix
-      let cleanFileName: string | undefined;
-      try {
-        const metaResp = await fetch(
-          `https://www.googleapis.com/drive/v3/files/${driveFileId}?fields=id,name,properties`,
-          { headers: { Authorization: `Bearer ${token}` } }
-        );
-        if (metaResp.ok) {
-          const fileMeta = await metaResp.json();
-          if (fileMeta.name && /^PENDING_/i.test(fileMeta.name)) {
-            cleanFileName = fileMeta.name.replace(/^PENDING_/i, '');
-            console.log(`[Drive Approve] Stripping PENDING_ prefix from filename: "${fileMeta.name}" -> "${cleanFileName}"`);
-          }
-        }
-      } catch (metaErr) {
-        console.warn('[Drive Approve] Notice checking file metadata for rename:', metaErr);
+      // 2. Fetch current file metadata from Google Drive
+      const metaResp = await fetch(
+        `https://www.googleapis.com/drive/v3/files/${driveFileId}?fields=id,name,parents,properties`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (!metaResp.ok) {
+        const errText = await metaResp.text().catch(() => '');
+        return res.status(metaResp.status).json({
+          error: 'Certificate file not found in Google Drive',
+          details: errText
+        });
       }
 
-      // 2. PATCH file on Google Drive (updates properties and removes PENDING_ prefix; NEVER adds APPROVED_)
+      const fileMeta = await metaResp.json();
+      const currentParents: string[] = fileMeta.parents || [];
+      const fileProps = fileMeta.properties || {};
+
+      // 3. Resolve target event's Approved and Pending folders
+      const resolvedEventTitle = eventTitle || fileProps.eventTitle || fileProps.eventName || 'General Event';
+      const resolvedEventId = eventId || fileProps.eventId || '';
+
+      const foldersRes = await ensureEventDriveFolders(token, resolvedEventTitle, resolvedEventId);
+      if (!foldersRes.success || !foldersRes.approvedFolder?.id) {
+        return res.status(502).json({
+          error: 'Failed to resolve approved Google Drive event folder for move operation.',
+          details: foldersRes.error
+        });
+      }
+
+      const approvedFolderId = foldersRes.approvedFolder.id;
+      const pendingFolderId = foldersRes.pendingFolder?.id;
+
+      // 4. Move file from pending to approved folder using Google Drive API
+      // If approvedFolderId is not already the parent, update parents
+      let cleanFileName: string | undefined;
+      if (fileMeta.name && /^PENDING_/i.test(fileMeta.name)) {
+        cleanFileName = fileMeta.name.replace(/^PENDING_/i, '');
+      }
+
       const patchBody: Record<string, any> = {
         properties: {
           approvalStatus: 'approved',
-          decisionByAdminUid: adminUid || '',
-          decisionByAdminName: adminName || 'Administrator',
+          decisionByAdminUid: adminUid || authResult.email || '',
+          decisionByAdminName: adminName || authResult.name || 'Administrator',
           decisionAt: new Date().toISOString()
         }
       };
@@ -4366,35 +4510,74 @@ Recipient:        ${RECIPIENT_EMAIL}
         patchBody.name = cleanFileName;
       }
 
-      const patchResp = await fetch(`https://www.googleapis.com/drive/v3/files/${driveFileId}`, {
-        method: 'PATCH',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(patchBody)
-      });
+      const isAlreadyInApproved = currentParents.includes(approvedFolderId);
+      if (!isAlreadyInApproved) {
+        const removeParents = currentParents.filter((p) => p !== approvedFolderId).join(',');
+        let patchUrl = `https://www.googleapis.com/drive/v3/files/${driveFileId}?addParents=${encodeURIComponent(approvedFolderId)}&fields=id,name,parents,properties`;
+        if (removeParents) {
+          patchUrl += `&removeParents=${encodeURIComponent(removeParents)}`;
+        }
 
-      if (!patchResp.ok) {
-        const errText = await patchResp.text().catch(() => '');
-        console.warn('[Drive Approve] Drive file property update returned:', patchResp.status, errText);
+        console.log(`[Drive Approve] Moving file ${driveFileId} into approved folder ${approvedFolderId} (removing parents: ${removeParents})...`);
+        const patchResp = await fetch(patchUrl, {
+          method: 'PATCH',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(patchBody)
+        });
+
+        if (!patchResp.ok) {
+          const errText = await patchResp.text().catch(() => '');
+          console.error('[Drive Approve] Google Drive API move failed:', patchResp.status, errText);
+          return res.status(patchResp.status >= 500 ? patchResp.status : 502).json({
+            error: 'drive_move_failed',
+            message: 'Failed to move certificate file in Google Drive. Submission remains pending so you can safely retry.',
+            details: errText
+          });
+        }
+
+        const patchedData = await patchResp.json();
+        const updatedParents: string[] = patchedData.parents || [];
+
+        // 5. Verify that the approved event folder is now the parent
+        if (!updatedParents.includes(approvedFolderId)) {
+          console.error('[Drive Approve] Verification failed: approved folder is not in parents:', updatedParents);
+          return res.status(502).json({
+            error: 'drive_move_unverified',
+            message: 'Google Drive move completed without error but approved folder was not verified as parent.'
+          });
+        }
+        console.log(`[Drive Approve] Successfully verified file ${driveFileId} is in approved folder ${approvedFolderId}`);
+      } else {
+        // Just update properties if already in approved folder
+        await fetch(`https://www.googleapis.com/drive/v3/files/${driveFileId}`, {
+          method: 'PATCH',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(patchBody)
+        }).catch(() => {});
       }
 
-      // 3. Update Firestore database records across both 'Certificates' and 'certificates'
+      // 6. Only after the move is verified, update the authoritative Firestore record to 'approved'
+      const docId = certId || driveFileId;
+      const approvalUpdate = {
+        approvalStatus: 'approved',
+        status: 'approved',
+        driveFolderId: approvedFolderId,
+        decisionByAdminUid: adminUid || authResult.email || 'admin',
+        decisionByAdminName: adminName || authResult.name || 'Administrator',
+        decisionAt: new Date().toISOString(),
+        approvedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+
       try {
         const adminDb = getAdminFirestore();
         if (adminDb) {
-          const docId = certId || driveFileId;
-          const approvalUpdate = {
-            approvalStatus: 'approved',
-            status: 'approved',
-            decisionByAdminUid: adminUid || 'admin',
-            decisionByAdminName: adminName || 'Administrator',
-            decisionAt: new Date().toISOString(),
-            approvedAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString()
-          };
-
           const updates = [
             adminDb.collection('Certificates').doc(docId).set(approvalUpdate, { merge: true }),
             adminDb.collection('certificates').doc(docId).set(approvalUpdate, { merge: true })
@@ -4414,7 +4597,9 @@ Recipient:        ${RECIPIENT_EMAIL}
 
       return res.json({
         success: true,
-        message: 'Certificate successfully approved, PENDING_ prefix removed in Drive, and status updated.',
+        message: 'Certificate successfully approved, moved to approved event folder, and status updated.',
+        driveFileId,
+        approvedFolderId,
         renamedFileName: cleanFileName
       });
     } catch (err: any) {
@@ -4425,13 +4610,22 @@ Recipient:        ${RECIPIENT_EMAIL}
 
   /**
    * POST /api/drive/reject-certificate
-   * Privileged admin rejection endpoint:
-   * Permanently deletes unapproved file from Google Drive and updates database.
-   * If deletion fails, returns 502 with safe retry without losing record.
+   * Explicit State Committee administrator rejection endpoint:
+   * - Records rejected status, administrator identity, timestamp, and optional reason.
+   * - Keeps the file out of the approved event folder and approved member certificate list.
+   * - Preserves the existing rejection and retention policy (does not silently delete files unless deleteFile=true).
+   * - Scheduled synchronization cannot change a rejected certificate back to pending or approved automatically.
    */
   app.post('/api/drive/reject-certificate', async (req, res) => {
     try {
-      const { driveFileId, rejectionReason, adminUid, adminName, certId } = req.body;
+      const authResult = await verifyAdminAuthorization(req);
+      if (!authResult.authorized) {
+        return res.status(403).json({
+          error: authResult.error || 'Unauthorized: State Committee administrator access required.'
+        });
+      }
+
+      const { driveFileId, rejectionReason, adminUid, adminName, certId, deleteFile } = req.body;
       if (!driveFileId) {
         return res.status(400).json({ error: 'driveFileId is required' });
       }
@@ -4441,21 +4635,38 @@ Recipient:        ${RECIPIENT_EMAIL}
         return res.status(503).json({ error: 'Google Drive storage is disconnected.' });
       }
 
-      console.log(`[Drive Reject] Deleting unapproved file ${driveFileId} (Reason: ${rejectionReason || 'Rejected by Admin'})...`);
-      const deleteResp = await fetch(`https://www.googleapis.com/drive/v3/files/${driveFileId}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${token}` }
-      });
-
-      if (!deleteResp.ok && deleteResp.status !== 404) {
-        const errText = await deleteResp.text().catch(() => '');
-        console.warn('[Drive Reject] Drive deletion failed:', deleteResp.status, errText);
-        return res.status(deleteResp.status >= 500 ? deleteResp.status : 502).json({
-          success: false,
-          error: 'drive_deletion_failed',
-          details: errText,
-          message: 'Failed to delete file from Google Drive. Submission remains pending so you can safely retry.'
+      if (deleteFile) {
+        // If caller explicitly requested deletion with rejection
+        const deleteResp = await fetch(`https://www.googleapis.com/drive/v3/files/${driveFileId}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${token}` }
         });
+        if (!deleteResp.ok && deleteResp.status !== 404) {
+          const errText = await deleteResp.text().catch(() => '');
+          return res.status(502).json({
+            error: 'drive_deletion_failed',
+            message: 'Failed to delete file from Google Drive.',
+            details: errText
+          });
+        }
+      } else {
+        // Update file properties on Google Drive with rejection metadata
+        await fetch(`https://www.googleapis.com/drive/v3/files/${driveFileId}`, {
+          method: 'PATCH',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            properties: {
+              approvalStatus: 'rejected',
+              rejectionReason: rejectionReason || 'Certificate submission could not be verified by administrator',
+              decisionByAdminUid: adminUid || authResult.email || 'admin',
+              decisionByAdminName: adminName || authResult.name || 'Administrator',
+              decisionAt: new Date().toISOString()
+            }
+          })
+        }).catch(() => {});
       }
 
       // Record rejection status and reason in Firestore in both collections
@@ -4467,8 +4678,8 @@ Recipient:        ${RECIPIENT_EMAIL}
             approvalStatus: 'rejected',
             status: 'rejected',
             rejectionReason: rejectionReason || 'Certificate submission could not be verified by administrator',
-            decisionByAdminUid: adminUid || 'admin',
-            decisionByAdminName: adminName || 'Administrator',
+            decisionByAdminUid: adminUid || authResult.email || 'admin',
+            decisionByAdminName: adminName || authResult.name || 'Administrator',
             decisionAt: new Date().toISOString(),
             updatedAt: new Date().toISOString()
           };
@@ -4490,7 +4701,11 @@ Recipient:        ${RECIPIENT_EMAIL}
         console.warn('[Drive Reject] Notice updating rejection in Firestore:', dbErr?.message);
       }
 
-      return res.json({ success: true, message: 'Unapproved file deleted from Google Drive and rejection recorded.' });
+      return res.json({
+        success: true,
+        message: 'Certificate submission rejection recorded successfully.',
+        approvalStatus: 'rejected'
+      });
     } catch (err: any) {
       console.error('[Drive Reject] Error rejecting certificate:', err);
       return res.status(500).json({ error: err.message || 'Error rejecting certificate' });

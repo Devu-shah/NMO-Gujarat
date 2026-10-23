@@ -1302,36 +1302,147 @@ export const deleteDriveFile = async (fileId: string): Promise<boolean> => {
 };
 
 /**
+ * Ensures both approved and pending Google Drive folders exist for an event.
+ */
+export const ensureEventDriveFolders = async (
+  eventName: string,
+  eventId?: string,
+  existingFolderId?: string
+): Promise<{
+  approvedFolder: DriveFolderInfo;
+  pendingFolder: DriveFolderInfo;
+}> => {
+  const cleanName = eventName.replace(/['"]/g, '').trim();
+  if (!cleanName) {
+    throw new Error('Invalid event name for Google Drive folders.');
+  }
+
+  const endpoint = apiUrl('/api/drive/events/ensure-folders');
+  const adminRole = localStorage.getItem('nmo_user_role') || 'super_admin';
+  const adminEmail = auth?.currentUser?.email || localStorage.getItem('nmo_user_email') || '';
+  const adminName = auth?.currentUser?.displayName || localStorage.getItem('nmo_user_name') || '';
+
+  let idToken = '';
+  try {
+    if (auth?.currentUser) {
+      idToken = await auth.currentUser.getIdToken();
+    }
+  } catch {}
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'x-admin-role': adminRole
+  };
+  if (adminEmail) headers['x-admin-email'] = adminEmail;
+  if (adminName) headers['x-admin-name'] = adminName;
+  if (idToken) headers['Authorization'] = `Bearer ${idToken}`;
+
+  const serverResp = await fetch(endpoint, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      title: cleanName,
+      eventId: eventId || `EVT-${Date.now()}`,
+      existingFolderId,
+      adminRole,
+      adminEmail,
+      adminName
+    })
+  });
+
+  const data = await serverResp.json().catch(() => ({}));
+  if (serverResp.ok && data?.success && data?.approvedFolder && data?.pendingFolder) {
+    return {
+      approvedFolder: data.approvedFolder,
+      pendingFolder: data.pendingFolder
+    };
+  }
+  throw new Error(data?.error || data?.message || 'Failed to ensure event Google Drive folders.');
+};
+
+/**
+ * Reconciles Google Drive folders for all events in Firestore, creating missing approved and pending folders.
+ */
+export const reconcileAllEventDriveFolders = async (): Promise<{
+  success: boolean;
+  reconciledCount: number;
+  totalEvents: number;
+  message: string;
+}> => {
+  const adminRole = localStorage.getItem('nmo_user_role') || 'super_admin';
+  const adminEmail = auth?.currentUser?.email || localStorage.getItem('nmo_user_email') || '';
+  let idToken = '';
+  try {
+    if (auth?.currentUser) {
+      idToken = await auth.currentUser.getIdToken();
+    }
+  } catch {}
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'x-admin-role': adminRole
+  };
+  if (adminEmail) headers['x-admin-email'] = adminEmail;
+  if (idToken) headers['Authorization'] = `Bearer ${idToken}`;
+
+  const res = await fetch(apiUrl('/api/drive/events/reconcile-all-folders'), {
+    method: 'POST',
+    headers,
+    credentials: 'include'
+  });
+
+  const data = await res.json().catch(() => ({}));
+  if (res.ok && data?.success) {
+    return data;
+  }
+  throw new Error(data?.error || data?.message || 'Failed to reconcile event folders.');
+};
+
+/**
  * Admin approves a certificate submission:
- * Records approving admin details, approval timestamp, updates Drive properties, and marks approvalStatus as 'approved'.
+ * Moves file in Google Drive from pending folder to approved event folder,
+ * updates properties on Google Drive, and marks approvalStatus as 'approved' in Firestore.
  */
 export const approveCertificate = async (
   certId: string,
   adminInfo?: { uid?: string; name?: string },
-  driveFileId?: string
+  driveFileId?: string,
+  eventInfo?: { eventId?: string; eventTitle?: string }
 ): Promise<void> => {
   let backendSucceeded = false;
   if (driveFileId) {
+    let idToken = '';
     try {
-      const resp = await fetch(apiUrl('/api/drive/approve-certificate'), {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-admin-role': 'super_admin'
-        },
-        credentials: 'include',
-        body: JSON.stringify({
-          driveFileId,
-          certId,
-          adminUid: adminInfo?.uid || '',
-          adminName: adminInfo?.name || 'Administrator'
-        })
-      });
-      if (resp.ok) {
-        backendSucceeded = true;
+      if (auth?.currentUser) {
+        idToken = await auth.currentUser.getIdToken();
       }
-    } catch (e) {
-      console.warn('Backend drive approval update note:', e);
+    } catch {}
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'x-admin-role': localStorage.getItem('nmo_user_role') || 'super_admin'
+    };
+    if (idToken) headers['Authorization'] = `Bearer ${idToken}`;
+
+    const resp = await fetch(apiUrl('/api/drive/approve-certificate'), {
+      method: 'POST',
+      headers,
+      credentials: 'include',
+      body: JSON.stringify({
+        driveFileId,
+        certId,
+        eventId: eventInfo?.eventId,
+        eventTitle: eventInfo?.eventTitle,
+        adminUid: adminInfo?.uid || auth?.currentUser?.uid || '',
+        adminName: adminInfo?.name || auth?.currentUser?.displayName || 'Administrator'
+      })
+    });
+
+    if (resp.ok) {
+      backendSucceeded = true;
+    } else {
+      const errData = await resp.json().catch(() => ({}));
+      throw new Error(errData.message || errData.error || 'Failed to approve certificate on server');
     }
   }
 
@@ -1340,8 +1451,9 @@ export const approveCertificate = async (
       doc(db, 'Certificates', certId),
       {
         approvalStatus: 'approved',
-        decisionByAdminUid: adminInfo?.uid || 'admin',
-        decisionByAdminName: adminInfo?.name || 'Administrator',
+        status: 'approved',
+        decisionByAdminUid: adminInfo?.uid || auth?.currentUser?.uid || 'admin',
+        decisionByAdminName: adminInfo?.name || auth?.currentUser?.displayName || 'Administrator',
         decisionAt: new Date().toISOString(),
         approvedAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
@@ -1350,7 +1462,6 @@ export const approveCertificate = async (
     );
   } catch (err: any) {
     console.warn('Notice updating approved certificate in client Firestore:', err);
-    // If backend already approved via Admin SDK, do not throw client permission-denied error
     if (!backendSucceeded) {
       throw err;
     }
@@ -1359,35 +1470,46 @@ export const approveCertificate = async (
 
 /**
  * Admin rejects a certificate submission:
- * 1. Permanently removes the unapproved file from Google Drive via backend
- * 2. If deletion fails, throws error to prevent false success and allow retry
- * 3. Records the rejection decision, reason, and admin metadata in Firestore
+ * Records rejection decision, reason, and admin metadata in Drive properties and Firestore.
+ * Preserves the file in pending folder for audit retention (does not silently delete unless requested).
  */
 export const rejectAndDeleteCertificate = async (
   certId: string,
   driveFileId: string,
   rejectionReason?: string,
-  adminInfo?: { uid?: string; name?: string }
+  adminInfo?: { uid?: string; name?: string },
+  deleteFile = false
 ): Promise<void> => {
+  let idToken = '';
+  try {
+    if (auth?.currentUser) {
+      idToken = await auth.currentUser.getIdToken();
+    }
+  } catch {}
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'x-admin-role': localStorage.getItem('nmo_user_role') || 'super_admin'
+  };
+  if (idToken) headers['Authorization'] = `Bearer ${idToken}`;
+
   const resp = await fetch(apiUrl('/api/drive/reject-certificate'), {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-admin-role': 'super_admin'
-    },
+    headers,
     credentials: 'include',
     body: JSON.stringify({
       driveFileId: driveFileId || certId,
       certId,
       rejectionReason: rejectionReason || 'Certificate submission could not be verified by administrator',
-      adminUid: adminInfo?.uid || '',
-      adminName: adminInfo?.name || 'Administrator'
+      adminUid: adminInfo?.uid || auth?.currentUser?.uid || '',
+      adminName: adminInfo?.name || auth?.currentUser?.displayName || 'Administrator',
+      deleteFile
     })
   });
 
   if (!resp.ok && resp.status !== 404) {
     const errData = await resp.json().catch(() => ({}));
-    throw new Error(errData.message || errData.error || 'Failed to delete unapproved file from Google Drive');
+    throw new Error(errData.message || errData.error || 'Failed to record rejection on server');
   }
 
   try {
@@ -1395,9 +1517,10 @@ export const rejectAndDeleteCertificate = async (
       doc(db, 'Certificates', certId),
       {
         approvalStatus: 'rejected',
+        status: 'rejected',
         rejectionReason: rejectionReason || 'Certificate submission could not be verified by administrator',
-        decisionByAdminUid: adminInfo?.uid || 'admin',
-        decisionByAdminName: adminInfo?.name || 'Administrator',
+        decisionByAdminUid: adminInfo?.uid || auth?.currentUser?.uid || 'admin',
+        decisionByAdminName: adminInfo?.name || auth?.currentUser?.displayName || 'Administrator',
         decisionAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       },
