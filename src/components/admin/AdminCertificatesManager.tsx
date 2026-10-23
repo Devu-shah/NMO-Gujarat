@@ -32,6 +32,7 @@ import {
   fetchPendingCertificates,
   approveCertificate,
   rejectAndDeleteCertificate,
+  deleteDriveCertificate,
   isDriveConnected
 } from '../../lib/googleDrive';
 import { apiUrl } from '../../lib/api';
@@ -150,6 +151,18 @@ export const AdminCertificatesManager: React.FC = () => {
   const [processingPendingId, setProcessingPendingId] = useState<string | null>(null);
   const [rejectModalCert, setRejectModalCert] = useState<DriveCertificateFile | null>(null);
   const [rejectionReasonText, setRejectionReasonText] = useState<string>('');
+
+  // Delete Certificate Confirmation Modal State
+  const [deleteModalCert, setDeleteModalCert] = useState<{
+    driveFileId: string;
+    certId?: string;
+    name: string;
+    membershipNumber?: string;
+    eventTitle?: string;
+    eventId?: string;
+    uploadSource?: 'admin' | 'user';
+  } | null>(null);
+  const [isDeletingCert, setIsDeletingCert] = useState<boolean>(false);
 
   // ---------------------------------------------------------------------------
   // TAB 3: Google Drive Explorer State
@@ -907,6 +920,74 @@ export const AdminCertificatesManager: React.FC = () => {
     }
   };
 
+  // ---------------------------------------------------------------------------
+  // DELETE CERTIFICATE (ADMIN WORKFLOW)
+  // ---------------------------------------------------------------------------
+  const handleOpenDeleteModal = (cert: {
+    driveFileId: string;
+    certId?: string;
+    name: string;
+    membershipNumber?: string;
+    eventTitle?: string;
+    eventId?: string;
+    uploadSource?: 'admin' | 'user';
+  }) => {
+    // Role permission check
+    const userRole = currentUser?.role || 'member';
+    const isSuperOrState = userRole === 'super_admin' || userRole === 'state_admin';
+    const evt = events.find((e) => e.eventId === (cert.eventId || selectedEvent?.eventId));
+
+    if (!isSuperOrState) {
+      if (userRole === 'city_admin' && evt?.city !== currentUser?.city) {
+        alert(`Access Denied: As City Admin of ${currentUser?.city}, you cannot delete certificates for events in ${evt?.city || 'other cities'}.`);
+        return;
+      }
+      if (userRole === 'prant_admin' && evt?.prant !== currentUser?.prant && currentUser?.prant !== 'All') {
+        alert(`Access Denied: As Prant Admin of ${currentUser?.prant}, you cannot delete certificates for events in ${evt?.prant || 'other prants'}.`);
+        return;
+      }
+    }
+
+    setDeleteModalCert(cert);
+  };
+
+  const handleConfirmDeleteCertificate = async () => {
+    if (!deleteModalCert) return;
+
+    setIsDeletingCert(true);
+    try {
+      const res = await deleteDriveCertificate(deleteModalCert.driveFileId, deleteModalCert.certId, {
+        membershipNumber: deleteModalCert.membershipNumber,
+        eventId: deleteModalCert.eventId || selectedEvent?.eventId,
+        uploadSource: deleteModalCert.uploadSource,
+        adminInfo: { uid: currentUser?.uid, name: currentUser?.name || 'Administrator' }
+      });
+
+      setFeedback({
+        message: res.message || `Certificate "${deleteModalCert.name}" was permanently deleted from Google Drive and all database records removed.`,
+        type: 'success'
+      });
+
+      setDeleteModalCert(null);
+
+      // Refresh active views
+      if (eventFolderInfo.folder) {
+        await loadEventFolderFiles(eventFolderInfo.folder.id);
+      }
+      await loadPendingCertificates();
+      if (activeSubTab === 'drive_explorer') {
+        await handleScanFolder();
+      }
+    } catch (err: any) {
+      setFeedback({
+        message: err.message || 'Failed to delete certificate.',
+        type: 'error'
+      });
+    } finally {
+      setIsDeletingCert(false);
+    }
+  };
+
   const handleDownload = async (file: DriveCertificateFile) => {
     setDownloadingId(file.id);
     try {
@@ -1551,6 +1632,23 @@ export const AdminCertificatesManager: React.FC = () => {
                                   >
                                     <Download className="w-4 h-4" />
                                   </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenDeleteModal({
+                                      driveFileId: row.primaryFile!.id,
+                                      certId: `${selectedEvent?.eventId}_${row.membershipNumber}`,
+                                      name: row.primaryFile!.name,
+                                      membershipNumber: row.membershipNumber,
+                                      eventTitle: selectedEvent?.title,
+                                      eventId: selectedEvent?.eventId,
+                                      uploadSource: (row.primaryFile!.uploadSource as any) || (row.statusType === 'pending' || row.statusType === 'user_approved' ? 'user' : 'admin')
+                                    })}
+                                    className="px-2 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg text-xs font-semibold transition-colors cursor-pointer flex items-center gap-1"
+                                    title="Delete Certificate from Google Drive and all records"
+                                  >
+                                    <Trash2 className="w-3 h-3 text-rose-600" />
+                                    <span>Delete</span>
+                                  </button>
                                 </>
                               )}
 
@@ -1865,8 +1963,26 @@ export const AdminCertificatesManager: React.FC = () => {
                                 type="button"
                                 onClick={() => handleDownload(f)}
                                 className="p-1.5 text-slate-600 hover:text-slate-900 rounded-lg hover:bg-slate-100"
+                                title="Download Certificate"
                               >
                                 <Download className="w-4 h-4" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleOpenDeleteModal({
+                                  driveFileId: f.id,
+                                  certId: f.id,
+                                  name: f.name,
+                                  membershipNumber: f.membershipNumber,
+                                  eventTitle: f.eventTitle,
+                                  eventId: f.eventId,
+                                  uploadSource: f.uploadSource as any
+                                })}
+                                className="px-2 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg text-xs font-semibold transition-colors cursor-pointer flex items-center gap-1"
+                                title="Delete Certificate from Google Drive and all records"
+                              >
+                                <Trash2 className="w-3 h-3 text-rose-600" />
+                                <span>Delete Certificate</span>
                               </button>
                             </div>
                           </td>
@@ -2107,6 +2223,104 @@ export const AdminCertificatesManager: React.FC = () => {
               >
                 <Trash2 className="w-3.5 h-3.5" />
                 <span>Confirm Rejection & Delete</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ----------------------------------------------------------------------- */}
+      {/* DELETE CERTIFICATE CONFIRMATION MODAL */}
+      {/* ----------------------------------------------------------------------- */}
+      {deleteModalCert && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl border border-slate-200">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100 mb-4">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-rose-100 text-rose-700 flex items-center justify-center font-bold">
+                  <Trash2 className="w-4 h-4" />
+                </div>
+                <h3 className="font-bold text-slate-900 text-base">Delete Certificate</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDeleteModalCert(null)}
+                className="text-slate-400 hover:text-slate-700 p-1 cursor-pointer"
+                disabled={isDeletingCert}
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3 mb-4 text-xs">
+              <p className="text-slate-600 leading-relaxed">
+                Are you sure you want to permanently delete this certificate? This action cannot be undone.
+              </p>
+
+              {/* Certificate Summary Card */}
+              <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1.5 font-mono text-[11px]">
+                <div className="flex justify-between">
+                  <span className="text-slate-500 font-sans font-semibold">File Name:</span>
+                  <span className="font-bold text-slate-900 truncate max-w-[200px]" title={deleteModalCert.name}>{deleteModalCert.name}</span>
+                </div>
+                {deleteModalCert.membershipNumber && (
+                  <div className="flex justify-between">
+                    <span className="text-slate-500 font-sans font-semibold">Membership ID:</span>
+                    <span className="font-bold text-red-700">{deleteModalCert.membershipNumber}</span>
+                  </div>
+                )}
+                {deleteModalCert.eventTitle && (
+                  <div className="flex justify-between">
+                    <span className="text-slate-500 font-sans font-semibold">Event:</span>
+                    <span className="text-slate-800 truncate max-w-[200px]">{deleteModalCert.eventTitle}</span>
+                  </div>
+                )}
+                <div className="flex justify-between">
+                  <span className="text-slate-500 font-sans font-semibold">Upload Origin:</span>
+                  <span className="font-bold text-slate-800">
+                    {deleteModalCert.uploadSource === 'user' ? 'Member Submission' : 'Official Admin Upload'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Ownership-specific details */}
+              {deleteModalCert.uploadSource === 'user' ? (
+                <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-900 text-[11px] leading-relaxed">
+                  <strong>Member-Uploaded Certificate:</strong> Deleting will remove this file from Google Drive and delete its records from both the member portal and administrator desk. It will be tombstoned so future Drive syncs will not restore it.
+                </div>
+              ) : (
+                <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-900 text-[11px] leading-relaxed">
+                  <strong>Admin-Uploaded Certificate:</strong> Deleting will remove this file from Google Drive and remove it from the admin certificate desk without altering unrelated member records.
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setDeleteModalCert(null)}
+                disabled={isDeletingCert}
+                className="px-4 py-2 border border-slate-200 rounded-xl text-slate-700 text-xs font-semibold cursor-pointer hover:bg-slate-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDeleteCertificate}
+                disabled={isDeletingCert}
+                className="px-4 py-2 bg-rose-700 hover:bg-rose-800 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs cursor-pointer disabled:opacity-50"
+              >
+                {isDeletingCert ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Deleting from Drive...</span>
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Delete Certificate</span>
+                  </>
+                )}
               </button>
             </div>
           </div>

@@ -1137,10 +1137,29 @@ export const uploadCertificateToDrive = async (
  * Also stores "driveFileId", "membershipId", "memberUid", "uploadedAt", and "status".
  */
 export const syncCertificateToFirestore = async (cert: DriveCertificateFile): Promise<void> => {
+  // 1. Try server-side sync endpoint first (utilizes Admin SDK and preserves pending status on reconciliation)
+  try {
+    const serverRes = await fetch(apiUrl('/api/drive/sync-certificate'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(cert)
+    });
+    if (serverRes.ok) {
+      return;
+    }
+  } catch (serverErr) {
+    console.debug('Backend sync certificate notice:', serverErr);
+  }
+
+  // 2. Client-side fallback if server endpoint is unreachable
   try {
     const docId = cert.eventId && cert.membershipNumber
       ? `${cert.eventId}_${cert.membershipNumber}`
       : cert.id;
+
+    const isUser = cert.uploadSource === 'user' || (cert.name && cert.name.startsWith('PENDING_'));
+    const finalStatus = cert.approvalStatus || (isUser ? 'pending' : 'not_required');
 
     const dataToSave = {
       // 4 mandatory fields
@@ -1154,7 +1173,7 @@ export const syncCertificateToFirestore = async (cert: DriveCertificateFile): Pr
       membershipId: cert.membershipNumber || (cert as any).membershipId || '',
       memberUid: cert.uploaderUid || (cert as any).memberUid || '',
       uploadedAt: cert.createdTime || new Date().toISOString(),
-      status: cert.approvalStatus || (cert as any).status || 'not_required',
+      status: finalStatus,
 
       // Backward compatibility fields
       certId: docId,
@@ -1163,8 +1182,8 @@ export const syncCertificateToFirestore = async (cert: DriveCertificateFile): Pr
       membershipNumber: cert.membershipNumber || (cert as any).membershipId || '',
       memberName: cert.memberName || cert.membershipName || '',
       uploaderUid: cert.uploaderUid || (cert as any).memberUid || '',
-      uploadSource: cert.uploadSource || (cert.uploadedBy === 'member' ? 'user' : 'admin'),
-      approvalStatus: cert.approvalStatus || (cert as any).status || 'not_required',
+      uploadSource: cert.uploadSource || (isUser ? 'user' : 'admin'),
+      approvalStatus: finalStatus,
       driveFolderId: cert.driveFolderId || '',
       originalFileName: cert.name,
       mimeType: cert.mimeType || 'application/pdf',
@@ -1191,7 +1210,7 @@ export const syncCertificateToFirestore = async (cert: DriveCertificateFile): Pr
 
     await Promise.all(promises);
   } catch (err) {
-    console.warn('Notice saving certificate to Firestore:', err);
+    console.debug('Notice saving certificate to Firestore fallback:', err);
   }
 };
 
@@ -1552,6 +1571,7 @@ export const fetchCertificatesByMembershipNumber = async (
             );
           })
           .map((f: any) => {
+            const isUserSub = f.properties?.uploadSource === 'user' || f.properties?.uploadedBy === 'member' || (typeof f.name === 'string' && f.name.startsWith('PENDING_'));
             const cert: DriveCertificateFile = {
               id: f.id,
               name: f.name,
@@ -1567,8 +1587,9 @@ export const fetchCertificatesByMembershipNumber = async (
               eventId: f.properties?.eventId,
               eventTitle: f.properties?.eventTitle,
               driveFolderId: f.parents?.[0] || NMO_ROOT_DRIVE_FOLDER_ID,
-              approvalStatus: f.properties?.approvalStatus || 'approved',
-              uploadedBy: f.properties?.uploadedBy || 'admin'
+              approvalStatus: f.properties?.approvalStatus || (isUserSub ? 'pending' : 'not_required'),
+              uploadedBy: f.properties?.uploadedBy || (isUserSub ? 'member' : 'admin'),
+              uploadSource: f.properties?.uploadSource || (isUserSub ? 'user' : 'admin')
             };
             // Async sync to Firestore
             syncCertificateToFirestore(cert).catch(() => {});
@@ -1651,6 +1672,7 @@ export const listCertificatesInFolder = async (
               extractedMemNo = String(f.properties.membershipNumber).trim().toUpperCase();
             }
 
+            const isUser = f.properties?.uploadSource === 'user' || f.properties?.uploadedBy === 'member' || (typeof f.name === 'string' && f.name.startsWith('PENDING_'));
             const cert: DriveCertificateFile = {
               id: f.id,
               name: f.name,
@@ -1666,7 +1688,9 @@ export const listCertificatesInFolder = async (
               eventId: f.properties?.eventId,
               eventTitle: f.properties?.eventTitle,
               driveFolderId: parentId,
-              driveFolderName: subfolderMap.get(parentId)
+              driveFolderName: subfolderMap.get(parentId),
+              uploadSource: f.properties?.uploadSource || (isUser ? 'user' : 'admin'),
+              approvalStatus: f.properties?.approvalStatus || (isUser ? 'pending' : 'not_required')
             };
 
             // Sync to Firestore cache
@@ -1752,4 +1776,60 @@ export const deleteCertificateFromFirestore = async (certId: string): Promise<vo
   } catch (err) {
     console.warn('Error deleting certificate from Firestore:', err);
   }
+};
+
+/**
+ * Permanently deletes a certificate from Google Drive and removes database records.
+ * - Authenticated administrator access required.
+ * - Member-uploaded: deleted from Drive, removed from member & admin listings, and tombstoned against re-sync.
+ * - Admin-uploaded: deleted from Drive, removed from admin listing without affecting unrelated member records.
+ * - Uses reliable metadata (uploadSource, uploaderUid) to determine ownership.
+ */
+export const deleteDriveCertificate = async (
+  driveFileId: string,
+  certId?: string,
+  metadata?: {
+    membershipNumber?: string;
+    eventId?: string;
+    uploadSource?: 'admin' | 'user';
+    adminInfo?: { uid?: string; name?: string };
+  }
+): Promise<{ success: boolean; message?: string }> => {
+  const resp = await fetch(apiUrl('/api/drive/delete-certificate'), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-admin-role': 'super_admin'
+    },
+    credentials: 'include',
+    body: JSON.stringify({
+      driveFileId,
+      certId: certId || driveFileId,
+      membershipNumber: metadata?.membershipNumber,
+      eventId: metadata?.eventId,
+      uploadSource: metadata?.uploadSource,
+      adminUid: metadata?.adminInfo?.uid || '',
+      adminName: metadata?.adminInfo?.name || 'Administrator'
+    })
+  });
+
+  const resJson = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    throw new Error(resJson.message || resJson.error || 'Failed to delete certificate');
+  }
+
+  // Also remove from client-side Firestore cache if present without failing the action
+  try {
+    const idToDelete = certId || driveFileId;
+    await Promise.all([
+      deleteDoc(doc(db, 'Certificates', idToDelete)).catch(() => {}),
+      deleteDoc(doc(db, 'certificates', idToDelete)).catch(() => {}),
+      deleteDoc(doc(db, 'Certificates', driveFileId)).catch(() => {}),
+      deleteDoc(doc(db, 'certificates', driveFileId)).catch(() => {})
+    ]);
+  } catch (err) {
+    console.debug('Client Firestore cache deletion notice:', err);
+  }
+
+  return { success: true, message: resJson.message };
 };

@@ -238,6 +238,9 @@ service cloud.firestore {
       allow read: if true;
       allow create, update, delete: if isStateAdmin() || isAuthenticated();
     }
+    match /CertificateTombstones/{tombstoneId} {
+      allow read, write: if isStateAdmin() || isAuthenticated();
+    }
 
     // =========================================================================
     // 10. AUDIT LOGS & IMPORT HISTORY

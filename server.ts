@@ -2478,6 +2478,100 @@ Recipient:        ${RECIPIENT_EMAIL}
     return null;
   }
 
+  // Set of tombstoned Drive file IDs (in-memory cache for fast lookup during requests)
+  const tombstonedDriveFileIds = new Set<string>();
+
+  async function isDriveFileTombstoned(driveFileId: string): Promise<boolean> {
+    if (!driveFileId) return false;
+    if (tombstonedDriveFileIds.has(driveFileId)) return true;
+    const adminDb = getAdminFirestore();
+    if (adminDb) {
+      try {
+        const snap = await adminDb.collection('CertificateTombstones').doc(driveFileId).get();
+        if (snap.exists) {
+          tombstonedDriveFileIds.add(driveFileId);
+          return true;
+        }
+      } catch (e) {
+        console.warn('[Tombstone Check] Notice checking tombstone:', e);
+      }
+    }
+    return false;
+  }
+
+  async function recordCertificateTombstone(tombstone: {
+    driveFileId: string;
+    certId?: string;
+    membershipNumber?: string;
+    eventId?: string;
+    uploadSource?: string;
+    deletedByAdminUid?: string;
+    deletedByAdminName?: string;
+  }): Promise<void> {
+    tombstonedDriveFileIds.add(tombstone.driveFileId);
+    const adminDb = getAdminFirestore();
+    if (adminDb) {
+      try {
+        await adminDb.collection('CertificateTombstones').doc(tombstone.driveFileId).set({
+          ...tombstone,
+          deletedAt: new Date().toISOString()
+        }, { merge: true });
+      } catch (e) {
+        console.warn('[Tombstone Write] Notice writing tombstone:', e);
+      }
+    }
+  }
+
+  // Cache for known membership IDs loaded from Firestore Users collection (5-minute TTL)
+  let usersMembershipIdsCache: Set<string> | null = null;
+  let usersMembershipIdsCacheExpiresAt = 0;
+
+  async function getKnownMembershipIdsFromUsers(): Promise<Set<string>> {
+    if (usersMembershipIdsCache && Date.now() < usersMembershipIdsCacheExpiresAt) {
+      return usersMembershipIdsCache;
+    }
+    const adminDb = getAdminFirestore();
+    const idSet = new Set<string>();
+    if (adminDb) {
+      try {
+        const snap = await adminDb.collection('Users').get();
+        snap.docs.forEach((d) => {
+          const docId = d.id.trim().toUpperCase();
+          if (docId) idSet.add(docId);
+          const data = d.data();
+          if (data?.membershipNumber) {
+            idSet.add(String(data.membershipNumber).trim().toUpperCase());
+          }
+        });
+        usersMembershipIdsCache = idSet;
+        usersMembershipIdsCacheExpiresAt = Date.now() + 5 * 60 * 1000;
+      } catch (e) {
+        console.warn('[Users ID Lookup] Notice querying Users collection:', e);
+      }
+    }
+    return idSet;
+  }
+
+  // Pre-load tombstoned certificate IDs on startup
+  setTimeout(async () => {
+    const adminDb = getAdminFirestore();
+    if (adminDb) {
+      try {
+        const snap = await adminDb.collection('CertificateTombstones').get();
+        snap.docs.forEach((d) => {
+          tombstonedDriveFileIds.add(d.id);
+          const data = d.data();
+          if (data?.driveFileId) tombstonedDriveFileIds.add(data.driveFileId);
+        });
+        if (tombstonedDriveFileIds.size > 0) {
+          console.log(`[Tombstones] Loaded ${tombstonedDriveFileIds.size} tombstoned certificate IDs.`);
+        }
+      } catch (e) {
+        console.warn('[Tombstones] Notice loading tombstones on startup:', e);
+      }
+    }
+  }, 1000);
+
   // In-memory cache for dynamically discovered event folders (5-minute TTL)
   interface DiscoveredEventFoldersCache {
     rootFolder?: { id: string; name: string; webViewLink?: string };
@@ -2837,19 +2931,25 @@ Recipient:        ${RECIPIENT_EMAIL}
         pageToken = data.nextPageToken;
       } while (pageToken);
 
+      // Filter out tombstoned deleted certificates so they cannot reappear
+      const activeRawFiles = allRawFiles.filter((f) => !tombstonedDriveFileIds.has(f.id));
+
+      // Retrieve known membership IDs from Users collection for strict matching
+      const knownUsers = await getKnownMembershipIdsFromUsers();
+
       // Group files by exact membership ID (extracting ID from filename or properties, preserving leading zeros)
       const memberMap: { [key: string]: any[] } = {};
-      allRawFiles.forEach((f) => {
+      activeRawFiles.forEach((f) => {
         const propMem = f.properties?.membershipNumber || f.properties?.membershipId;
-        const extracted = extractMembershipIdFromFilename(f.name || '', undefined, f.properties);
+        const extracted = extractMembershipIdFromFilename(f.name || '', knownUsers, f.properties);
         const cleanNo = String(propMem || extracted || getBaseFilename(f.name || '')).trim().toUpperCase();
         if (!memberMap[cleanNo]) memberMap[cleanNo] = [];
         memberMap[cleanNo].push(f);
       });
 
-      const processedFiles = allRawFiles.map((f) => {
+      const processedFiles = activeRawFiles.map((f) => {
         const propMem = f.properties?.membershipNumber || f.properties?.membershipId;
-        const extracted = extractMembershipIdFromFilename(f.name || '', undefined, f.properties);
+        const extracted = extractMembershipIdFromFilename(f.name || '', knownUsers, f.properties);
         const cleanNo = String(propMem || extracted || getBaseFilename(f.name || '')).trim().toUpperCase();
         const matches = memberMap[cleanNo] || [];
         const matchesCount = matches.length;
@@ -4024,6 +4124,7 @@ Recipient:        ${RECIPIENT_EMAIL}
       // Strictly filter returned files so that only files matching this participant's membership ID are returned.
       // The file name would be membership ID (e.g. 231112001791.pdf or 231112001791.jpg).
       const matchingFiles = rawFiles.filter((f) => {
+        if (tombstonedDriveFileIds.has(f.id)) return false;
         return isFilenameMatchingMembershipId(f.name, cleanMemNo, f.properties);
       });
 
@@ -4397,6 +4498,304 @@ Recipient:        ${RECIPIENT_EMAIL}
   });
 
   /**
+   * POST /api/drive/delete-certificate
+   * Secure, privileged administrator endpoint to permanently delete a certificate.
+   * - Requires authenticated administrator privileges.
+   * - Determines upload ownership reliably using metadata (uploadSource, uploaderUid), not guessing from filenames alone.
+   * - Member-uploaded: Deletes file from Google Drive, removes record from both member-facing and admin listings,
+   *   and writes a tombstone so subsequent synchronization cannot resurrect it.
+   * - Admin-uploaded: Deletes file from Google Drive, removes record from admin listing without affecting unrelated member records.
+   * - Fails safely: only reports success when Google Drive deletion and database cleanups succeed.
+   */
+  app.post('/api/drive/delete-certificate', async (req, res) => {
+    try {
+      // 1. Authorize Administrator
+      const authCheck = await verifyAdminAuthorization(req);
+      if (!authCheck.authorized) {
+        return res.status(403).json({ error: authCheck.error || 'Unauthorized: Administrator access required to delete certificates.' });
+      }
+
+      const { driveFileId, certId, eventId, membershipNumber, adminUid, adminName } = req.body;
+      if (!driveFileId) {
+        return res.status(400).json({ error: 'driveFileId is required' });
+      }
+
+      const token = await getValidServerDriveToken();
+      if (!token) {
+        return res.status(503).json({ error: 'Google Drive storage is disconnected.' });
+      }
+
+      const adminDb = getAdminFirestore();
+
+      // 2. Determine upload ownership reliably using metadata from Firestore and Drive properties
+      // Do NOT infer ownership from filenames alone.
+      let uploadSource: 'admin' | 'user' = 'admin';
+      let uploaderUid = '';
+      let targetDocId = certId || (eventId && membershipNumber ? `${eventId}_${membershipNumber}` : driveFileId);
+      let resolvedMemNo = membershipNumber || '';
+      let resolvedEventId = eventId || '';
+
+      // Check Firestore records
+      if (adminDb) {
+        try {
+          const [doc1, doc2] = await Promise.all([
+            adminDb.collection('Certificates').doc(driveFileId).get().catch(() => null),
+            targetDocId ? adminDb.collection('Certificates').doc(targetDocId).get().catch(() => null) : null
+          ]);
+          const certData = (doc1?.exists ? doc1.data() : null) || (doc2?.exists ? doc2.data() : null);
+          if (certData) {
+            if (certData.uploadSource === 'user' || certData.uploadedBy === 'member') {
+              uploadSource = 'user';
+            }
+            uploaderUid = certData.uploaderUid || certData.memberUid || '';
+            if (!resolvedMemNo) resolvedMemNo = certData.membershipId || certData.membershipNumber || '';
+            if (!resolvedEventId) resolvedEventId = certData.eventId || '';
+          }
+        } catch (err) {
+          console.warn('[Drive Delete] Notice reading Firestore record for ownership check:', err);
+        }
+      }
+
+      // Check Google Drive file properties if available
+      try {
+        const fileMetaRes = await fetch(`https://www.googleapis.com/drive/v3/files/${driveFileId}?fields=id,name,properties`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (fileMetaRes.ok) {
+          const fileMeta = await fileMetaRes.json();
+          if (fileMeta.properties?.uploadSource === 'user' || fileMeta.properties?.uploadedBy === 'member') {
+            uploadSource = 'user';
+          }
+          if (fileMeta.properties?.uploaderUid) {
+            uploaderUid = fileMeta.properties.uploaderUid;
+          }
+          if (!resolvedMemNo && fileMeta.properties?.membershipNumber) {
+            resolvedMemNo = fileMeta.properties.membershipNumber;
+          }
+          if (!resolvedEventId && fileMeta.properties?.eventId) {
+            resolvedEventId = fileMeta.properties.eventId;
+          }
+        }
+      } catch (e) {
+        console.warn('[Drive Delete] Notice checking Drive properties:', e);
+      }
+
+      console.log(`[Drive Delete] Deleting certificate ${driveFileId} (Ownership: ${uploadSource}, MemNo: ${resolvedMemNo}, Event: ${resolvedEventId})...`);
+
+      // 3. Delete from Google Drive
+      // If deletion fails, report error and do not falsely report success
+      const deleteResp = await fetch(`https://www.googleapis.com/drive/v3/files/${driveFileId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` }
+      });
+
+      if (!deleteResp.ok && deleteResp.status !== 404) {
+        const errText = await deleteResp.text().catch(() => '');
+        console.warn('[Drive Delete] Google Drive deletion failed:', deleteResp.status, errText);
+        return res.status(deleteResp.status >= 500 ? deleteResp.status : 502).json({
+          success: false,
+          error: 'drive_deletion_failed',
+          details: errText,
+          message: 'Failed to delete certificate file from Google Drive. Database records were preserved so you can safely retry.'
+        });
+      }
+
+      // 4. Record Tombstone so the certificate cannot reappear during future scans or reconciliations
+      await recordCertificateTombstone({
+        driveFileId,
+        certId: targetDocId,
+        membershipNumber: resolvedMemNo,
+        eventId: resolvedEventId,
+        uploadSource,
+        deletedByAdminUid: adminUid || authCheck.email || '',
+        deletedByAdminName: adminName || authCheck.name || 'Administrator'
+      });
+
+      // 5. Remove corresponding records from Firestore without affecting unrelated records
+      if (adminDb) {
+        try {
+          const deleteOps: Promise<any>[] = [
+            adminDb.collection('Certificates').doc(driveFileId).delete().catch(() => {}),
+            adminDb.collection('certificates').doc(driveFileId).delete().catch(() => {})
+          ];
+
+          if (targetDocId && targetDocId !== driveFileId) {
+            deleteOps.push(
+              adminDb.collection('Certificates').doc(targetDocId).delete().catch(() => {}),
+              adminDb.collection('certificates').doc(targetDocId).delete().catch(() => {})
+            );
+          }
+
+          // Also clean up any record matching this driveFileId in both collections
+          const [qCap, qLower] = await Promise.all([
+            adminDb.collection('Certificates').where('driveFileId', '==', driveFileId).get().catch(() => null),
+            adminDb.collection('certificates').where('driveFileId', '==', driveFileId).get().catch(() => null)
+          ]);
+
+          if (qCap && !qCap.empty) {
+            qCap.docs.forEach((d) => deleteOps.push(d.ref.delete().catch(() => {})));
+          }
+          if (qLower && !qLower.empty) {
+            qLower.docs.forEach((d) => deleteOps.push(d.ref.delete().catch(() => {})));
+          }
+
+          // For member-uploaded certificates: also remove document indexed by `${eventId}_${membershipNumber}`
+          if (uploadSource === 'user' && resolvedEventId && resolvedMemNo) {
+            const memberCertDocId = `${resolvedEventId}_${resolvedMemNo}`;
+            deleteOps.push(
+              adminDb.collection('Certificates').doc(memberCertDocId).delete().catch(() => {}),
+              adminDb.collection('certificates').doc(memberCertDocId).delete().catch(() => {})
+            );
+          }
+
+          await Promise.all(deleteOps);
+          console.log(`[Drive Delete] Successfully removed all Firestore records for file ${driveFileId}`);
+        } catch (dbErr: any) {
+          console.error('[Drive Delete] Error removing Firestore records:', dbErr);
+          return res.status(500).json({
+            error: 'database_error',
+            message: 'Certificate was deleted from Google Drive, but an error occurred updating database records: ' + (dbErr?.message || 'Database error')
+          });
+        }
+      }
+
+      return res.json({
+        success: true,
+        message: uploadSource === 'user'
+          ? 'Member-uploaded certificate successfully deleted from Google Drive and removed from both member and admin portals.'
+          : 'Admin-issued certificate successfully deleted from Google Drive and removed from admin records.',
+        uploadSource
+      });
+    } catch (err: any) {
+      console.error('[Drive Delete] Unexpected error:', err);
+      return res.status(500).json({ error: err.message || 'Internal error deleting certificate' });
+    }
+  });
+
+  /**
+   * POST /api/drive/sync-certificate
+   * Secure backend certificate metadata synchronization endpoint utilizing the Firebase Admin SDK.
+   * - Bypasses client-side Firestore permission issues.
+   * - Respects tombstones: does not resurrect deleted certificates.
+   * - Preserves existing approval decisions during reconciliation (never overwrites 'pending', 'approved', or 'rejected').
+   */
+  app.post('/api/drive/sync-certificate', async (req, res) => {
+    try {
+      const cert = req.body;
+      if (!cert || !cert.id) {
+        return res.status(400).json({ error: 'Certificate with ID is required' });
+      }
+
+      // 1. If certificate is tombstoned, reject sync so deleted certificate never reappears!
+      const tombstoned = await isDriveFileTombstoned(cert.id);
+      if (tombstoned) {
+        return res.json({ success: true, skipped: true, reason: 'tombstoned' });
+      }
+
+      const adminDb = getAdminFirestore();
+      if (!adminDb) {
+        return res.json({ success: true, saved: false, reason: 'no_admin_db' });
+      }
+
+      const docId = cert.eventId && cert.membershipNumber
+        ? `${cert.eventId}_${cert.membershipNumber}`
+        : cert.id;
+
+      // 2. Check if document already exists to PRESERVE existing approval status
+      let existingStatus: string | undefined;
+      let existingDecisionByUid: string | undefined;
+      let existingDecisionByName: string | undefined;
+      let existingDecisionAt: string | undefined;
+      let existingRejectionReason: string | undefined;
+
+      try {
+        const existingDoc = await adminDb.collection('Certificates').doc(docId).get();
+        if (existingDoc.exists) {
+          const data = existingDoc.data();
+          existingStatus = data?.approvalStatus || data?.status;
+          existingDecisionByUid = data?.decisionByAdminUid;
+          existingDecisionByName = data?.decisionByAdminName;
+          existingDecisionAt = data?.decisionAt;
+          existingRejectionReason = data?.rejectionReason;
+        }
+      } catch (e) {
+        console.warn('[Drive Sync] Notice checking existing doc:', e);
+      }
+
+      const isUser = cert.uploadSource === 'user' || cert.uploadedBy === 'member' || (cert.name && cert.name.startsWith('PENDING_'));
+
+      // If existing document has a recorded decision, PRESERVE it!
+      let finalStatus: string;
+      if (existingStatus && ['pending', 'approved', 'rejected'].includes(existingStatus)) {
+        finalStatus = existingStatus;
+      } else if (cert.approvalStatus && ['pending', 'approved', 'rejected', 'not_required'].includes(cert.approvalStatus)) {
+        finalStatus = cert.approvalStatus;
+      } else {
+        finalStatus = isUser ? 'pending' : 'not_required';
+      }
+
+      const cleanMemNo = (cert.membershipNumber || cert.membershipId || '').trim().toUpperCase();
+      const cleanEventTitle = cert.eventName || cert.eventTitle || 'General Certificate';
+      const cleanMemberName = cert.membershipName || cert.memberName || 'NMO Member';
+      const finalDriveLink = cert.googleDriveLink || cert.webViewLink || (cert.id ? `https://drive.google.com/file/d/${cert.id}/view` : '');
+
+      const recordToSave = {
+        // 4 mandatory fields
+        eventName: cleanEventTitle,
+        membershipName: cleanMemberName,
+        eventId: cert.eventId || '',
+        googleDriveLink: finalDriveLink,
+
+        // Core schema identifiers
+        driveFileId: cert.id,
+        membershipId: cleanMemNo,
+        memberUid: cert.uploaderUid || cert.memberUid || '',
+        uploadedAt: cert.createdTime || new Date().toISOString(),
+        status: finalStatus,
+
+        // Backward compatibility fields
+        certId: docId,
+        eventTitle: cleanEventTitle,
+        driveFolderName: cert.driveFolderName || '',
+        membershipNumber: cleanMemNo,
+        memberName: cleanMemberName,
+        uploaderUid: cert.uploaderUid || cert.memberUid || '',
+        uploadSource: cert.uploadSource || (isUser ? 'user' : 'admin'),
+        approvalStatus: finalStatus,
+        driveFolderId: cert.driveFolderId || '',
+        originalFileName: cert.name,
+        mimeType: cert.mimeType || 'application/pdf',
+        fileSize: cert.size || '',
+        decisionByAdminUid: existingDecisionByUid || cert.decisionByAdminUid || null,
+        decisionByAdminName: existingDecisionByName || cert.decisionByAdminName || null,
+        decisionAt: existingDecisionAt || cert.decisionAt || null,
+        rejectionReason: existingRejectionReason || cert.rejectionReason || null,
+        webViewLink: finalDriveLink,
+        proxyViewUrl: `/api/drive/file/${cert.id}`,
+        proxyDownloadUrl: `/api/drive/file/${cert.id}?download=true`,
+        updatedAt: new Date().toISOString()
+      };
+
+      const writeOps = [
+        adminDb.collection('Certificates').doc(docId).set(recordToSave, { merge: true }),
+        adminDb.collection('certificates').doc(docId).set(recordToSave, { merge: true })
+      ];
+      if (cert.id && cert.id !== docId) {
+        writeOps.push(
+          adminDb.collection('Certificates').doc(cert.id).set(recordToSave, { merge: true }),
+          adminDb.collection('certificates').doc(cert.id).set(recordToSave, { merge: true })
+        );
+      }
+      await Promise.all(writeOps);
+
+      return res.json({ success: true, saved: true, certId: docId });
+    } catch (err: any) {
+      console.error('[Drive Sync] Error in sync-certificate:', err);
+      return res.status(500).json({ error: err.message || 'Error syncing certificate' });
+    }
+  });
+
+  /**
    * GET /api/drive/pending-certificates
    * Privileged endpoint utilizing Admin Firestore to fetch all submissions awaiting review.
    * Ensures all 4 mandatory fields + core identifiers are present and deduplicated by driveFileId.
@@ -4429,7 +4828,7 @@ Recipient:        ${RECIPIENT_EMAIL}
 
         if (isPending) {
           const fileId = c.driveFileId || c.certId || d.id;
-          if (!pendingMap.has(fileId)) {
+          if (!tombstonedDriveFileIds.has(fileId) && !pendingMap.has(fileId)) {
             const memNo = String(c.membershipId || c.membershipNumber || '').trim().toUpperCase();
             const memName = c.membershipName || c.memberName || 'NMO Member';
             const evtName = c.eventName || c.eventTitle || 'General Certificate';
@@ -4486,15 +4885,24 @@ Recipient:        ${RECIPIENT_EMAIL}
         return res.json({ success: true, count: 0, certificates: [] });
       }
 
-      const snapCap = await adminDb.collection('Certificates').get().catch(() => null);
-      const docs = snapCap ? snapCap.docs : [];
+      const [snapCap, snapLower] = await Promise.all([
+        adminDb.collection('Certificates').get().catch(() => null),
+        adminDb.collection('certificates').get().catch(() => null)
+      ]);
+      const docs = [
+        ...(snapCap ? snapCap.docs : []),
+        ...(snapLower ? snapLower.docs : [])
+      ];
       const certsMap = new Map<string, any>();
 
       docs.forEach((d) => {
         const c = d.data();
         if (!c) return;
         const fileId = c.driveFileId || c.certId || d.id;
-        if (!certsMap.has(fileId)) {
+        if (!tombstonedDriveFileIds.has(fileId) && !certsMap.has(fileId)) {
+          const isUserUpload = c.uploadSource === 'user' || c.uploadedBy === 'member' || (c.originalFileName && c.originalFileName.startsWith('PENDING_'));
+          const certApprovalStatus = c.approvalStatus || c.status || (isUserUpload ? 'pending' : 'not_required');
+
           certsMap.set(fileId, {
             id: fileId,
             name: c.originalFileName || `${c.membershipId || c.membershipNumber || 'Certificate'}.pdf`,
@@ -4509,9 +4917,9 @@ Recipient:        ${RECIPIENT_EMAIL}
             googleDriveLink: c.googleDriveLink || c.webViewLink,
             driveFolderId: c.driveFolderId,
             driveFolderName: c.driveFolderName,
-            uploadSource: c.uploadSource || 'user',
-            approvalStatus: c.approvalStatus || c.status || 'approved',
-            status: c.status || c.approvalStatus || 'approved',
+            uploadSource: c.uploadSource || (isUserUpload ? 'user' : 'admin'),
+            approvalStatus: certApprovalStatus,
+            status: certApprovalStatus,
             uploaderUid: c.memberUid || c.uploaderUid,
             proxyViewUrl: `/api/drive/file/${fileId}`,
             proxyDownloadUrl: `/api/drive/file/${fileId}?download=true`
