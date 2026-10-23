@@ -1562,7 +1562,7 @@ Recipient:        ${RECIPIENT_EMAIL}
 
       return res.json({
         connected: isActuallyConnected,
-        status: isActuallyConnected ? 'active' : (session.status === 'disconnected' ? 'disconnected' : 'expired'),
+        status: isActuallyConnected ? 'active' : 'expired',
         accountEmail: session.accountEmail,
         accountName: session.accountName,
         accountPhoto: session.accountPhoto,
@@ -2370,8 +2370,16 @@ Recipient:        ${RECIPIENT_EMAIL}
       const propId = String(fileProperties.membershipNumber).trim().toUpperCase();
       if (propId === targetId) return true;
     }
+    if (fileProperties?.membershipId) {
+      const propId = String(fileProperties.membershipId).trim().toUpperCase();
+      if (propId === targetId) return true;
+    }
 
-    const base = getBaseFilename(fileName).trim().toUpperCase();
+    let base = getBaseFilename(fileName).trim().toUpperCase();
+    if (base.startsWith('PENDING_')) {
+      base = base.replace(/^PENDING_/, '');
+    }
+
     if (base === targetId) return true;
 
     // Delimited prefix formats (e.g. 001_EVT-A, 001-CME, 001 (1))
@@ -3493,22 +3501,37 @@ Recipient:        ${RECIPIENT_EMAIL}
             // Safe retry handling: If the certificate already exists in Google Drive for this event,
             // report success and return the existing verified certificate record.
             console.log(`[Drive Upload] Safe retry detected: reusing existing certificate ${existingForThisEvent.id} for member ${verifiedMemberNo} in event ${eventId}`);
+            const existingDriveLink = existingForThisEvent.webViewLink || (existingForThisEvent.id ? `https://drive.google.com/file/d/${existingForThisEvent.id}/view` : '');
+            const existingEvtName = existingForThisEvent.properties?.eventTitle || eventTitle || 'General Certificate';
+            const existingMemName = existingForThisEvent.properties?.memberName || memberName || 'NMO Member';
+
             const existingRecord = {
-              certId: `${eventId}_${verifiedMemberNo}`,
+              // 4 mandatory fields
+              eventName: existingEvtName,
+              membershipName: existingMemName,
               eventId,
-              eventTitle: existingForThisEvent.properties?.eventTitle || eventTitle || '',
+              googleDriveLink: existingDriveLink,
+
+              // Core schema
+              driveFileId: existingForThisEvent.id,
+              membershipId: verifiedMemberNo,
+              memberUid: existingForThisEvent.properties?.uploaderUid || uploaderUid || '',
+              uploadedAt: existingForThisEvent.createdTime || new Date().toISOString(),
+              status: existingForThisEvent.properties?.approvalStatus || approvalStatus,
+
+              // Backward compatibility
+              certId: `${eventId}_${verifiedMemberNo}`,
+              eventTitle: existingEvtName,
               membershipNumber: verifiedMemberNo,
-              memberName: existingForThisEvent.properties?.memberName || memberName || '',
+              memberName: existingMemName,
               uploaderUid: existingForThisEvent.properties?.uploaderUid || uploaderUid || '',
               uploadSource: existingForThisEvent.properties?.uploadSource || source,
               approvalStatus: existingForThisEvent.properties?.approvalStatus || approvalStatus,
-              driveFileId: existingForThisEvent.id,
               driveFolderId: folderId,
               originalFileName: existingForThisEvent.name,
               mimeType: existingForThisEvent.mimeType || finalMime,
               fileSize: existingForThisEvent.size ? `${(Number(existingForThisEvent.size) / (1024 * 1024)).toFixed(2)} MB` : undefined,
-              uploadedAt: existingForThisEvent.createdTime || new Date().toISOString(),
-              webViewLink: existingForThisEvent.webViewLink,
+              webViewLink: existingDriveLink,
               proxyViewUrl: `/api/drive/file/${existingForThisEvent.id}`,
               proxyDownloadUrl: `/api/drive/file/${existingForThisEvent.id}?download=true`,
               alreadyExisted: true
@@ -3517,9 +3540,16 @@ Recipient:        ${RECIPIENT_EMAIL}
             try {
               const adminDb = getAdminFirestore();
               if (adminDb) {
-                await adminDb.collection('Certificates').doc(existingRecord.certId).set(existingRecord, { merge: true });
+                await Promise.all([
+                  adminDb.collection('Certificates').doc(existingRecord.certId).set(existingRecord, { merge: true }),
+                  adminDb.collection('certificates').doc(existingRecord.certId).set(existingRecord, { merge: true }),
+                  adminDb.collection('Certificates').doc(existingForThisEvent.id).set(existingRecord, { merge: true }),
+                  adminDb.collection('certificates').doc(existingForThisEvent.id).set(existingRecord, { merge: true })
+                ]);
               }
-            } catch {}
+            } catch (saveErr) {
+              console.warn('[Drive Upload] Notice updating existing record in Firestore:', saveErr);
+            }
 
             return res.json({
               success: true,
@@ -3589,35 +3619,66 @@ Recipient:        ${RECIPIENT_EMAIL}
       const uploadedFile = await uploadResp.json();
       console.log(`[Drive Upload] Successfully uploaded file ID ${uploadedFile.id} for ${cleanNo}`);
 
+      const finalDriveLink = uploadedFile.webViewLink || uploadedFile.webContentLink || `https://drive.google.com/file/d/${uploadedFile.id}/view`;
+      const finalEventName = eventTitle || 'General Certificate';
+      const finalMemberName = memberName || 'NMO Member';
+
       const certRecord = {
-        certId: `${eventId}_${cleanNo}`,
+        // 4 mandatory fields
+        eventName: finalEventName,
+        membershipName: finalMemberName,
         eventId,
-        eventTitle: eventTitle || '',
+        googleDriveLink: finalDriveLink,
+
+        // Core schema identifiers
+        driveFileId: uploadedFile.id,
+        membershipId: cleanNo,
+        memberUid: uploaderUid || '',
+        uploadedAt: new Date().toISOString(),
+        status: approvalStatus,
+
+        // Backward compatibility fields
+        certId: `${eventId}_${cleanNo}`,
+        eventTitle: finalEventName,
         membershipNumber: cleanNo,
-        memberName: memberName || '',
+        memberName: finalMemberName,
         uploaderUid: uploaderUid || '',
         uploadSource: source,
         approvalStatus,
-        driveFileId: uploadedFile.id,
         driveFolderId: folderId,
         originalFileName: fileName || finalFileName,
         mimeType: finalMime,
         fileSize: `${(fileBuffer.length / (1024 * 1024)).toFixed(2)} MB`,
-        uploadedAt: new Date().toISOString(),
-        webViewLink: uploadedFile.webViewLink,
+        webViewLink: finalDriveLink,
         proxyViewUrl: `/api/drive/file/${uploadedFile.id}`,
         proxyDownloadUrl: `/api/drive/file/${uploadedFile.id}?download=true`
       };
 
       // Durably record certificate submission in Firestore database
+      // CRITICAL REQUIREMENT: "Do not show upload success if the database record fails to save."
       try {
         const adminDb = getAdminFirestore();
         if (adminDb) {
-          await adminDb.collection('Certificates').doc(`${eventId}_${cleanNo}`).set(certRecord, { merge: true });
-          console.log(`[Drive Upload] Persisted certificate record to Firestore (Certificates/${eventId}_${cleanNo})`);
+          await Promise.all([
+            adminDb.collection('Certificates').doc(`${eventId}_${cleanNo}`).set(certRecord, { merge: true }),
+            adminDb.collection('certificates').doc(`${eventId}_${cleanNo}`).set(certRecord, { merge: true }),
+            adminDb.collection('Certificates').doc(uploadedFile.id).set(certRecord, { merge: true }),
+            adminDb.collection('certificates').doc(uploadedFile.id).set(certRecord, { merge: true })
+          ]);
+          console.log(`[Drive Upload] Persisted certificate record to Firestore (Certificates & certificates for ${eventId}_${cleanNo} and ${uploadedFile.id})`);
+        } else {
+          console.warn('[Drive Upload] Warning: Firestore Admin DB not available, cannot save certificate record.');
+          return res.status(500).json({
+            error: 'database_error',
+            message: 'Certificate uploaded to Google Drive but failed to save in Firestore database.'
+          });
         }
       } catch (dbErr: any) {
-        console.warn('[Drive Upload] Notice syncing to Firestore on backend:', dbErr?.message);
+        console.error('[Drive Upload] Fatal: Failed to persist certificate to Firestore:', dbErr);
+        return res.status(500).json({
+          error: 'database_error',
+          message: 'Failed to record certificate submission in database: ' + (dbErr?.message || 'Database write failed')
+        });
       }
 
       return res.json({
@@ -3831,6 +3892,7 @@ Recipient:        ${RECIPIENT_EMAIL}
       // Verify Authorization & Ownership:
       const adminIdentity = getRequesterAdminIdentity(req);
       const requesterMemberId = getRequesterMemberId(req);
+      const cookieMemberId = requesterMemberId;
 
       // Non-admin members cannot query another member's certificates
       if (!adminIdentity.isAdmin && requesterMemberId && requesterMemberId !== cleanMemNo) {
@@ -4081,11 +4143,12 @@ Recipient:        ${RECIPIENT_EMAIL}
   /**
    * POST /api/drive/approve-certificate
    * Privileged admin approval endpoint:
-   * Updates file properties on Google Drive and confirms approval status.
+   * Strips PENDING_ filename prefix in Google Drive (never adds APPROVED_),
+   * updates file properties on Google Drive, and updates approval status in both Firestore collections.
    */
   app.post('/api/drive/approve-certificate', async (req, res) => {
     try {
-      const { driveFileId, adminUid, adminName } = req.body;
+      const { driveFileId, adminUid, adminName, certId } = req.body;
       if (!driveFileId) {
         return res.status(400).json({ error: 'driveFileId is required' });
       }
@@ -4095,20 +4158,44 @@ Recipient:        ${RECIPIENT_EMAIL}
         return res.status(503).json({ error: 'Google Drive storage is disconnected.' });
       }
 
+      // 1. Fetch current file metadata to check for PENDING_ prefix
+      let cleanFileName: string | undefined;
+      try {
+        const metaResp = await fetch(
+          `https://www.googleapis.com/drive/v3/files/${driveFileId}?fields=id,name,properties`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        if (metaResp.ok) {
+          const fileMeta = await metaResp.json();
+          if (fileMeta.name && /^PENDING_/i.test(fileMeta.name)) {
+            cleanFileName = fileMeta.name.replace(/^PENDING_/i, '');
+            console.log(`[Drive Approve] Stripping PENDING_ prefix from filename: "${fileMeta.name}" -> "${cleanFileName}"`);
+          }
+        }
+      } catch (metaErr) {
+        console.warn('[Drive Approve] Notice checking file metadata for rename:', metaErr);
+      }
+
+      // 2. PATCH file on Google Drive (updates properties and removes PENDING_ prefix; NEVER adds APPROVED_)
+      const patchBody: Record<string, any> = {
+        properties: {
+          approvalStatus: 'approved',
+          decisionByAdminUid: adminUid || '',
+          decisionByAdminName: adminName || 'Administrator',
+          decisionAt: new Date().toISOString()
+        }
+      };
+      if (cleanFileName) {
+        patchBody.name = cleanFileName;
+      }
+
       const patchResp = await fetch(`https://www.googleapis.com/drive/v3/files/${driveFileId}`, {
         method: 'PATCH',
         headers: {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({
-          properties: {
-            approvalStatus: 'approved',
-            decisionByAdminUid: adminUid || '',
-            decisionByAdminName: adminName || 'Administrator',
-            decisionAt: new Date().toISOString()
-          }
-        })
+        body: JSON.stringify(patchBody)
       });
 
       if (!patchResp.ok) {
@@ -4116,26 +4203,43 @@ Recipient:        ${RECIPIENT_EMAIL}
         console.warn('[Drive Approve] Drive file property update returned:', patchResp.status, errText);
       }
 
-      // Update Firestore database record
+      // 3. Update Firestore database records across both 'Certificates' and 'certificates'
       try {
         const adminDb = getAdminFirestore();
         if (adminDb) {
-          const docId = req.body.certId || driveFileId;
-          await adminDb.collection('Certificates').doc(docId).set({
+          const docId = certId || driveFileId;
+          const approvalUpdate = {
             approvalStatus: 'approved',
+            status: 'approved',
             decisionByAdminUid: adminUid || 'admin',
             decisionByAdminName: adminName || 'Administrator',
             decisionAt: new Date().toISOString(),
             approvedAt: new Date().toISOString(),
             updatedAt: new Date().toISOString()
-          }, { merge: true });
-          console.log(`[Drive Approve] Updated Firestore certificate record for ${docId}`);
+          };
+
+          const updates = [
+            adminDb.collection('Certificates').doc(docId).set(approvalUpdate, { merge: true }),
+            adminDb.collection('certificates').doc(docId).set(approvalUpdate, { merge: true })
+          ];
+          if (driveFileId !== docId) {
+            updates.push(
+              adminDb.collection('Certificates').doc(driveFileId).set(approvalUpdate, { merge: true }),
+              adminDb.collection('certificates').doc(driveFileId).set(approvalUpdate, { merge: true })
+            );
+          }
+          await Promise.all(updates);
+          console.log(`[Drive Approve] Updated Firestore certificate record for ${docId} and ${driveFileId}`);
         }
       } catch (dbErr: any) {
         console.warn('[Drive Approve] Notice syncing approval to Firestore:', dbErr?.message);
       }
 
-      return res.json({ success: true, message: 'Certificate successfully approved and updated in Drive.' });
+      return res.json({
+        success: true,
+        message: 'Certificate successfully approved, PENDING_ prefix removed in Drive, and status updated.',
+        renamedFileName: cleanFileName
+      });
     } catch (err: any) {
       console.error('[Drive Approve] Error approving certificate:', err);
       return res.status(500).json({ error: err.message || 'Error approving certificate' });
@@ -4146,6 +4250,7 @@ Recipient:        ${RECIPIENT_EMAIL}
    * POST /api/drive/reject-certificate
    * Privileged admin rejection endpoint:
    * Permanently deletes unapproved file from Google Drive and updates database.
+   * If deletion fails, returns 502 with safe retry without losing record.
    */
   app.post('/api/drive/reject-certificate', async (req, res) => {
     try {
@@ -4176,19 +4281,32 @@ Recipient:        ${RECIPIENT_EMAIL}
         });
       }
 
-      // Record rejection status and reason in Firestore
+      // Record rejection status and reason in Firestore in both collections
       try {
         const adminDb = getAdminFirestore();
         if (adminDb) {
           const docId = certId || driveFileId;
-          await adminDb.collection('Certificates').doc(docId).set({
+          const rejectionUpdate = {
             approvalStatus: 'rejected',
+            status: 'rejected',
             rejectionReason: rejectionReason || 'Certificate submission could not be verified by administrator',
             decisionByAdminUid: adminUid || 'admin',
             decisionByAdminName: adminName || 'Administrator',
             decisionAt: new Date().toISOString(),
             updatedAt: new Date().toISOString()
-          }, { merge: true });
+          };
+
+          const updates = [
+            adminDb.collection('Certificates').doc(docId).set(rejectionUpdate, { merge: true }),
+            adminDb.collection('certificates').doc(docId).set(rejectionUpdate, { merge: true })
+          ];
+          if (driveFileId !== docId) {
+            updates.push(
+              adminDb.collection('Certificates').doc(driveFileId).set(rejectionUpdate, { merge: true }),
+              adminDb.collection('certificates').doc(driveFileId).set(rejectionUpdate, { merge: true })
+            );
+          }
+          await Promise.all(updates);
           console.log(`[Drive Reject] Recorded rejection status in Firestore for ${docId}`);
         }
       } catch (dbErr: any) {
@@ -4201,6 +4319,418 @@ Recipient:        ${RECIPIENT_EMAIL}
       return res.status(500).json({ error: err.message || 'Error rejecting certificate' });
     }
   });
+
+  /**
+   * GET /api/drive/pending-certificates
+   * Privileged endpoint utilizing Admin Firestore to fetch all submissions awaiting review.
+   * Ensures all 4 mandatory fields + core identifiers are present and deduplicated by driveFileId.
+   */
+  app.get('/api/drive/pending-certificates', async (_req, res) => {
+    try {
+      const adminDb = getAdminFirestore();
+      if (!adminDb) {
+        return res.json({ success: true, count: 0, pending: [] });
+      }
+
+      const [snapCap, snapLower] = await Promise.all([
+        adminDb.collection('Certificates').get().catch(() => null),
+        adminDb.collection('certificates').get().catch(() => null)
+      ]);
+
+      const allDocs = [
+        ...(snapCap ? snapCap.docs : []),
+        ...(snapLower ? snapLower.docs : [])
+      ];
+
+      const pendingMap = new Map<string, any>();
+
+      allDocs.forEach((d) => {
+        const c = d.data();
+        if (!c) return;
+
+        const rawStatus = String(c.status || c.approvalStatus || '').trim().toLowerCase();
+        const isPending = rawStatus === 'pending' || rawStatus === 'pending_approval';
+
+        if (isPending) {
+          const fileId = c.driveFileId || c.certId || d.id;
+          if (!pendingMap.has(fileId)) {
+            const memNo = String(c.membershipId || c.membershipNumber || '').trim().toUpperCase();
+            const memName = c.membershipName || c.memberName || 'NMO Member';
+            const evtName = c.eventName || c.eventTitle || 'General Certificate';
+            const evtId = c.eventId || '';
+            const driveLink = c.googleDriveLink || c.webViewLink || (fileId ? `https://drive.google.com/file/d/${fileId}/view` : '');
+
+            pendingMap.set(fileId, {
+              id: fileId,
+              name: c.originalFileName || `${memNo || 'Certificate'}.pdf`,
+              mimeType: c.mimeType || 'application/pdf',
+              size: c.size || c.fileSize,
+              createdTime: c.uploadedAt || c.createdTime,
+              membershipNumber: memNo,
+              membershipId: memNo,
+              memberName: memName,
+              membershipName: memName,
+              eventId: evtId,
+              eventTitle: evtName,
+              eventName: evtName,
+              googleDriveLink: driveLink,
+              driveFolderId: c.driveFolderId,
+              uploadSource: c.uploadSource || 'user',
+              approvalStatus: 'pending',
+              status: 'pending',
+              uploaderUid: c.memberUid || c.uploaderUid,
+              proxyViewUrl: `/api/drive/file/${fileId}`,
+              proxyDownloadUrl: `/api/drive/file/${fileId}?download=true`
+            });
+          }
+        }
+      });
+
+      const pendingList = Array.from(pendingMap.values());
+      return res.json({
+        success: true,
+        count: pendingList.length,
+        pending: pendingList
+      });
+    } catch (err: any) {
+      console.error('[Drive Pending] Error querying pending certificates:', err);
+      return res.status(500).json({ error: 'Failed to query pending certificates' });
+    }
+  });
+
+  // =========================================================================
+  // Google Drive & Firestore Reconciliation & Webhook Handlers
+  // =========================================================================
+
+  /**
+   * Synchronize direct Google Drive event folder uploads into Firestore.
+   * Discovers event subfolders under "Events", paginates through certificate files,
+   * extracts membership IDs (preserving leading zeros and handling PENDING_ prefixes),
+   * resolves event & member identities, and writes documents with the 4 mandatory fields.
+   * Deduplicates by driveFileId.
+   */
+  async function syncGoogleDriveCertificatesToFirestore(specificFolderId?: string): Promise<{
+    success: boolean;
+    syncedCount: number;
+    unmatchedCount: number;
+    message: string;
+  }> {
+    const token = await getValidServerDriveToken();
+    if (!token) {
+      return { success: false, syncedCount: 0, unmatchedCount: 0, message: 'Google Drive is disconnected.' };
+    }
+
+    const adminDb = getAdminFirestore();
+    if (!adminDb) {
+      return { success: false, syncedCount: 0, unmatchedCount: 0, message: 'Firestore Admin is not initialized.' };
+    }
+
+    try {
+      // 1. Build lookup tables for Events and Members from Firestore
+      const [eventsSnap, usersSnap] = await Promise.all([
+        adminDb.collection('Events').get().catch(() => null),
+        adminDb.collection('Users').get().catch(() => null)
+      ]);
+
+      const eventsById = new Map<string, { eventId: string; title: string; driveFolderId?: string }>();
+      const eventsByNormTitle = new Map<string, { eventId: string; title: string; driveFolderId?: string }>();
+      const normalize = (s: string) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+      if (eventsSnap) {
+        eventsSnap.docs.forEach((doc) => {
+          const data = doc.data();
+          const evt = {
+            eventId: doc.id,
+            title: data.title || data.name || doc.id,
+            driveFolderId: data.driveFolderId
+          };
+          eventsById.set(doc.id, evt);
+          const norm = normalize(evt.title);
+          if (norm) eventsByNormTitle.set(norm, evt);
+        });
+      }
+
+      const membersByNo = new Map<string, { name: string; uid?: string }>();
+      if (usersSnap) {
+        usersSnap.docs.forEach((doc) => {
+          const data = doc.data();
+          const memNo = String(data.membershipNumber || doc.id).trim().toUpperCase();
+          if (memNo) {
+            membersByNo.set(memNo, {
+              name: data.name || data.displayName || 'NMO Member',
+              uid: data.uid || doc.id
+            });
+          }
+        });
+      }
+
+      // 2. Discover event folders in Google Drive
+      let targetFolders: Array<{ id: string; name: string }> = [];
+
+      if (specificFolderId) {
+        // Fetch metadata for specific folder
+        try {
+          const fResp = await fetch(
+            `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(specificFolderId)}?fields=id,name`,
+            { headers: { Authorization: `Bearer ${token}` } }
+          );
+          if (fResp.ok) {
+            const fData = await fResp.json();
+            targetFolders = [{ id: fData.id, name: fData.name }];
+          }
+        } catch {}
+      } else {
+        const hierarchy = await resolveDriveHierarchy(token);
+        if (hierarchy.success && hierarchy.eventsFolder) {
+          const eventsFolderId = hierarchy.eventsFolder.id;
+          let pageToken: string | undefined = undefined;
+          do {
+            const query = `'${eventsFolderId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+            let url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=nextPageToken,files(id,name)&pageSize=100`;
+            if (pageToken) url += `&pageToken=${encodeURIComponent(pageToken)}`;
+
+            const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+            if (!resp.ok) break;
+            const data = await resp.json();
+            if (data.files && Array.isArray(data.files)) {
+              targetFolders.push(...data.files);
+            }
+            pageToken = data.nextPageToken;
+          } while (pageToken);
+        }
+      }
+
+      if (targetFolders.length === 0) {
+        return { success: true, syncedCount: 0, unmatchedCount: 0, message: 'No event folders found to synchronize.' };
+      }
+
+      let totalSynced = 0;
+      let totalUnmatched = 0;
+
+      // 3. For each event folder, scan its files and sync to Firestore
+      for (const folder of targetFolders) {
+        // Disambiguate event ID and Name
+        let matchedEvt: { eventId: string; title: string } | undefined;
+
+        // Try direct folder ID match
+        for (const evt of eventsById.values()) {
+          if (evt.driveFolderId === folder.id) {
+            matchedEvt = evt;
+            break;
+          }
+        }
+
+        // Try exact name match
+        if (!matchedEvt) {
+          const folderClean = folder.name.trim().toLowerCase();
+          for (const evt of eventsById.values()) {
+            if (evt.title.trim().toLowerCase() === folderClean) {
+              matchedEvt = evt;
+              break;
+            }
+          }
+        }
+
+        // Try normalized name match
+        if (!matchedEvt) {
+          const normFolder = normalize(folder.name);
+          matchedEvt = eventsByNormTitle.get(normFolder);
+        }
+
+        const resolvedEventId = matchedEvt ? matchedEvt.eventId : folder.id;
+        const resolvedEventName = matchedEvt ? matchedEvt.title : folder.name;
+
+        // Paginate files in this event folder
+        let pageToken: string | undefined = undefined;
+        do {
+          const query = `'${folder.id}' in parents and mimeType != 'application/vnd.google-apps.folder' and trashed = false`;
+          let url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=nextPageToken,files(id,name,mimeType,size,createdTime,webViewLink,webContentLink,properties)&pageSize=100`;
+          if (pageToken) url += `&pageToken=${encodeURIComponent(pageToken)}`;
+
+          const filesResp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+          if (!filesResp.ok) break;
+
+          const filesData = await filesResp.json();
+          const files: any[] = filesData.files || [];
+
+          for (const file of files) {
+            const rawFileName = file.name || '';
+            const fProps = file.properties || {};
+
+            // Extract membership ID
+            let extractedMemNo: string | null = null;
+            if (fProps.membershipNumber) {
+              extractedMemNo = String(fProps.membershipNumber).trim().toUpperCase();
+            } else if (fProps.membershipId) {
+              extractedMemNo = String(fProps.membershipId).trim().toUpperCase();
+            }
+
+            if (!extractedMemNo) {
+              let baseName = getBaseFilename(rawFileName).trim().toUpperCase();
+              if (baseName.startsWith('PENDING_')) {
+                baseName = baseName.replace(/^PENDING_/, '');
+              }
+
+              // Match pattern: numeric ID or NMO format
+              const match = baseName.match(/^([0-9]{6,14}|NMO-[A-Z0-9-]+)/i);
+              if (match) {
+                extractedMemNo = match[1].toUpperCase();
+              } else if (baseName) {
+                // Check if baseName directly corresponds to any known member
+                if (membersByNo.has(baseName)) {
+                  extractedMemNo = baseName;
+                }
+              }
+            }
+
+            // If matched to membership ID:
+            if (extractedMemNo) {
+              const memberInfo = membersByNo.get(extractedMemNo);
+              const resolvedMemberName = fProps.memberName || memberInfo?.name || 'NMO Member';
+              const resolvedMemberUid = fProps.uploaderUid || memberInfo?.uid || '';
+
+              // Status resolution
+              const isPendingPrefix = /^PENDING_/i.test(rawFileName);
+              let status = fProps.approvalStatus || (isPendingPrefix || fProps.uploadSource === 'user' ? 'pending' : 'approved');
+              if (isPendingPrefix && status !== 'rejected') {
+                status = 'pending';
+              }
+
+              const driveLink = file.webViewLink || file.webContentLink || `https://drive.google.com/file/d/${file.id}/view`;
+
+              const certRecord = {
+                // 4 mandatory fields
+                eventName: resolvedEventName,
+                membershipName: resolvedMemberName,
+                eventId: resolvedEventId,
+                googleDriveLink: driveLink,
+
+                // Core schema identifiers
+                driveFileId: file.id,
+                membershipId: extractedMemNo,
+                memberUid: resolvedMemberUid,
+                uploadedAt: file.createdTime || new Date().toISOString(),
+                status,
+
+                // Backward compatibility
+                certId: `${resolvedEventId}_${extractedMemNo}`,
+                eventTitle: resolvedEventName,
+                membershipNumber: extractedMemNo,
+                memberName: resolvedMemberName,
+                uploaderUid: resolvedMemberUid,
+                uploadSource: fProps.uploadSource || (isPendingPrefix ? 'user' : 'direct_drive'),
+                approvalStatus: status,
+                driveFolderId: folder.id,
+                originalFileName: rawFileName,
+                mimeType: file.mimeType || 'application/pdf',
+                fileSize: file.size ? `${(Number(file.size) / (1024 * 1024)).toFixed(2)} MB` : undefined,
+                webViewLink: driveLink,
+                proxyViewUrl: `/api/drive/file/${file.id}`,
+                proxyDownloadUrl: `/api/drive/file/${file.id}?download=true`,
+                syncedFromDriveAt: new Date().toISOString()
+              };
+
+              // Persist to both 'certificates' and 'Certificates' using stable deduplication key (driveFileId)
+              await Promise.all([
+                adminDb.collection('certificates').doc(file.id).set(certRecord, { merge: true }),
+                adminDb.collection('Certificates').doc(file.id).set(certRecord, { merge: true }),
+                adminDb.collection('certificates').doc(`${resolvedEventId}_${extractedMemNo}`).set(certRecord, { merge: true }),
+                adminDb.collection('Certificates').doc(`${resolvedEventId}_${extractedMemNo}`).set(certRecord, { merge: true })
+              ]);
+
+              totalSynced++;
+            } else {
+              // Unmatched file: Flag safely for reconciliation rather than associating with wrong user
+              totalUnmatched++;
+              console.warn(`[Drive Sync] File "${rawFileName}" in "${folder.name}" (${file.id}) could not be matched to a membership ID.`);
+              try {
+                await adminDb.collection('unmatched_drive_files').doc(file.id).set({
+                  driveFileId: file.id,
+                  name: rawFileName,
+                  driveFolderId: folder.id,
+                  driveFolderName: folder.name,
+                  createdTime: file.createdTime,
+                  webViewLink: file.webViewLink,
+                  flaggedForReconciliation: true,
+                  flaggedAt: new Date().toISOString()
+                }, { merge: true });
+              } catch {}
+            }
+          }
+
+          pageToken = filesData.nextPageToken;
+        } while (pageToken);
+      }
+
+      console.log(`[Drive Sync] Completed reconciliation: ${totalSynced} certificates synced, ${totalUnmatched} unmatched.`);
+      return {
+        success: true,
+        syncedCount: totalSynced,
+        unmatchedCount: totalUnmatched,
+        message: `Successfully reconciled ${totalSynced} certificates from Google Drive into Firestore!`
+      };
+    } catch (syncErr: any) {
+      console.error('[Drive Sync] Error during Drive-to-Firestore synchronization:', syncErr);
+      return {
+        success: false,
+        syncedCount: 0,
+        unmatchedCount: 0,
+        message: syncErr.message || 'Error reconciling Drive files'
+      };
+    }
+  }
+
+  /**
+   * POST /api/drive/sync-certificates
+   * Manual admin reconciliation trigger endpoint.
+   */
+  app.post('/api/drive/sync-certificates', async (req, res) => {
+    try {
+      const folderId = req.body?.folderId;
+      const result = await syncGoogleDriveCertificatesToFirestore(folderId);
+      return res.json(result);
+    } catch (err: any) {
+      console.error('[Drive Sync Endpoint] Error:', err);
+      return res.status(500).json({ success: false, error: err.message || 'Internal error syncing certificates' });
+    }
+  });
+
+  /**
+   * POST /api/drive/webhook
+   * Google Drive Push Notification change-detection endpoint.
+   * Responds immediately with 200 and triggers background reconciliation.
+   */
+  app.post('/api/drive/webhook', async (req, res) => {
+    // Acknowledge Google Drive push notification immediately
+    res.status(200).send('OK');
+
+    const resourceState = req.headers['x-goog-resource-state'];
+    console.log(`[Drive Webhook] Received notification: state=${resourceState}`);
+
+    if (resourceState && resourceState !== 'sync') {
+      syncGoogleDriveCertificatesToFirestore()
+        .then((res) => {
+          console.log(`[Drive Webhook] Webhook-triggered reconciliation: ${res.syncedCount} synced.`);
+        })
+        .catch((err) => {
+          console.warn('[Drive Webhook] Notice during webhook sync:', err?.message || err);
+        });
+    }
+  });
+
+  // Scheduled background reconciliation loop (runs every 3 minutes)
+  const RECONCILIATION_INTERVAL_MS = 3 * 60 * 1000;
+  setInterval(async () => {
+    try {
+      const session = await getDurableDriveSession();
+      if (session && session.status === 'active' && session.refreshToken) {
+        console.log('[Drive Sync Loop] Running scheduled 3-minute reconciliation...');
+        await syncGoogleDriveCertificatesToFirestore();
+      }
+    } catch (err: any) {
+      console.warn('[Drive Sync Loop] Notice in periodic reconciliation:', err?.message || err);
+    }
+  }, RECONCILIATION_INTERVAL_MS);
 
   // Vite SPA middlewares in development, or fallback if dist not yet built
   const distPath = path.resolve(__dirname, 'dist');

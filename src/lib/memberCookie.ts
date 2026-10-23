@@ -64,7 +64,11 @@ export const isFilenameMatchingMembershipId = (
   const targetId = String(membershipId || '').trim().toUpperCase();
   if (!targetId) return false;
 
-  const base = getBaseFilename(fileName).trim().toUpperCase();
+  let base = getBaseFilename(fileName).trim().toUpperCase();
+  if (base.startsWith('PENDING_')) {
+    base = base.replace(/^PENDING_/, '');
+  }
+
   if (base === targetId) return true;
 
   if (
