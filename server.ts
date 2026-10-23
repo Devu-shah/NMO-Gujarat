@@ -2837,20 +2837,20 @@ Recipient:        ${RECIPIENT_EMAIL}
         pageToken = data.nextPageToken;
       } while (pageToken);
 
-      // Group files by exact membership ID (stripping extension only, preserving leading zeros)
+      // Group files by exact membership ID (extracting ID from filename or properties, preserving leading zeros)
       const memberMap: { [key: string]: any[] } = {};
       allRawFiles.forEach((f) => {
-        const base = getBaseFilename(f.name || '');
-        const propMem = f.properties?.membershipNumber;
-        const cleanNo = String(propMem || base).trim().toUpperCase();
+        const propMem = f.properties?.membershipNumber || f.properties?.membershipId;
+        const extracted = extractMembershipIdFromFilename(f.name || '', undefined, f.properties);
+        const cleanNo = String(propMem || extracted || getBaseFilename(f.name || '')).trim().toUpperCase();
         if (!memberMap[cleanNo]) memberMap[cleanNo] = [];
         memberMap[cleanNo].push(f);
       });
 
       const processedFiles = allRawFiles.map((f) => {
-        const base = getBaseFilename(f.name || '');
-        const propMem = f.properties?.membershipNumber;
-        const cleanNo = String(propMem || base).trim().toUpperCase();
+        const propMem = f.properties?.membershipNumber || f.properties?.membershipId;
+        const extracted = extractMembershipIdFromFilename(f.name || '', undefined, f.properties);
+        const cleanNo = String(propMem || extracted || getBaseFilename(f.name || '')).trim().toUpperCase();
         const matches = memberMap[cleanNo] || [];
         const matchesCount = matches.length;
 

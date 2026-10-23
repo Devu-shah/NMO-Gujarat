@@ -1,7 +1,7 @@
 import { GoogleAuthProvider, signInWithPopup, onAuthStateChanged, User } from 'firebase/auth';
 import { doc, getDoc, setDoc, getDocs, collection, query, where, deleteDoc } from 'firebase/firestore';
 import { auth, db } from './firebase';
-import { getMemberIdCookie, setMemberIdCookie, isCertificateMatchingCookie } from './memberCookie';
+import { getMemberIdCookie, setMemberIdCookie, isCertificateMatchingCookie, extractMembershipIdFromFilename } from './memberCookie';
 import { apiUrl } from './api';
 
 /**
@@ -1218,6 +1218,22 @@ export const fetchMemberCertificatesFromFirestore = async (
  * Fetch all certificates from Firestore index
  */
 export const fetchAllCertificatesFromFirestore = async (): Promise<DriveCertificateFile[]> => {
+  // 1. Try privileged server endpoint first (avoids client-side permission-denied)
+  try {
+    const res = await fetch(apiUrl('/api/drive/all-certificates'), {
+      credentials: 'include'
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data.certificates)) {
+        return data.certificates;
+      }
+    }
+  } catch (err) {
+    console.debug('Backend all certificates lookup notice:', err);
+  }
+
+  // 2. Client-side fallback
   try {
     const snapshot = await getDocs(collection(db, 'Certificates'));
     return snapshot.docs.map((d) => d.data() as DriveCertificateFile);
@@ -1275,9 +1291,10 @@ export const approveCertificate = async (
   adminInfo?: { uid?: string; name?: string },
   driveFileId?: string
 ): Promise<void> => {
+  let backendSucceeded = false;
   if (driveFileId) {
     try {
-      await fetch(apiUrl('/api/drive/approve-certificate'), {
+      const resp = await fetch(apiUrl('/api/drive/approve-certificate'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1291,6 +1308,9 @@ export const approveCertificate = async (
           adminName: adminInfo?.name || 'Administrator'
         })
       });
+      if (resp.ok) {
+        backendSucceeded = true;
+      }
     } catch (e) {
       console.warn('Backend drive approval update note:', e);
     }
@@ -1309,9 +1329,12 @@ export const approveCertificate = async (
       },
       { merge: true }
     );
-  } catch (err) {
-    console.error('Error approving certificate in Firestore:', err);
-    throw err;
+  } catch (err: any) {
+    console.warn('Notice updating approved certificate in client Firestore:', err);
+    // If backend already approved via Admin SDK, do not throw client permission-denied error
+    if (!backendSucceeded) {
+      throw err;
+    }
   }
 };
 
@@ -1379,7 +1402,7 @@ export const fetchPendingCertificates = async (): Promise<DriveCertificateFile[]
     });
     if (serverRes.ok) {
       const data = await serverRes.json();
-      if (Array.isArray(data.pending) && data.pending.length > 0) {
+      if (Array.isArray(data.pending)) {
         return data.pending;
       }
     }
@@ -1623,10 +1646,9 @@ export const listCertificatesInFolder = async (
         if (res.ok) {
           const data = await res.json();
           const items = (data.files || []).map((f: any) => {
-            let extractedMemNo = f.properties?.membershipNumber;
-            if (!extractedMemNo) {
-              const match = f.name.match(/([0-9]{8,14}|NMO-[A-Z0-9-]+)/i);
-              if (match) extractedMemNo = match[1].toUpperCase();
+            let extractedMemNo = extractMembershipIdFromFilename(f.name, undefined, f.properties);
+            if (!extractedMemNo && f.properties?.membershipNumber) {
+              extractedMemNo = String(f.properties.membershipNumber).trim().toUpperCase();
             }
 
             const cert: DriveCertificateFile = {
@@ -1639,7 +1661,7 @@ export const listCertificatesInFolder = async (
               webContentLink: f.webContentLink || `https://drive.google.com/uc?id=${f.id}&export=download`,
               thumbnailLink: f.thumbnailLink,
               description: f.description,
-              membershipNumber: extractedMemNo,
+              membershipNumber: extractedMemNo || undefined,
               memberName: f.properties?.memberName,
               eventId: f.properties?.eventId,
               eventTitle: f.properties?.eventTitle,
