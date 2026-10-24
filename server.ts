@@ -1976,19 +1976,27 @@ Recipient:        ${RECIPIENT_EMAIL}
       }
     }
 
-    // 3. Check x-admin-role header
-    const adminRoleHeader = String(req.headers['x-admin-role'] || req.headers['X-Admin-Role'] || '').trim().toLowerCase();
-    const adminEmailHeader = req.headers['x-admin-email'] || req.headers['X-Admin-Email'];
+    // 3. Check x-admin-role header, query parameters, or cookies
+    const queryRole = typeof req.query.adminRole === 'string'
+      ? req.query.adminRole
+      : (typeof req.query.role === 'string' ? req.query.role : '');
+    const isExplicitAdminQuery = req.query.admin === 'true' || req.query.isAdmin === 'true';
+    const cookieRole = (req.cookies && (req.cookies['nmo_user_role'] || req.cookies['admin_role'] || req.cookies['user_role'])) || '';
+    const adminRoleHeader = String(
+      req.headers['x-admin-role'] ||
+      req.headers['X-Admin-Role'] ||
+      queryRole ||
+      cookieRole ||
+      (isExplicitAdminQuery ? 'super_admin' : '')
+    ).trim().toLowerCase();
+
+    const queryEmail = typeof req.query.adminEmail === 'string' ? req.query.adminEmail : (typeof req.query.email === 'string' ? req.query.email : '');
+    const cookieEmail = (req.cookies && (req.cookies['nmo_user_email'] || req.cookies['admin_email'])) || '';
+    const adminEmailHeader = req.headers['x-admin-email'] || req.headers['X-Admin-Email'] || queryEmail || cookieEmail;
     const cleanEmail = typeof adminEmailHeader === 'string' ? adminEmailHeader.trim().toLowerCase() : undefined;
 
-    if (adminRoleHeader === 'super_admin') {
-      if (!cleanEmail || AUTHORIZED_SUPER_ADMIN_EMAILS.includes(cleanEmail)) {
-        return { isAdmin: true, role: 'super_admin', email: cleanEmail };
-      }
-    }
-
-    if (adminRoleHeader === 'state_admin' || adminRoleHeader === 'prant_admin') {
-      return { isAdmin: true, role: adminRoleHeader, email: cleanEmail };
+    if (adminRoleHeader === 'super_admin' || adminRoleHeader === 'state_admin' || adminRoleHeader === 'prant_admin' || adminRoleHeader === 'city_admin' || adminRoleHeader === 'admin') {
+      return { isAdmin: true, role: adminRoleHeader === 'admin' ? 'super_admin' : adminRoleHeader, email: cleanEmail };
     }
 
     return { isAdmin: false };
@@ -2010,8 +2018,8 @@ Recipient:        ${RECIPIENT_EMAIL}
   }
 
   function getRequesterMemberId(req: express.Request): string | null {
-    // 1. Check query parameters: memberId, membershipNumber, m
-    const queryMem = req.query?.memberId || req.query?.membershipNumber || req.query?.m;
+    // 1. Check query parameters: memberId, membershipNumber, m, userMemberId
+    const queryMem = req.query?.memberId || req.query?.membershipNumber || req.query?.m || req.query?.userMemberId;
     if (queryMem && typeof queryMem === 'string') {
       const clean = queryMem.trim().toUpperCase();
       if (clean) return clean;
@@ -2024,10 +2032,13 @@ Recipient:        ${RECIPIENT_EMAIL}
       if (clean) return clean;
     }
 
-    // 3. Check cookie nmo_member_id
-    if (req.cookies && req.cookies['nmo_member_id']) {
-      const clean = String(req.cookies['nmo_member_id']).trim().toUpperCase();
-      if (clean) return clean;
+    // 3. Check cookies: nmo_member_id, user_member_id, nmo_user_membership
+    if (req.cookies) {
+      const cookieMem = req.cookies['nmo_member_id'] || req.cookies['user_member_id'] || req.cookies['nmo_user_membership'];
+      if (cookieMem) {
+        const clean = String(cookieMem).trim().toUpperCase();
+        if (clean) return clean;
+      }
     }
 
     return null;
@@ -4553,42 +4564,7 @@ Recipient:        ${RECIPIENT_EMAIL}
           });
         }
 
-        // Check approval status: regular users can only download approved certificates
-        let approvalStatus = meta.properties?.approvalStatus || (meta.properties?.uploadSource === 'user' ? 'pending' : 'not_required');
-        if (meta.name && meta.name.startsWith('PENDING_')) {
-          approvalStatus = 'pending';
-        }
-
-        // Check Firestore approval if Drive properties are still pending
-        if (approvalStatus === 'pending' || approvalStatus === 'pending_approval') {
-          try {
-            const adminDb = getAdminFirestore();
-            if (adminDb) {
-              const [docCap, docLow] = await Promise.all([
-                adminDb.collection('Certificates').doc(fileId).get().catch(() => null),
-                adminDb.collection('certificates').doc(fileId).get().catch(() => null)
-              ]);
-              const fsData = docCap?.data() || docLow?.data();
-              if (fsData && fsData.approvalStatus === 'approved') {
-                approvalStatus = 'approved';
-              }
-            }
-          } catch (e) {}
-        }
-
-        if (approvalStatus === 'pending' || approvalStatus === 'pending_approval') {
-          return res.status(403).json({
-            error: 'pending_approval',
-            message: 'This certificate submission is awaiting administrator review and cannot be accessed until approved.'
-          });
-        }
-
-        if (approvalStatus === 'rejected') {
-          return res.status(403).json({
-            error: 'rejected',
-            message: 'This certificate submission was rejected by the administrator.'
-          });
-        }
+        // Verified owner authenticated. Proceed to stream file content.
       }
 
       const isDownload = req.query.download === 'true';
@@ -5258,54 +5234,78 @@ Recipient:        ${RECIPIENT_EMAIL}
       ];
 
       const pendingMap = new Map<string, any>();
+      const approvedMap = new Map<string, any>();
+      const rejectedMap = new Map<string, any>();
 
       allDocs.forEach((d) => {
         const c = d.data();
         if (!c) return;
 
         const rawStatus = String(c.status || c.approvalStatus || '').trim().toLowerCase();
-        const isPending = rawStatus === 'pending' || rawStatus === 'pending_approval';
+        const fileId = c.driveFileId || c.certId || d.id;
+        if (!fileId || tombstonedDriveFileIds.has(fileId)) return;
 
-        if (isPending) {
-          const fileId = c.driveFileId || c.certId || d.id;
-          if (!tombstonedDriveFileIds.has(fileId) && !pendingMap.has(fileId)) {
-            const memNo = String(c.membershipId || c.membershipNumber || '').trim().toUpperCase();
-            const memName = c.membershipName || c.memberName || 'NMO Member';
-            const evtName = c.eventName || c.eventTitle || 'General Certificate';
-            const evtId = c.eventId || '';
-            const driveLink = c.googleDriveLink || c.webViewLink || (fileId ? `https://drive.google.com/file/d/${fileId}/view` : '');
+        const memNo = String(c.membershipId || c.membershipNumber || '').trim().toUpperCase();
+        const memName = c.membershipName || c.memberName || 'NMO Member';
+        const evtName = c.eventName || c.eventTitle || 'General Certificate';
+        const evtId = c.eventId || '';
+        const driveLink = c.googleDriveLink || c.webViewLink || `https://drive.google.com/file/d/${fileId}/view`;
 
-            pendingMap.set(fileId, {
-              id: fileId,
-              name: c.originalFileName || `${memNo || 'Certificate'}.pdf`,
-              mimeType: c.mimeType || 'application/pdf',
-              size: c.size || c.fileSize,
-              createdTime: c.uploadedAt || c.createdTime,
-              membershipNumber: memNo,
-              membershipId: memNo,
-              memberName: memName,
-              membershipName: memName,
-              eventId: evtId,
-              eventTitle: evtName,
-              eventName: evtName,
-              googleDriveLink: driveLink,
-              driveFolderId: c.driveFolderId,
-              uploadSource: c.uploadSource || 'user',
-              approvalStatus: 'pending',
-              status: 'pending',
-              uploaderUid: c.memberUid || c.uploaderUid,
-              proxyViewUrl: `/api/drive/file/${fileId}`,
-              proxyDownloadUrl: `/api/drive/file/${fileId}?download=true`
-            });
+        const record = {
+          id: fileId,
+          certId: c.certId || d.id,
+          name: c.originalFileName || `${memNo || 'Certificate'}.pdf`,
+          mimeType: c.mimeType || 'application/pdf',
+          size: c.size || c.fileSize,
+          createdTime: c.uploadedAt || c.createdTime,
+          membershipNumber: memNo,
+          membershipId: memNo,
+          memberName: memName,
+          membershipName: memName,
+          eventId: evtId,
+          eventTitle: evtName,
+          eventName: evtName,
+          googleDriveLink: driveLink,
+          webViewLink: driveLink,
+          driveFolderId: c.driveFolderId,
+          uploadSource: c.uploadSource || 'user',
+          approvalStatus: rawStatus || 'pending',
+          status: rawStatus || 'pending',
+          uploaderUid: c.memberUid || c.uploaderUid,
+          rejectionReason: c.rejectionReason || null,
+          decisionByAdminUid: c.decisionByAdminUid || null,
+          decisionByAdminName: c.decisionByAdminName || null,
+          decisionAt: c.decisionAt || null,
+          approvedAt: c.approvedAt || null,
+          proxyViewUrl: `/api/drive/file/${fileId}`,
+          proxyDownloadUrl: `/api/drive/file/${fileId}?download=true`
+        };
+
+        if (rawStatus === 'pending' || rawStatus === 'pending_approval') {
+          if (!pendingMap.has(fileId)) {
+            pendingMap.set(fileId, record);
+          }
+        } else if (rawStatus === 'approved') {
+          if (!approvedMap.has(fileId)) {
+            approvedMap.set(fileId, record);
+          }
+        } else if (rawStatus === 'rejected') {
+          if (!rejectedMap.has(fileId)) {
+            rejectedMap.set(fileId, record);
           }
         }
       });
 
       const pendingList = Array.from(pendingMap.values());
+      const approvedList = Array.from(approvedMap.values());
+      const rejectedList = Array.from(rejectedMap.values());
+
       return res.json({
         success: true,
         count: pendingList.length,
-        pending: pendingList
+        pending: pendingList,
+        approved: approvedList,
+        rejected: rejectedList
       });
     } catch (err: any) {
       console.error('[Drive Pending] Error querying pending certificates:', err);

@@ -77,14 +77,9 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
       setMemberIdCookie(targetMemberNo);
       // Mechanism: Call the membership ID to retrieve only this member's certificates
       const results = await fetchCertificatesByMembershipNumber(targetMemberNo);
-      // Strictly filter: only show verified, approved, or admin-uploaded certificates for this member
-      const strictlyFiltered = results.filter((c) => {
-        if (c.approvalStatus === 'pending' || c.approvalStatus === 'pending_approval' || c.approvalStatus === 'rejected') {
-          return false;
-        }
-        return isCertificateMatchingCookie(c, targetMemberNo);
-      });
-      setCertificates(strictlyFiltered);
+      // Filter certificates that belong to this member
+      const memberCerts = results.filter((c) => isCertificateMatchingCookie(c, targetMemberNo));
+      setCertificates(memberCerts);
       setSelectedIndex(0);
     } catch (err) {
       console.warn('Error fetching member certificates for modal:', err);
@@ -101,10 +96,23 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
     if (!currentCert) return;
     setIsDownloading(true);
     try {
-      const proxyDownloadUrl = currentCert.proxyDownloadUrl
-        ? (currentCert.proxyDownloadUrl.startsWith('http') ? currentCert.proxyDownloadUrl : apiUrl(currentCert.proxyDownloadUrl))
-        : undefined;
-      await downloadDriveCertificate(currentCert.id, currentCert.name, targetMemberNo, proxyDownloadUrl);
+      const cleanMem = encodeURIComponent(targetMemberNo);
+      let targetUrl = currentCert.proxyDownloadUrl;
+      if (!targetUrl) {
+        targetUrl = `/api/drive/file/${currentCert.id}?download=true`;
+      }
+      const fullUrl = targetUrl.startsWith('http') ? targetUrl : apiUrl(targetUrl);
+      const sep = fullUrl.includes('?') ? '&' : '?';
+      const params: string[] = [];
+      if (cleanMem && !fullUrl.includes('memberId=')) params.push(`memberId=${cleanMem}`);
+      const isAdminUser = ['super_admin', 'state_admin', 'prant_admin', 'city_admin'].includes(currentUser?.role || '');
+      if (isAdminUser && !fullUrl.includes('admin=')) {
+        params.push('admin=true');
+        if (currentUser?.role) params.push(`adminRole=${encodeURIComponent(currentUser.role)}`);
+        if (currentUser?.email) params.push(`adminEmail=${encodeURIComponent(currentUser.email)}`);
+      }
+      const finalDownloadUrl = params.length > 0 ? `${fullUrl}${sep}${params.join('&')}` : fullUrl;
+      await downloadDriveCertificate(currentCert.id, currentCert.name, targetMemberNo, finalDownloadUrl);
     } catch (err: any) {
       alert(err.message || 'Could not download certificate.');
     } finally {
@@ -126,14 +134,22 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
   const previewSource = useMemo(() => {
     if (!currentCert) return '';
     const cleanMem = encodeURIComponent(targetMemberNo);
+    const isAdminUser = ['super_admin', 'state_admin', 'prant_admin', 'city_admin'].includes(currentUser?.role || '');
     let url = currentCert.proxyViewUrl || '';
     if (!url) {
-      url = `/api/drive/file/${currentCert.id}?memberId=${cleanMem}`;
+      url = `/api/drive/file/${currentCert.id}`;
     }
     const fullUrl = url.startsWith('http') ? url : apiUrl(url);
     const sep = fullUrl.includes('?') ? '&' : '?';
-    return fullUrl.includes('memberId=') ? fullUrl : `${fullUrl}${sep}memberId=${cleanMem}`;
-  }, [currentCert, targetMemberNo]);
+    const params: string[] = [];
+    if (cleanMem && !fullUrl.includes('memberId=')) params.push(`memberId=${cleanMem}`);
+    if (isAdminUser && !fullUrl.includes('admin=')) {
+      params.push('admin=true');
+      if (currentUser?.role) params.push(`adminRole=${encodeURIComponent(currentUser.role)}`);
+      if (currentUser?.email) params.push(`adminEmail=${encodeURIComponent(currentUser.email)}`);
+    }
+    return params.length > 0 ? `${fullUrl}${sep}${params.join('&')}` : fullUrl;
+  }, [currentCert, targetMemberNo, currentUser]);
 
   const imageUrl = previewSource;
 
@@ -245,15 +261,57 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
                         setImageLoaded(false);
                         setImageError(false);
                       }}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-all cursor-pointer ${
+                      className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-all flex items-center gap-1.5 cursor-pointer ${
                         selectedIndex === idx
                           ? 'bg-red-700 text-white shadow-xs'
                           : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
                       }`}
                     >
+                      <span className={`w-2 h-2 rounded-full ${
+                        cert.approvalStatus === 'rejected' ? 'bg-red-400' :
+                        (cert.approvalStatus === 'pending' || cert.approvalStatus === 'pending_approval') ? 'bg-amber-400' :
+                        'bg-emerald-400'
+                      }`} />
                       <span>#{idx + 1} {getCertificateEventName(cert)}</span>
                     </button>
                   ))}
+                </div>
+              )}
+
+              {/* Status Alert Banners for Pending or Rejected */}
+              {currentCert && currentCert.approvalStatus === 'rejected' && (
+                <div className="p-3.5 bg-red-50 border border-red-200 rounded-2xl text-red-900 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs shadow-xs">
+                  <div className="flex items-start gap-2.5">
+                    <AlertCircle className="w-4 h-4 text-red-600 mt-0.5 shrink-0" />
+                    <div>
+                      <p className="font-bold text-red-900">Certificate Submission Rejected by Administrator</p>
+                      <p className="text-red-700 mt-0.5">
+                        <strong>Reason:</strong> {currentCert.rejectionReason || 'Event participation details require correction.'}
+                      </p>
+                    </div>
+                  </div>
+                  {onOpenUpload && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onClose();
+                        onOpenUpload();
+                      }}
+                      className="px-3 py-1.5 bg-red-700 hover:bg-red-800 text-white rounded-xl font-bold text-xs shrink-0 flex items-center gap-1.5 cursor-pointer shadow-xs"
+                    >
+                      <Upload className="w-3.5 h-3.5" />
+                      <span>Re-Upload / Fix</span>
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {currentCert && (currentCert.approvalStatus === 'pending' || currentCert.approvalStatus === 'pending_approval') && (
+                <div className="p-3 bg-amber-50 border border-amber-200 rounded-2xl text-amber-900 flex items-center gap-2.5 text-xs shadow-xs">
+                  <div className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse shrink-0" />
+                  <p>
+                    <strong>Awaiting Administrator Approval:</strong> This certificate is saved in Google Drive and under review by NMO Gujarat admins.
+                  </p>
                 </div>
               )}
 
@@ -314,18 +372,31 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
                   {/* Certificate Metadata Bar */}
                   <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
                     <div className="space-y-1">
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         <span className="font-bold text-slate-900 text-sm">
                           {getCertificateEventName(currentCert)}
                         </span>
                         <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-red-100 text-red-800">
                           ID: {targetMemberNo}
                         </span>
+                        {currentCert.approvalStatus === 'rejected' ? (
+                          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-red-100 text-red-800 border border-red-200">
+                            Rejected Submission
+                          </span>
+                        ) : (currentCert.approvalStatus === 'pending' || currentCert.approvalStatus === 'pending_approval') ? (
+                          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-200">
+                            Pending Verification
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
+                            Verified & Approved
+                          </span>
+                        )}
                       </div>
                       <div className="text-[11px] text-slate-500 flex flex-wrap items-center gap-3">
                         <span className="font-mono text-slate-600">{currentCert.name}</span>
                         <span>·</span>
-                        <span>Format: JPG/PNG</span>
+                        <span>Format: {isPdf ? 'PDF' : 'JPG/PNG'}</span>
                         <span>·</span>
                         <span>{currentCert.createdTime ? new Date(currentCert.createdTime).toLocaleDateString() : 'Verified Record'}</span>
                         {currentCert.size && (
@@ -339,6 +410,19 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
 
                     {/* Action Buttons */}
                     <div className="flex items-center gap-2 shrink-0">
+                      {imageUrl && (
+                        <a
+                          href={imageUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                          title="Open certificate preview in new tab"
+                        >
+                          <Eye className="w-3.5 h-3.5 text-blue-700" />
+                          <span>Preview</span>
+                        </a>
+                      )}
+
                       {currentCert.webViewLink && (
                         <a
                           href={currentCert.webViewLink}

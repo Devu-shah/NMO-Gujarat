@@ -1531,12 +1531,17 @@ export const rejectAndDeleteCertificate = async (
   }
 };
 
+export interface SubmissionListsResult {
+  pending: DriveCertificateFile[];
+  approved: DriveCertificateFile[];
+  rejected: DriveCertificateFile[];
+}
+
 /**
- * Fetch all user-uploaded certificate submissions waiting for Admin Approval.
- * Uses backend endpoint first (with Admin SDK privileges), falling back to
- * querying both 'Certificates' and 'certificates' collections in Firestore.
+ * Fetch all user-uploaded certificate submissions categorized by status:
+ * pending (awaiting review), approved, and rejected (with reasons).
  */
-export const fetchPendingCertificates = async (): Promise<DriveCertificateFile[]> => {
+export const fetchSubmissionLists = async (): Promise<SubmissionListsResult> => {
   // 1. Try server endpoint first (has privileged admin Firestore access)
   try {
     const serverRes = await fetch(apiUrl('/api/drive/pending-certificates'), {
@@ -1544,15 +1549,17 @@ export const fetchPendingCertificates = async (): Promise<DriveCertificateFile[]
     });
     if (serverRes.ok) {
       const data = await serverRes.json();
-      if (Array.isArray(data.pending)) {
-        return data.pending;
-      }
+      return {
+        pending: Array.isArray(data.pending) ? data.pending : [],
+        approved: Array.isArray(data.approved) ? data.approved : [],
+        rejected: Array.isArray(data.rejected) ? data.rejected : []
+      };
     }
   } catch (e) {
     console.debug('Backend pending certificates endpoint note:', e);
   }
 
-  // 2. Query Firestore directly from both 'Certificates' and 'certificates' collections
+  // 2. Query Firestore directly from both 'Certificates' and 'certificates' collections as fallback
   try {
     const [snapCap, snapLower] = await Promise.all([
       getDocs(collection(db, 'Certificates')).catch(() => ({ docs: [] } as any)),
@@ -1561,48 +1568,73 @@ export const fetchPendingCertificates = async (): Promise<DriveCertificateFile[]
 
     const allDocs = [...snapCap.docs, ...snapLower.docs];
     const pendingMap = new Map<string, DriveCertificateFile>();
+    const approvedMap = new Map<string, DriveCertificateFile>();
+    const rejectedMap = new Map<string, DriveCertificateFile>();
 
     allDocs.forEach((d) => {
       const c = d.data() as any;
       if (!c) return;
 
       const rawStatus = String(c.status || c.approvalStatus || '').trim().toLowerCase();
-      const isPending = rawStatus === 'pending' || rawStatus === 'pending_approval';
+      const fileId = c.driveFileId || c.certId || d.id;
+      if (!fileId) return;
 
-      if (isPending) {
-        const fileId = c.driveFileId || c.certId || d.id;
-        if (!pendingMap.has(fileId)) {
-          const memNo = c.membershipId || c.membershipNumber || '';
-          const memName = c.membershipName || c.memberName || 'NMO Member';
-          const evtName = c.eventName || c.eventTitle || 'General Certificate';
+      const memNo = c.membershipId || c.membershipNumber || '';
+      const memName = c.membershipName || c.memberName || 'NMO Member';
+      const evtName = c.eventName || c.eventTitle || 'General Certificate';
 
-          pendingMap.set(fileId, {
-            id: fileId,
-            name: c.originalFileName || `${memNo || 'Certificate'}.pdf`,
-            mimeType: c.mimeType || 'application/pdf',
-            size: c.size || c.fileSize,
-            createdTime: c.uploadedAt || c.createdTime,
-            membershipNumber: memNo,
-            memberName: memName,
-            eventId: c.eventId,
-            eventTitle: evtName,
-            eventName: evtName,
-            driveFolderId: c.driveFolderId,
-            uploadSource: c.uploadSource || 'user',
-            approvalStatus: 'pending',
-            uploaderUid: c.memberUid || c.uploaderUid,
-            proxyViewUrl: apiUrl(`/api/drive/file/${fileId}`),
-            proxyDownloadUrl: apiUrl(`/api/drive/file/${fileId}?download=true`)
-          });
-        }
+      const certObj: DriveCertificateFile = {
+        id: fileId,
+        name: c.originalFileName || `${memNo || 'Certificate'}.pdf`,
+        mimeType: c.mimeType || 'application/pdf',
+        size: c.size || c.fileSize,
+        createdTime: c.uploadedAt || c.createdTime,
+        membershipNumber: memNo,
+        memberName: memName,
+        eventId: c.eventId,
+        eventTitle: evtName,
+        eventName: evtName,
+        driveFolderId: c.driveFolderId,
+        uploadSource: c.uploadSource || 'user',
+        approvalStatus: (rawStatus || 'pending') as DriveCertificateFile['approvalStatus'],
+        status: rawStatus || 'pending',
+        uploaderUid: c.memberUid || c.uploaderUid,
+        rejectionReason: c.rejectionReason || null,
+        decisionByAdminUid: c.decisionByAdminUid || null,
+        decisionByAdminName: c.decisionByAdminName || null,
+        decisionAt: c.decisionAt || null,
+        approvedAt: c.approvedAt || null,
+        webViewLink: c.googleDriveLink || c.webViewLink || `https://drive.google.com/file/d/${fileId}/view`,
+        proxyViewUrl: apiUrl(`/api/drive/file/${fileId}`),
+        proxyDownloadUrl: apiUrl(`/api/drive/file/${fileId}?download=true`)
+      };
+
+      if (rawStatus === 'pending' || rawStatus === 'pending_approval') {
+        if (!pendingMap.has(fileId)) pendingMap.set(fileId, certObj);
+      } else if (rawStatus === 'approved') {
+        if (!approvedMap.has(fileId)) approvedMap.set(fileId, certObj);
+      } else if (rawStatus === 'rejected') {
+        if (!rejectedMap.has(fileId)) rejectedMap.set(fileId, certObj);
       }
     });
 
-    return Array.from(pendingMap.values());
+    return {
+      pending: Array.from(pendingMap.values()),
+      approved: Array.from(approvedMap.values()),
+      rejected: Array.from(rejectedMap.values())
+    };
   } catch (err: any) {
-    console.warn('Notice loading pending member certificates:', err);
-    return [];
+    console.warn('Notice loading member submissions:', err);
+    return { pending: [], approved: [], rejected: [] };
   }
+};
+
+/**
+ * Fetch all user-uploaded certificate submissions waiting for Admin Approval.
+ */
+export const fetchPendingCertificates = async (): Promise<DriveCertificateFile[]> => {
+  const lists = await fetchSubmissionLists();
+  return lists.pending;
 };
 
 /**

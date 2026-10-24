@@ -30,6 +30,7 @@ import {
   restoreDriveSessionFromFirestore,
   saveDriveSessionToBackend,
   fetchPendingCertificates,
+  fetchSubmissionLists,
   approveCertificate,
   rejectAndDeleteCertificate,
   deleteDriveCertificate,
@@ -146,9 +147,12 @@ export const AdminCertificatesManager: React.FC = () => {
   } | null>(null);
 
   // ---------------------------------------------------------------------------
-  // TAB 2: Pending User Submissions State
+  // TAB 2: Submissions & Certifications Hub State (Pending, Approved, Rejected)
   // ---------------------------------------------------------------------------
   const [pendingCertificates, setPendingCertificates] = useState<DriveCertificateFile[]>([]);
+  const [approvedCertificates, setApprovedCertificates] = useState<DriveCertificateFile[]>([]);
+  const [rejectedCertificates, setRejectedCertificates] = useState<DriveCertificateFile[]>([]);
+  const [submissionSubTab, setSubmissionSubTab] = useState<'pending' | 'approved' | 'rejected'>('pending');
   const [isLoadingPending, setIsLoadingPending] = useState<boolean>(false);
   const [processingPendingId, setProcessingPendingId] = useState<string | null>(null);
   const [rejectModalCert, setRejectModalCert] = useState<DriveCertificateFile | null>(null);
@@ -182,14 +186,16 @@ export const AdminCertificatesManager: React.FC = () => {
     return events.find((e) => e.eventId === selectedEventId) || events[0] || null;
   }, [events, selectedEventId]);
 
-  // Load pending submissions
+  // Load submissions (pending, approved, rejected)
   const loadPendingCertificates = async () => {
     setIsLoadingPending(true);
     try {
-      const pending = await fetchPendingCertificates();
-      setPendingCertificates(pending);
+      const lists = await fetchSubmissionLists();
+      setPendingCertificates(lists.pending);
+      setApprovedCertificates(lists.approved);
+      setRejectedCertificates(lists.rejected);
     } catch (err) {
-      console.warn('Notice loading pending member certificates:', err);
+      console.warn('Notice loading member submissions:', err);
     } finally {
       setIsLoadingPending(false);
     }
@@ -781,6 +787,56 @@ export const AdminCertificatesManager: React.FC = () => {
     return pendingCertificates;
   }, [pendingCertificates, currentUser, events]);
 
+  // Scoped approved certificates based on admin's permissions
+  const scopedApprovedCertificates = useMemo(() => {
+    const userRole = currentUser?.role || 'member';
+    if (userRole === 'super_admin' || userRole === 'state_admin') {
+      return approvedCertificates;
+    }
+    if (userRole === 'prant_admin') {
+      const myPrant = currentUser?.prant;
+      return approvedCertificates.filter((cert) => {
+        if (!myPrant || myPrant === 'All') return true;
+        const evt = events.find((e) => e.eventId === cert.eventId);
+        return evt ? (evt.prant === myPrant || evt.prant === 'All') : true;
+      });
+    }
+    if (userRole === 'city_admin') {
+      const myCity = currentUser?.city;
+      return approvedCertificates.filter((cert) => {
+        if (!myCity) return true;
+        const evt = events.find((e) => e.eventId === cert.eventId);
+        return evt ? evt.city === myCity : true;
+      });
+    }
+    return approvedCertificates;
+  }, [approvedCertificates, currentUser, events]);
+
+  // Scoped rejected certificates based on admin's permissions
+  const scopedRejectedCertificates = useMemo(() => {
+    const userRole = currentUser?.role || 'member';
+    if (userRole === 'super_admin' || userRole === 'state_admin') {
+      return rejectedCertificates;
+    }
+    if (userRole === 'prant_admin') {
+      const myPrant = currentUser?.prant;
+      return rejectedCertificates.filter((cert) => {
+        if (!myPrant || myPrant === 'All') return true;
+        const evt = events.find((e) => e.eventId === cert.eventId);
+        return evt ? (evt.prant === myPrant || evt.prant === 'All') : true;
+      });
+    }
+    if (userRole === 'city_admin') {
+      const myCity = currentUser?.city;
+      return rejectedCertificates.filter((cert) => {
+        if (!myCity) return true;
+        const evt = events.find((e) => e.eventId === cert.eventId);
+        return evt ? evt.city === myCity : true;
+      });
+    }
+    return rejectedCertificates;
+  }, [rejectedCertificates, currentUser, events]);
+
   // Filtered rows based on search and status filter
   const filteredParticipantRows = useMemo(() => {
     const q = searchQuery.trim().toUpperCase();
@@ -910,6 +966,13 @@ export const AdminCertificatesManager: React.FC = () => {
     }
   };
 
+  // Helper to generate admin preview URL with credentials and query tokens
+  const getAdminPreviewUrl = (fileId: string) => {
+    const role = currentUser?.role || 'super_admin';
+    const email = currentUser?.email || '';
+    return apiUrl(`/api/drive/file/${fileId}?adminRole=${encodeURIComponent(role)}&adminEmail=${encodeURIComponent(email)}&admin=true`);
+  };
+
   // ---------------------------------------------------------------------------
   // APPROVE & REJECT USER SUBMISSIONS (ADMIN WORKFLOW)
   // ---------------------------------------------------------------------------
@@ -931,6 +994,23 @@ export const AdminCertificatesManager: React.FC = () => {
     }
 
     setProcessingPendingId(cert.id);
+
+    // Optimistically update local panel state immediately
+    const approvedCertObj: DriveCertificateFile = {
+      ...cert,
+      approvalStatus: 'approved',
+      status: 'approved',
+      decisionByAdminName: currentUser?.name || 'Administrator',
+      decisionAt: new Date().toISOString()
+    };
+    setApprovedCertificates((prev) => [approvedCertObj, ...prev.filter((c) => c.id !== cert.id)]);
+    setPendingCertificates((prev) => prev.filter((c) => c.id !== cert.id));
+    setRejectedCertificates((prev) => prev.filter((c) => c.id !== cert.id));
+
+    if (cert.eventId && cert.eventId === selectedEvent?.eventId) {
+      setEventDriveFiles((prev) => [approvedCertObj, ...prev.filter((c) => c.id !== cert.id)]);
+    }
+
     try {
       await approveCertificate(
         cert.id,
@@ -940,7 +1020,7 @@ export const AdminCertificatesManager: React.FC = () => {
       );
 
       setFeedback({
-        message: `Approved certificate for member ${cert.membershipNumber} (${cert.memberName})! Certified in Google Drive.`,
+        message: `Approved certificate for member ${cert.membershipNumber} (${cert.memberName})! Moved to Approved Panel.`,
         type: 'success'
       });
 
@@ -953,6 +1033,8 @@ export const AdminCertificatesManager: React.FC = () => {
         message: err.message || 'Failed to approve certificate.',
         type: 'error'
       });
+      // Revert on failure
+      await loadPendingCertificates();
     } finally {
       setProcessingPendingId(null);
     }
@@ -983,16 +1065,33 @@ export const AdminCertificatesManager: React.FC = () => {
     if (!rejectModalCert) return;
 
     setProcessingPendingId(rejectModalCert.id);
+
+    const reason = rejectionReasonText.trim() || 'Certificate submission could not be verified by administrator.';
+    const rejectedCertObj: DriveCertificateFile = {
+      ...rejectModalCert,
+      approvalStatus: 'rejected',
+      status: 'rejected',
+      rejectionReason: reason,
+      decisionByAdminName: currentUser?.name || 'Administrator',
+      decisionAt: new Date().toISOString()
+    };
+
+    // Optimistically update local panel state immediately: move from pending to rejected
+    setRejectedCertificates((prev) => [rejectedCertObj, ...prev.filter((c) => c.id !== rejectModalCert.id)]);
+    setPendingCertificates((prev) => prev.filter((c) => c.id !== rejectModalCert.id));
+    setApprovedCertificates((prev) => prev.filter((c) => c.id !== rejectModalCert.id));
+
     try {
       await rejectAndDeleteCertificate(
         rejectModalCert.id,
         rejectModalCert.id,
-        rejectionReasonText.trim() || 'Certificate submission could not be verified by administrator.',
-        { uid: currentUser?.uid, name: currentUser?.name || 'Administrator' }
+        reason,
+        { uid: currentUser?.uid, name: currentUser?.name || 'Administrator' },
+        false // Keep the rejected submission file details visible in the Rejected Panel
       );
 
       setFeedback({
-        message: `Rejected certificate for member ${rejectModalCert.membershipNumber}. Unapproved file permanently deleted from Google Drive.`,
+        message: `Submission for member ${rejectModalCert.membershipNumber} rejected and moved to Rejected Panel with reason.`,
         type: 'success'
       });
 
@@ -1006,6 +1105,7 @@ export const AdminCertificatesManager: React.FC = () => {
         message: err.message || 'Failed to reject certificate.',
         type: 'error'
       });
+      await loadPendingCertificates();
     } finally {
       setProcessingPendingId(null);
     }
@@ -1732,11 +1832,11 @@ export const AdminCertificatesManager: React.FC = () => {
                                       <span className="text-[10px] text-slate-400 font-mono mr-1">#{idx + 1}</span>
                                     )}
                                     <a
-                                      href={file.webViewLink || apiUrl(`/api/drive/file/${file.id}`)}
+                                      href={getAdminPreviewUrl(file.id)}
                                       target="_blank"
                                       rel="noreferrer"
                                       className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
-                                      title={`Preview ${file.name} in Google Drive`}
+                                      title={`Preview ${file.name}`}
                                     >
                                       <Eye className="w-4 h-4" />
                                     </a>
@@ -1825,11 +1925,11 @@ export const AdminCertificatesManager: React.FC = () => {
                         <td className="p-3 text-right">
                           <div className="flex items-center justify-end gap-1.5">
                             <a
-                              href={file.webViewLink || apiUrl(`/api/drive/file/${file.id}`)}
+                              href={getAdminPreviewUrl(file.id)}
                               target="_blank"
                               rel="noreferrer"
                               className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
-                              title="Preview in Google Drive"
+                              title="Preview file"
                             >
                               <Eye className="w-4 h-4" />
                             </a>
@@ -1871,25 +1971,23 @@ export const AdminCertificatesManager: React.FC = () => {
       )}
 
       {/* ========================================================================= */}
-      {/* SUB-TAB 2: PENDING CERTIFICATE APPROVALS (USER WORKFLOW) */}
+      {/* SUB-TAB 2: SUBMISSIONS & CERTIFICATIONS HUB (PENDING, APPROVED, REJECTED) */}
       {/* ========================================================================= */}
       {activeSubTab === 'pending_approvals' && (
         <div className="space-y-6 animate-in fade-in duration-200">
-          <div className="bg-amber-50/70 border border-amber-300 rounded-3xl p-6 shadow-xs">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-amber-200">
+          <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-xs">
+            {/* Hub Header & Status Summary */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-5 border-b border-slate-200">
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-2xl bg-amber-500 text-white flex items-center justify-center font-bold shadow-xs">
-                  <Clock className="w-5 h-5" />
+                <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-amber-500 to-red-600 text-white flex items-center justify-center font-bold shadow-md">
+                  <Award className="w-6 h-6" />
                 </div>
                 <div>
-                  <h3 className="font-black text-amber-950 text-base sm:text-lg flex items-center gap-2">
-                    <span>User-Uploaded Certificates Pending Admin Approval</span>
-                    <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-amber-200 text-amber-900 border border-amber-300">
-                      {scopedPendingCertificates.length} Awaiting Review
-                    </span>
+                  <h3 className="font-black text-slate-900 text-base sm:text-lg flex items-center gap-2">
+                    <span>Member Certificate Submissions & Approvals</span>
                   </h3>
-                  <p className="text-xs text-amber-800 mt-0.5">
-                    Strict separation enforced: Admin uploads are finalized directly. Only user-submitted certificates require review.
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Review incoming member uploads, track approved certifications, and manage rejected submissions with documented feedback.
                   </p>
                 </div>
               </div>
@@ -1899,155 +1997,461 @@ export const AdminCertificatesManager: React.FC = () => {
                   type="button"
                   onClick={handleSyncDriveUploads}
                   disabled={isSyncingDrive}
-                  className="px-3.5 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs disabled:opacity-50"
+                  className="px-3.5 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs disabled:opacity-50"
                   title="Discover direct Drive uploads and synchronize them to Firestore"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${isSyncingDrive ? 'animate-spin' : ''}`} />
-                  <span>{isSyncingDrive ? 'Syncing...' : 'Sync Drive Uploads'}</span>
+                  <span>{isSyncingDrive ? 'Syncing...' : 'Sync Drive Submissions'}</span>
                 </button>
 
                 <button
                   type="button"
                   onClick={loadPendingCertificates}
                   disabled={isLoadingPending}
-                  className="px-3.5 py-2 bg-white hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shadow-2xs"
+                  className="px-3.5 py-2 bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shadow-2xs"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${isLoadingPending ? 'animate-spin' : ''}`} />
-                  <span>Refresh Review Queue</span>
+                  <span>Refresh Queue</span>
                 </button>
               </div>
             </div>
 
-            {scopedPendingCertificates.length === 0 ? (
-              <div className="py-12 text-center text-amber-800 space-y-2">
-                <CheckCircle2 className="w-10 h-10 text-emerald-600 mx-auto" />
-                <h4 className="font-bold text-slate-800 text-sm">No Pending Approvals</h4>
-                <p className="text-xs text-slate-500 max-w-sm mx-auto">
-                  All user-uploaded certificate submissions have been processed. New submissions from members will appear here for verification.
-                </p>
-              </div>
-            ) : (
-              <div className="mt-4 overflow-x-auto bg-white rounded-2xl border border-amber-200">
-                <table className="w-full text-left text-xs min-w-[850px] border-collapse">
-                  <thead className="bg-amber-100/70 text-amber-950 font-bold border-b border-amber-200">
-                    <tr>
-                      <th className="p-3.5">Member Details</th>
-                      <th className="p-3.5">Event / Workshop</th>
-                      <th className="p-3.5">Drive File (ID Convention)</th>
-                      <th className="p-3.5">Submission Date</th>
-                      <th className="p-3.5">File Size</th>
-                      <th className="p-3.5 text-right">Approval Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-amber-100">
-                    {scopedPendingCertificates.map((cert) => {
-                      const isProcessing = processingPendingId === cert.id;
+            {/* Sub-Panel Navigation Pills */}
+            <div className="flex items-center gap-2 pt-4 pb-2 border-b border-slate-100 overflow-x-auto">
+              <button
+                type="button"
+                onClick={() => setSubmissionSubTab('pending')}
+                className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
+                  submissionSubTab === 'pending'
+                    ? 'bg-amber-500 text-white shadow-xs'
+                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                }`}
+              >
+                <Clock className="w-4 h-4" />
+                <span>Pending Approvals</span>
+                <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
+                  submissionSubTab === 'pending' ? 'bg-amber-600 text-white' : 'bg-slate-200 text-slate-700'
+                }`}>
+                  {scopedPendingCertificates.length}
+                </span>
+              </button>
 
-                      return (
-                        <tr key={cert.id} className="hover:bg-amber-50/40 transition-colors">
-                          {/* Member Details */}
-                          <td className="p-3.5">
-                            <span className="font-bold text-slate-900 block">{cert.memberName || 'NMO Member'}</span>
-                            <span className="font-mono text-xs text-red-700 font-bold bg-red-50 px-2 py-0.5 rounded border border-red-200 inline-block mt-0.5">
-                              {cert.membershipNumber}
-                            </span>
-                          </td>
+              <button
+                type="button"
+                onClick={() => setSubmissionSubTab('approved')}
+                className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
+                  submissionSubTab === 'approved'
+                    ? 'bg-emerald-600 text-white shadow-xs'
+                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                }`}
+              >
+                <CheckCircle2 className="w-4 h-4" />
+                <span>Approved Submissions</span>
+                <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
+                  submissionSubTab === 'approved' ? 'bg-emerald-700 text-white' : 'bg-slate-200 text-slate-700'
+                }`}>
+                  {scopedApprovedCertificates.length}
+                </span>
+              </button>
 
-                          {/* Event */}
-                          <td className="p-3.5">
-                            <span className="text-slate-800 font-semibold block">{cert.eventTitle || 'General Certificate'}</span>
-                            {cert.eventId && (
-                              <span className="text-[10px] text-slate-400 font-mono">ID: {cert.eventId}</span>
-                            )}
-                          </td>
+              <button
+                type="button"
+                onClick={() => setSubmissionSubTab('rejected')}
+                className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
+                  submissionSubTab === 'rejected'
+                    ? 'bg-rose-600 text-white shadow-xs'
+                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                }`}
+              >
+                <AlertTriangle className="w-4 h-4" />
+                <span>Rejected Submissions</span>
+                <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
+                  submissionSubTab === 'rejected' ? 'bg-rose-700 text-white' : 'bg-slate-200 text-slate-700'
+                }`}>
+                  {scopedRejectedCertificates.length}
+                </span>
+              </button>
+            </div>
 
-                          {/* File Name */}
-                          <td className="p-3.5">
-                            <span className="font-mono text-slate-800 font-medium block truncate max-w-[200px]" title={cert.name}>
-                              {cert.name}
-                            </span>
-                            <span className="text-[10px] text-amber-700 font-semibold block mt-0.5">
-                              User Submission
-                            </span>
-                          </td>
-
-                          {/* Date */}
-                          <td className="p-3.5 font-mono text-slate-500">
-                            {cert.createdTime ? new Date(cert.createdTime).toLocaleString() : 'Recently'}
-                          </td>
-
-                          {/* Size */}
-                          <td className="p-3.5 font-mono text-slate-600">
-                            {cert.size || '--'}
-                          </td>
-
-                          {/* Actions */}
-                          <td className="p-3.5 text-right whitespace-nowrap">
-                            <div className="flex items-center justify-end gap-2">
-                              {/* Preview */}
-                              {(cert.webViewLink || cert.id) && (
-                                <a
-                                  href={cert.webViewLink || apiUrl(`/api/drive/file/${cert.id}`)}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
-                                  title="Preview certificate file"
-                                >
-                                  <Eye className="w-3.5 h-3.5" />
-                                  <span>Preview</span>
-                                </a>
-                              )}
-
-                              {/* Approve Button */}
-                              <button
-                                type="button"
-                                onClick={() => handleApproveSubmission(cert)}
-                                disabled={isProcessing}
-                                className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg text-xs font-bold flex items-center gap-1 transition-colors shadow-xs cursor-pointer"
-                                title="Approve certificate submission"
-                              >
-                                <CheckCircle2 className="w-3.5 h-3.5" />
-                                <span>{isProcessing ? 'Approving...' : 'Approve'}</span>
-                              </button>
-
-                              {/* Reject Button */}
-                              <button
-                                type="button"
-                                onClick={() => handleOpenRejectModal(cert)}
-                                disabled={isProcessing}
-                                className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white rounded-lg text-xs font-bold flex items-center gap-1 transition-colors shadow-xs cursor-pointer"
-                                title="Reject certificate submission"
-                              >
-                                <X className="w-3.5 h-3.5" />
-                                <span>Reject</span>
-                              </button>
-
-                              {/* Delete Certificate Button */}
-                              <button
-                                type="button"
-                                onClick={() => handleOpenDeleteModal({
-                                  driveFileId: cert.id,
-                                  certId: cert.id,
-                                  name: cert.name,
-                                  membershipNumber: cert.membershipNumber,
-                                  eventTitle: cert.eventTitle,
-                                  eventId: cert.eventId,
-                                  uploadSource: 'user'
-                                })}
-                                disabled={isProcessing}
-                                className="px-2.5 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
-                                title="Delete submission completely from Google Drive & Firestore"
-                              >
-                                <Trash2 className="w-3.5 h-3.5 text-rose-600" />
-                                <span>Delete</span>
-                              </button>
-                            </div>
-                          </td>
+            {/* PANEL 1: PENDING APPROVALS */}
+            {submissionSubTab === 'pending' && (
+              <div className="mt-4">
+                {scopedPendingCertificates.length === 0 ? (
+                  <div className="py-16 text-center text-slate-500 space-y-2">
+                    <CheckCircle2 className="w-12 h-12 text-emerald-600 mx-auto" />
+                    <h4 className="font-bold text-slate-900 text-sm">No Pending Approvals</h4>
+                    <p className="text-xs text-slate-500 max-w-sm mx-auto">
+                      All member-uploaded certificate submissions have been reviewed. When members upload new certificates, they will appear here.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto bg-white rounded-2xl border border-slate-200">
+                    <table className="w-full text-left text-xs min-w-[850px] border-collapse">
+                      <thead className="bg-amber-50/80 text-amber-950 font-bold border-b border-amber-200">
+                        <tr>
+                          <th className="p-3.5">Member Details</th>
+                          <th className="p-3.5">Event / Workshop</th>
+                          <th className="p-3.5">Drive File (ID Convention)</th>
+                          <th className="p-3.5">Submission Date</th>
+                          <th className="p-3.5">File Size</th>
+                          <th className="p-3.5 text-right">Approval Actions</th>
                         </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {scopedPendingCertificates.map((cert) => {
+                          const isProcessing = processingPendingId === cert.id;
+
+                          return (
+                            <tr key={cert.id} className="hover:bg-amber-50/30 transition-colors">
+                              {/* Member Details */}
+                              <td className="p-3.5">
+                                <span className="font-bold text-slate-900 block">{cert.memberName || 'NMO Member'}</span>
+                                <span className="font-mono text-xs text-red-700 font-bold bg-red-50 px-2 py-0.5 rounded border border-red-200 inline-block mt-0.5">
+                                  {cert.membershipNumber}
+                                </span>
+                              </td>
+
+                              {/* Event */}
+                              <td className="p-3.5">
+                                <span className="text-slate-800 font-semibold block">{cert.eventTitle || 'General Certificate'}</span>
+                                {cert.eventId && (
+                                  <span className="text-[10px] text-slate-400 font-mono">ID: {cert.eventId}</span>
+                                )}
+                              </td>
+
+                              {/* File Name */}
+                              <td className="p-3.5">
+                                <span className="font-mono text-slate-800 font-medium block truncate max-w-[200px]" title={cert.name}>
+                                  {cert.name}
+                                </span>
+                                <span className="text-[10px] text-amber-700 font-semibold block mt-0.5">
+                                  User Submission (Pending)
+                                </span>
+                              </td>
+
+                              {/* Date */}
+                              <td className="p-3.5 font-mono text-slate-500">
+                                {cert.createdTime ? new Date(cert.createdTime).toLocaleString() : 'Recently'}
+                              </td>
+
+                              {/* Size */}
+                              <td className="p-3.5 font-mono text-slate-600">
+                                {cert.size || '--'}
+                              </td>
+
+                              {/* Actions */}
+                              <td className="p-3.5 text-right whitespace-nowrap">
+                                <div className="flex items-center justify-end gap-2">
+                                  {/* Preview */}
+                                  <a
+                                    href={getAdminPreviewUrl(cert.id)}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
+                                    title="Preview certificate file directly via secure stream"
+                                  >
+                                    <Eye className="w-3.5 h-3.5" />
+                                    <span>Preview</span>
+                                  </a>
+
+                                  {/* Approve Button */}
+                                  <button
+                                    type="button"
+                                    onClick={() => handleApproveSubmission(cert)}
+                                    disabled={isProcessing}
+                                    className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg text-xs font-bold flex items-center gap-1 transition-colors shadow-xs cursor-pointer"
+                                    title="Approve certificate submission and move to Approved Panel"
+                                  >
+                                    <CheckCircle2 className="w-3.5 h-3.5" />
+                                    <span>{isProcessing ? 'Approving...' : 'Approve'}</span>
+                                  </button>
+
+                                  {/* Reject Button */}
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenRejectModal(cert)}
+                                    disabled={isProcessing}
+                                    className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white rounded-lg text-xs font-bold flex items-center gap-1 transition-colors shadow-xs cursor-pointer"
+                                    title="Reject submission and move to Rejected Panel with reason"
+                                  >
+                                    <X className="w-3.5 h-3.5" />
+                                    <span>Reject</span>
+                                  </button>
+
+                                  {/* Delete Certificate Button */}
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenDeleteModal({
+                                      driveFileId: cert.id,
+                                      certId: cert.id,
+                                      name: cert.name,
+                                      membershipNumber: cert.membershipNumber,
+                                      eventTitle: cert.eventTitle,
+                                      eventId: cert.eventId,
+                                      uploadSource: 'user'
+                                    })}
+                                    disabled={isProcessing}
+                                    className="px-2.5 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
+                                    title="Delete submission completely"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5 text-rose-600" />
+                                    <span>Delete</span>
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* PANEL 2: APPROVED SUBMISSIONS */}
+            {submissionSubTab === 'approved' && (
+              <div className="mt-4">
+                {scopedApprovedCertificates.length === 0 ? (
+                  <div className="py-16 text-center text-slate-500 space-y-2">
+                    <Award className="w-12 h-12 text-slate-300 mx-auto" />
+                    <h4 className="font-bold text-slate-900 text-sm">No Approved Submissions Yet</h4>
+                    <p className="text-xs text-slate-500 max-w-sm mx-auto">
+                      Submissions approved by administrators will appear here in the verified certifications list.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto bg-white rounded-2xl border border-slate-200">
+                    <table className="w-full text-left text-xs min-w-[850px] border-collapse">
+                      <thead className="bg-emerald-50 text-emerald-950 font-bold border-b border-emerald-200">
+                        <tr>
+                          <th className="p-3.5">Member Details</th>
+                          <th className="p-3.5">Event / Workshop</th>
+                          <th className="p-3.5">Drive File Name</th>
+                          <th className="p-3.5">Approved By & Date</th>
+                          <th className="p-3.5">File Size</th>
+                          <th className="p-3.5 text-right">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {scopedApprovedCertificates.map((cert) => {
+                          const isProcessing = processingPendingId === cert.id;
+
+                          return (
+                            <tr key={cert.id} className="hover:bg-emerald-50/30 transition-colors">
+                              <td className="p-3.5">
+                                <span className="font-bold text-slate-900 block">{cert.memberName || 'NMO Member'}</span>
+                                <span className="font-mono text-xs text-emerald-800 font-bold bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 inline-block mt-0.5">
+                                  {cert.membershipNumber}
+                                </span>
+                              </td>
+                              <td className="p-3.5">
+                                <span className="text-slate-800 font-semibold block">{cert.eventTitle || 'General Certificate'}</span>
+                                {cert.eventId && (
+                                  <span className="text-[10px] text-slate-400 font-mono">ID: {cert.eventId}</span>
+                                )}
+                              </td>
+                              <td className="p-3.5">
+                                <span className="font-mono text-slate-800 font-medium block truncate max-w-[200px]" title={cert.name}>
+                                  {cert.name}
+                                </span>
+                                <span className="text-[10px] text-emerald-700 font-semibold flex items-center gap-1 mt-0.5">
+                                  <CheckCircle2 className="w-3 h-3" />
+                                  <span>Official & Approved</span>
+                                </span>
+                              </td>
+                              <td className="p-3.5 font-mono text-slate-500">
+                                <div>{cert.decisionByAdminName || 'Administrator'}</div>
+                                <div className="text-[10px] text-slate-400">
+                                  {cert.decisionAt ? new Date(cert.decisionAt).toLocaleString() : (cert.createdTime ? new Date(cert.createdTime).toLocaleDateString() : 'Recorded')}
+                                </div>
+                              </td>
+                              <td className="p-3.5 font-mono text-slate-600">
+                                {cert.size || '--'}
+                              </td>
+                              <td className="p-3.5 text-right whitespace-nowrap">
+                                <div className="flex items-center justify-end gap-2">
+                                  {/* Preview */}
+                                  <a
+                                    href={getAdminPreviewUrl(cert.id)}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
+                                    title="Preview certificate file directly"
+                                  >
+                                    <Eye className="w-3.5 h-3.5" />
+                                    <span>Preview</span>
+                                  </a>
+
+                                  {/* Download */}
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDownload(cert)}
+                                    disabled={downloadingId === cert.id}
+                                    className="px-2.5 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
+                                  >
+                                    <Download className="w-3.5 h-3.5" />
+                                    <span>Download</span>
+                                  </button>
+
+                                  {/* Move to Rejected (Revoke) */}
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenRejectModal(cert)}
+                                    disabled={isProcessing}
+                                    className="px-2.5 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
+                                    title="Revoke approval and move to Rejected Panel"
+                                  >
+                                    <X className="w-3.5 h-3.5" />
+                                    <span>Revoke</span>
+                                  </button>
+
+                                  {/* Delete */}
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenDeleteModal({
+                                      driveFileId: cert.id,
+                                      certId: cert.id,
+                                      name: cert.name,
+                                      membershipNumber: cert.membershipNumber,
+                                      eventTitle: cert.eventTitle,
+                                      eventId: cert.eventId,
+                                      uploadSource: 'user'
+                                    })}
+                                    disabled={isProcessing}
+                                    className="px-2 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg text-xs font-semibold transition-colors cursor-pointer"
+                                    title="Delete certificate"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5 text-rose-600" />
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* PANEL 3: REJECTED SUBMISSIONS */}
+            {submissionSubTab === 'rejected' && (
+              <div className="mt-4">
+                {scopedRejectedCertificates.length === 0 ? (
+                  <div className="py-16 text-center text-slate-500 space-y-2">
+                    <CheckCircle2 className="w-12 h-12 text-slate-300 mx-auto" />
+                    <h4 className="font-bold text-slate-900 text-sm">No Rejected Submissions</h4>
+                    <p className="text-xs text-slate-500 max-w-sm mx-auto">
+                      Any certificate submissions rejected by administrators will be retained here along with the recorded rejection reasons.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto bg-white rounded-2xl border border-slate-200">
+                    <table className="w-full text-left text-xs min-w-[900px] border-collapse">
+                      <thead className="bg-rose-50 text-rose-950 font-bold border-b border-rose-200">
+                        <tr>
+                          <th className="p-3.5">Member Details</th>
+                          <th className="p-3.5">Event / Workshop</th>
+                          <th className="p-3.5">Drive File Name</th>
+                          <th className="p-3.5">Documented Rejection Reason</th>
+                          <th className="p-3.5">Reviewed By & Date</th>
+                          <th className="p-3.5 text-right">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {scopedRejectedCertificates.map((cert) => {
+                          const isProcessing = processingPendingId === cert.id;
+
+                          return (
+                            <tr key={cert.id} className="hover:bg-rose-50/30 transition-colors">
+                              <td className="p-3.5">
+                                <span className="font-bold text-slate-900 block">{cert.memberName || 'NMO Member'}</span>
+                                <span className="font-mono text-xs text-rose-800 font-bold bg-rose-50 px-2 py-0.5 rounded border border-rose-200 inline-block mt-0.5">
+                                  {cert.membershipNumber}
+                                </span>
+                              </td>
+                              <td className="p-3.5">
+                                <span className="text-slate-800 font-semibold block">{cert.eventTitle || 'General Certificate'}</span>
+                                {cert.eventId && (
+                                  <span className="text-[10px] text-slate-400 font-mono">ID: {cert.eventId}</span>
+                                )}
+                              </td>
+                              <td className="p-3.5">
+                                <span className="font-mono text-slate-800 font-medium block truncate max-w-[180px]" title={cert.name}>
+                                  {cert.name}
+                                </span>
+                                <span className="text-[10px] text-rose-700 font-bold block mt-0.5">
+                                  Rejected Submission
+                                </span>
+                              </td>
+                              <td className="p-3.5 max-w-xs">
+                                <div className="p-2 bg-rose-50 border border-rose-200 rounded-lg text-rose-900 text-xs font-medium flex items-start gap-1.5">
+                                  <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                                  <span>{cert.rejectionReason || 'Certificate submission could not be verified by administrator.'}</span>
+                                </div>
+                              </td>
+                              <td className="p-3.5 font-mono text-slate-500">
+                                <div>{cert.decisionByAdminName || 'Administrator'}</div>
+                                <div className="text-[10px] text-slate-400">
+                                  {cert.decisionAt ? new Date(cert.decisionAt).toLocaleString() : 'Recently'}
+                                </div>
+                              </td>
+                              <td className="p-3.5 text-right whitespace-nowrap">
+                                <div className="flex items-center justify-end gap-2">
+                                  {/* Preview */}
+                                  <a
+                                    href={getAdminPreviewUrl(cert.id)}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
+                                    title="Preview rejected certificate file"
+                                  >
+                                    <Eye className="w-3.5 h-3.5" />
+                                    <span>Preview</span>
+                                  </a>
+
+                                  {/* Re-Approve Button */}
+                                  <button
+                                    type="button"
+                                    onClick={() => handleApproveSubmission(cert)}
+                                    disabled={isProcessing}
+                                    className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg text-xs font-bold flex items-center gap-1 transition-colors shadow-xs cursor-pointer"
+                                    title="Re-approve submission and move to Approved Panel"
+                                  >
+                                    <CheckCircle2 className="w-3.5 h-3.5" />
+                                    <span>{isProcessing ? 'Processing...' : 'Re-Approve'}</span>
+                                  </button>
+
+                                  {/* Delete Permanently */}
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenDeleteModal({
+                                      driveFileId: cert.id,
+                                      certId: cert.id,
+                                      name: cert.name,
+                                      membershipNumber: cert.membershipNumber,
+                                      eventTitle: cert.eventTitle,
+                                      eventId: cert.eventId,
+                                      uploadSource: 'user'
+                                    })}
+                                    disabled={isProcessing}
+                                    className="px-2.5 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
+                                    title="Permanently delete certificate from Drive & database"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5 text-rose-600" />
+                                    <span>Delete</span>
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -2165,16 +2569,15 @@ export const AdminCertificatesManager: React.FC = () => {
                           </td>
                           <td className="p-3.5 text-right">
                             <div className="flex items-center justify-end gap-1.5">
-                              {f.webViewLink && (
-                                <a
-                                  href={f.webViewLink}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="p-1.5 text-slate-600 hover:text-slate-900 rounded-lg hover:bg-slate-100"
-                                >
-                                  <Eye className="w-4 h-4" />
-                                </a>
-                              )}
+                              <a
+                                href={getAdminPreviewUrl(f.id)}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="p-1.5 text-slate-600 hover:text-slate-900 rounded-lg hover:bg-slate-100"
+                                title="Preview file"
+                              >
+                                <Eye className="w-4 h-4" />
+                              </a>
                               <button
                                 type="button"
                                 onClick={() => handleDownload(f)}
