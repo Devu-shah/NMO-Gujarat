@@ -1839,10 +1839,16 @@ export const listCertificatesInFolder = async (
 /**
  * Download a certificate file directly from Google Drive or browser stream
  */
-export const downloadDriveCertificate = async (fileId: string, filename: string): Promise<void> => {
+export const downloadDriveCertificate = async (
+  fileId: string,
+  filename: string,
+  memberId?: string,
+  proxyDownloadUrl?: string
+): Promise<void> => {
   // 1. Try server streaming proxy endpoint first
   try {
-    const res = await fetch(apiUrl(`/api/drive/file/${fileId}?download=true`));
+    const targetUrl = proxyDownloadUrl || apiUrl(`/api/drive/file/${fileId}?download=true${memberId ? `&memberId=${encodeURIComponent(memberId)}` : ''}`);
+    const res = await fetch(targetUrl);
     if (res.ok) {
       const blob = await res.blob();
       const url = window.URL.createObjectURL(blob);
@@ -1956,3 +1962,42 @@ export const deleteDriveCertificate = async (
 
   return { success: true, message: resJson.message };
 };
+
+/**
+ * Safely deletes an event and optionally cleans up its associated Google Drive folders.
+ * Uses the backend API to ensure root and shared folders are never touched.
+ */
+export const deleteEventWithDriveFolders = async (
+  eventId: string,
+  deleteDriveFolders: boolean = true,
+  options?: {
+    approvedFolderId?: string;
+    pendingFolderId?: string;
+    eventTitle?: string;
+  }
+): Promise<{ success: boolean; eventId: string; deletedFolders?: any; message?: string }> => {
+  const resp = await fetch(apiUrl('/api/drive/events/delete-event'), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-admin-role': 'super_admin'
+    },
+    credentials: 'include',
+    body: JSON.stringify({
+      eventId,
+      deleteDriveFolders,
+      approvedFolderId: options?.approvedFolderId,
+      pendingFolderId: options?.pendingFolderId,
+      confirmationTitle: options?.eventTitle
+    })
+  });
+
+  const resJson = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    throw new Error(resJson.error || 'Failed to delete event and Drive folders');
+  }
+
+  return resJson;
+};
+
+

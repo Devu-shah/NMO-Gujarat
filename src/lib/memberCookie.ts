@@ -82,18 +82,12 @@ export const isFilenameMatchingMembershipId = (
 
   if (base === targetId) return true;
 
-  // Delimited prefix formats (e.g. 9521_EVT, 9521-EVT, 9521 EVT, 9521(1))
-  // Strict requirement: "9521" must NEVER match "95210_EVT" or "95210.jpg"
-  if (
-    base.startsWith(`${targetId}_`) ||
-    base.startsWith(`${targetId}-`) ||
-    base.startsWith(`${targetId} `) ||
-    base.startsWith(`${targetId}(`)
-  ) {
-    return true;
-  }
-
-  return false;
+  // Delimited prefix, suffix, and token formats (e.g. 9521_EVT, EVT_9521, 9521-EVT, 9521 (1))
+  // Strict requirement: "9521" must match "9521.pdf", "9521_CME.pdf", "EVT_9521.pdf"
+  // but NEVER match "95210.pdf" or "19521.pdf"
+  const escaped = targetId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const tokenRegex = new RegExp(`(?:^|[_\\s\\-(])${escaped}(?:[_\\s\\-().]|$)`, 'i');
+  return tokenRegex.test(base);
 };
 
 /**
@@ -150,6 +144,15 @@ export const extractMembershipIdFromFilename = (
       }
     }
 
+    // Check candidate suffix: e.g. EVENT_9521
+    const suffixMatch = base.match(/(?:^|[_ \-(])(NMO-[A-Z0-9-]+|\d+)$/i);
+    if (suffixMatch && suffixMatch[1]) {
+      const candidate = suffixMatch[1].toUpperCase();
+      if (hasId(candidate)) {
+        return candidate;
+      }
+    }
+
     // 1c. Scan known IDs (supporting arbitrary custom format IDs), sorted longest first
     const idList = knownMembershipIds instanceof Set || knownMembershipIds instanceof Map
       ? Array.from(knownMembershipIds.keys())
@@ -173,6 +176,10 @@ export const extractMembershipIdFromFilename = (
   const match = base.match(/^(NMO-[A-Z0-9-]+|\d+)(?:[_ \-(]|$)/i);
   if (match && match[1]) {
     return match[1].toUpperCase();
+  }
+  const suffix = base.match(/(?:^|[_ \-(])(NMO-[A-Z0-9-]+|\d+)$/i);
+  if (suffix && suffix[1]) {
+    return suffix[1].toUpperCase();
   }
 
   return null;

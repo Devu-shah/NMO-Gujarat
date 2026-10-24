@@ -36,6 +36,7 @@ import {
 import {
   createEventSubfolderInDrive,
   ensureEventDriveFolders,
+  deleteEventWithDriveFolders,
   getDriveAccessToken
 } from '../lib/googleDrive';
 import { setMemberIdCookie, clearMemberIdCookie } from '../lib/memberCookie';
@@ -118,7 +119,7 @@ interface NMOContextType {
   eventRegistrations: any[]; // Computed compatibility view
   addEvent: (eventData: Omit<NMOEvent, 'eventId' | 'createdAt' | 'updatedAt' | 'participants'>) => Promise<string>;
   updateEvent: (event: NMOEvent) => Promise<void>;
-  deleteEvent: (eventId: string) => Promise<void>;
+  deleteEvent: (eventId: string, options?: { deleteDriveFolders?: boolean; confirmationTitle?: string }) => Promise<void>;
   createEventDriveSubfolder: (eventId: string, eventTitle: string, existingFolderId?: string) => Promise<{ id: string; name: string; webViewLink?: string } | null>;
   toggleEventDynamicField: (eventId: string, isDynamic: boolean, fieldName?: string, fieldType?: string) => Promise<void>;
 
@@ -1815,19 +1816,35 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     await logAudit('EVENT_UPDATE', 'EVENT', event.eventId, `Updated event: "${event.title}"`);
   };
 
-  const deleteEvent = async (eventId: string) => {
+  const deleteEvent = async (
+    eventId: string,
+    options?: { deleteDriveFolders?: boolean; confirmationTitle?: string }
+  ) => {
     const target = events.find((e) => e.eventId === eventId);
     setEvents((prev) => prev.filter((e) => e.eventId !== eventId));
 
     try {
-      await deleteDoc(doc(db, 'Events', eventId));
-    } catch {}
+      await deleteEventWithDriveFolders(
+        eventId,
+        options?.deleteDriveFolders !== false,
+        {
+          approvedFolderId: target?.driveFolderId,
+          pendingFolderId: target?.pendingDriveFolderId,
+          eventTitle: target?.title || options?.confirmationTitle
+        }
+      );
+    } catch (driveErr) {
+      console.warn('[Event Deletion] Google Drive folder cleanup notice:', driveErr);
+      try {
+        await deleteDoc(doc(db, 'Events', eventId));
+      } catch {}
+    }
 
     await logAudit(
       'EVENT_DELETE',
       'EVENT',
       eventId,
-      `Deleted event: "${target?.title || eventId}"`
+      `Deleted event: "${target?.title || eventId}" (Drive cleanup: ${options?.deleteDriveFolders !== false ? 'performed' : 'skipped'})`
     );
   };
 

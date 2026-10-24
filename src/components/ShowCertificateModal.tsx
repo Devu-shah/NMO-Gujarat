@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useNMO } from '../context/NMOContext';
 import {
   fetchCertificatesByMembershipNumber,
@@ -9,6 +9,7 @@ import {
   getCertificateEventName
 } from '../lib/googleDrive';
 import { setMemberIdCookie, isCertificateMatchingCookie } from '../lib/memberCookie';
+import { apiUrl } from '../lib/api';
 import {
   Award,
   X,
@@ -100,7 +101,10 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
     if (!currentCert) return;
     setIsDownloading(true);
     try {
-      await downloadDriveCertificate(currentCert.id, currentCert.name);
+      const proxyDownloadUrl = currentCert.proxyDownloadUrl
+        ? (currentCert.proxyDownloadUrl.startsWith('http') ? currentCert.proxyDownloadUrl : apiUrl(currentCert.proxyDownloadUrl))
+        : undefined;
+      await downloadDriveCertificate(currentCert.id, currentCert.name, targetMemberNo, proxyDownloadUrl);
     } catch (err: any) {
       alert(err.message || 'Could not download certificate.');
     } finally {
@@ -119,9 +123,17 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
         currentCert.name.toLowerCase().endsWith('.pdf'))
   );
 
-  const previewSource = currentCert
-    ? currentCert.proxyViewUrl || getDriveDirectImageUrl(currentCert.id, currentCert.thumbnailLink)
-    : '';
+  const previewSource = useMemo(() => {
+    if (!currentCert) return '';
+    const cleanMem = encodeURIComponent(targetMemberNo);
+    let url = currentCert.proxyViewUrl || '';
+    if (!url) {
+      url = `/api/drive/file/${currentCert.id}?memberId=${cleanMem}`;
+    }
+    const fullUrl = url.startsWith('http') ? url : apiUrl(url);
+    const sep = fullUrl.includes('?') ? '&' : '?';
+    return fullUrl.includes('memberId=') ? fullUrl : `${fullUrl}${sep}memberId=${cleanMem}`;
+  }, [currentCert, targetMemberNo]);
 
   const imageUrl = previewSource;
 

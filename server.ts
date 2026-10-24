@@ -1994,15 +1994,37 @@ Recipient:        ${RECIPIENT_EMAIL}
     return { isAdmin: false };
   }
 
+  function createCertificateAccessToken(fileId: string, membershipNumber: string): string {
+    const payload = `${fileId}:${membershipNumber.toUpperCase().trim()}`;
+    return crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex');
+  }
+
+  function verifyCertificateAccessToken(fileId: string, membershipNumber: string, token: string): boolean {
+    try {
+      if (!fileId || !membershipNumber || !token) return false;
+      const expected = createCertificateAccessToken(fileId, membershipNumber);
+      return crypto.timingSafeEqual(Buffer.from(token), Buffer.from(expected));
+    } catch {
+      return false;
+    }
+  }
+
   function getRequesterMemberId(req: express.Request): string | null {
-    // Check header x-member-id
+    // 1. Check query parameters: memberId, membershipNumber, m
+    const queryMem = req.query?.memberId || req.query?.membershipNumber || req.query?.m;
+    if (queryMem && typeof queryMem === 'string') {
+      const clean = queryMem.trim().toUpperCase();
+      if (clean) return clean;
+    }
+
+    // 2. Check header x-member-id
     const headerMem = req.headers['x-member-id'] || req.headers['X-Member-Id'];
     if (headerMem && typeof headerMem === 'string') {
       const clean = headerMem.trim().toUpperCase();
       if (clean) return clean;
     }
 
-    // Check cookie nmo_member_id
+    // 3. Check cookie nmo_member_id
     if (req.cookies && req.cookies['nmo_member_id']) {
       const clean = String(req.cookies['nmo_member_id']).trim().toUpperCase();
       if (clean) return clean;
@@ -2387,18 +2409,12 @@ Recipient:        ${RECIPIENT_EMAIL}
 
     if (base === targetId) return true;
 
-    // Delimited prefix formats (e.g. 001_EVT-A, 001-CME, 001 (1))
-    // Strict requirement: "001" must NEVER match "0012.pdf"
-    if (
-      base.startsWith(`${targetId}_`) ||
-      base.startsWith(`${targetId}-`) ||
-      base.startsWith(`${targetId} `) ||
-      base.startsWith(`${targetId}(`)
-    ) {
-      return true;
-    }
-
-    return false;
+    // Delimited prefix, suffix, and token formats (e.g. 9521_EVT, EVT_9521, 9521-EVT, 9521 (1))
+    // Strict requirement: "9521" must match "9521.pdf", "9521_CME.pdf", "EVT_9521.pdf"
+    // but NEVER match "95210.pdf" or "19521.pdf"
+    const escaped = targetId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const tokenRegex = new RegExp(`(?:^|[_\\s\\-(])${escaped}(?:[_\\s\\-().]|$)`, 'i');
+    return tokenRegex.test(base);
   }
 
   /**
@@ -2454,6 +2470,15 @@ Recipient:        ${RECIPIENT_EMAIL}
         }
       }
 
+      // Check candidate suffix: e.g. EVENT_9521
+      const suffixMatch = base.match(/(?:^|[_ \-(])(NMO-[A-Z0-9-]+|\d+)$/i);
+      if (suffixMatch && suffixMatch[1]) {
+        const candidate = suffixMatch[1].toUpperCase();
+        if (hasId(candidate)) {
+          return candidate;
+        }
+      }
+
       // 1c. Scan known IDs sorted longest first
       const idList = knownMembershipIds instanceof Set || knownMembershipIds instanceof Map
         ? Array.from(knownMembershipIds.keys())
@@ -2473,6 +2498,10 @@ Recipient:        ${RECIPIENT_EMAIL}
     const match = base.match(/^(NMO-[A-Z0-9-]+|\d+)(?:[_ \-(]|$)/i);
     if (match && match[1]) {
       return match[1].toUpperCase();
+    }
+    const suffix = base.match(/(?:^|[_ \-(])(NMO-[A-Z0-9-]+|\d+)$/i);
+    if (suffix && suffix[1]) {
+      return suffix[1].toUpperCase();
     }
 
     return null;
@@ -3520,6 +3549,123 @@ Recipient:        ${RECIPIENT_EMAIL}
   });
 
   /**
+   * POST /api/drive/events/delete-event
+   * Safely deletes an event and optionally cleans up its associated Google Drive folders.
+   * Enforces strict safety guardrails: ROOT_DRIVE_FOLDER_ID, pending root, and events root
+   * are never deleted or trashed.
+   */
+  app.post('/api/drive/events/delete-event', async (req, res) => {
+    try {
+      const authResult = await verifyAdminAuthorization(req);
+      if (!authResult.authorized) {
+        return res.status(403).json({ error: 'Unauthorized: Administrator access required.' });
+      }
+
+      const { eventId, deleteDriveFolders, confirmationTitle } = req.body;
+      if (!eventId || typeof eventId !== 'string') {
+        return res.status(400).json({ error: 'Event ID is required' });
+      }
+
+      const adminDb = getAdminFirestore();
+      let eventDocData: any = null;
+      if (adminDb) {
+        const docSnap = await adminDb.collection('Events').doc(eventId).get();
+        if (docSnap.exists) {
+          eventDocData = docSnap.data();
+        }
+      }
+
+      const token = await getValidServerDriveToken();
+      const protectedFolderIds = new Set<string>([ROOT_DRIVE_FOLDER_ID]);
+
+      if (token) {
+        const hierarchy = await resolveDriveHierarchy(token).catch(() => null);
+        if (hierarchy?.eventsFolder?.id) {
+          protectedFolderIds.add(hierarchy.eventsFolder.id);
+        }
+        const pendingRoot = await getOrCreatePendingRootFolder(token).catch(() => null);
+        if (pendingRoot?.id) {
+          protectedFolderIds.add(pendingRoot.id);
+        }
+      }
+
+      const approvedFolderId = eventDocData?.driveFolderId || req.body.approvedFolderId;
+      const pendingFolderId = eventDocData?.pendingDriveFolderId || req.body.pendingFolderId;
+      const eventTitle = eventDocData?.title || confirmationTitle || eventId;
+
+      const deletedFolders: { approved?: string | null; pending?: string | null } = {};
+      const errors: string[] = [];
+
+      if (deleteDriveFolders && token) {
+        // Guardrail: NEVER delete protected root folders
+        if (approvedFolderId) {
+          if (protectedFolderIds.has(approvedFolderId)) {
+            console.warn(`[Safe Delete] Prevented deletion of protected folder: ${approvedFolderId}`);
+            errors.push('Cannot delete protected root/events folder');
+          } else {
+            try {
+              const trashResp = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(approvedFolderId)}?fields=id,trashed`, {
+                method: 'PATCH',
+                headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ trashed: true })
+              });
+              if (trashResp.ok) {
+                deletedFolders.approved = approvedFolderId;
+              } else {
+                const errTxt = await trashResp.text().catch(() => '');
+                errors.push(`Approved folder trash failed: ${errTxt}`);
+              }
+            } catch (e: any) {
+              errors.push(`Approved folder error: ${e.message}`);
+            }
+          }
+        }
+
+        if (pendingFolderId) {
+          if (protectedFolderIds.has(pendingFolderId)) {
+            console.warn(`[Safe Delete] Prevented deletion of protected pending root: ${pendingFolderId}`);
+            errors.push('Cannot delete protected pending root folder');
+          } else {
+            try {
+              const trashResp = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(pendingFolderId)}?fields=id,trashed`, {
+                method: 'PATCH',
+                headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ trashed: true })
+              });
+              if (trashResp.ok) {
+                deletedFolders.pending = pendingFolderId;
+              } else {
+                const errTxt = await trashResp.text().catch(() => '');
+                errors.push(`Pending folder trash failed: ${errTxt}`);
+              }
+            } catch (e: any) {
+              errors.push(`Pending folder error: ${e.message}`);
+            }
+          }
+        }
+      }
+
+      // Delete from Firestore
+      if (adminDb) {
+        await adminDb.collection('Events').doc(eventId).delete().catch(() => {});
+      }
+
+      return res.json({
+        success: true,
+        eventId,
+        eventTitle,
+        deletedFolders,
+        driveCleanupPerformed: Boolean(deleteDriveFolders),
+        errors: errors.length > 0 ? errors : undefined,
+        message: `Event "${eventTitle}" deleted successfully.`
+      });
+    } catch (err: any) {
+      console.error('[Delete Event API] Error deleting event:', err);
+      return res.status(500).json({ error: err.message || 'Internal server error deleting event' });
+    }
+  });
+
+  /**
    * POST /api/drive/create-folder
    * Creates a subfolder in Google Drive securely server-side.
    * Defaults to the "Events" folder if parent is not specified or points to root.
@@ -4261,6 +4407,7 @@ Recipient:        ${RECIPIENT_EMAIL}
             (!isStructuralDriveFolder(folderMeta.driveFolderName) ? folderMeta.driveFolderName : undefined) ||
             (!isStructuralDriveFolder(f.properties?.eventTitle) ? f.properties?.eventTitle : undefined);
 
+          const certToken = createCertificateAccessToken(f.id, cleanMemNo);
           return {
             id: f.id,
             name: f.name,
@@ -4280,8 +4427,8 @@ Recipient:        ${RECIPIENT_EMAIL}
             approvalStatus: f.properties?.approvalStatus || (f.properties?.uploadSource === 'user' ? 'pending' : 'not_required'),
             uploadSource: f.properties?.uploadSource || (f.properties?.uploadedBy === 'member' ? 'user' : 'admin'),
             uploadedBy: f.properties?.uploadedBy || (f.properties?.uploadSource === 'user' ? 'member' : 'admin'),
-            proxyViewUrl: `/api/drive/file/${f.id}`,
-            proxyDownloadUrl: `/api/drive/file/${f.id}?download=true`
+            proxyViewUrl: `/api/drive/file/${f.id}?memberId=${encodeURIComponent(cleanMemNo)}&token=${certToken}`,
+            proxyDownloadUrl: `/api/drive/file/${f.id}?download=true&memberId=${encodeURIComponent(cleanMemNo)}&token=${certToken}`
           };
         })
       );
@@ -4333,16 +4480,73 @@ Recipient:        ${RECIPIENT_EMAIL}
       const adminIdentity = getRequesterAdminIdentity(req);
       if (!adminIdentity.isAdmin) {
         const requesterMemberId = getRequesterMemberId(req);
-        const fileMemNo = (meta.properties?.membershipNumber || '').trim().toUpperCase();
+        const fileMemNo = (meta.properties?.membershipNumber || meta.properties?.membershipId || '').trim().toUpperCase();
+        const queryToken = typeof req.query.token === 'string' ? req.query.token : '';
 
-        const isOwner = Boolean(
+        const tokenValid = Boolean(
+          queryToken && requesterMemberId && verifyCertificateAccessToken(fileId, requesterMemberId, queryToken)
+        );
+
+        let isOwner = Boolean(
           requesterMemberId && (
+            tokenValid ||
             (fileMemNo && fileMemNo === requesterMemberId) ||
-            isFilenameMatchingMembershipId(meta.name, requesterMemberId)
+            isFilenameMatchingMembershipId(meta.name, requesterMemberId, meta.properties)
           )
         );
 
+        // Firestore fallback check: verify if document in Certificates collection links this file to member
+        if (!isOwner && requesterMemberId) {
+          try {
+            const adminDb = getAdminFirestore();
+            if (adminDb) {
+              const [docCap, docLow] = await Promise.all([
+                adminDb.collection('Certificates').doc(fileId).get().catch(() => null),
+                adminDb.collection('certificates').doc(fileId).get().catch(() => null)
+              ]);
+              const fsData = docCap?.data() || docLow?.data();
+              if (fsData) {
+                const fsMem = (fsData.membershipNumber || fsData.membershipId || '').trim().toUpperCase();
+                if (fsMem && fsMem === requesterMemberId) {
+                  isOwner = true;
+                }
+              }
+            }
+          } catch (e) {
+            console.warn('[File Proxy Auth] Firestore lookup notice:', e);
+          }
+        }
+
         if (!isOwner) {
+          const acceptsHtml = req.accepts && req.accepts('html') && !req.xhr && !req.accepts('json');
+          if (acceptsHtml) {
+            return res.status(403).send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Access Restricted — NMO Gujarat Certificate Portal</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #090d16; color: #f1f5f9; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 24px; box-sizing: border-box; }
+    .card { background: #131b2e; border: 1px solid #1e293b; border-radius: 24px; padding: 40px 32px; max-width: 480px; text-align: center; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.7); }
+    .badge { display: inline-block; padding: 6px 14px; background: rgba(239, 68, 68, 0.15); color: #f87171; border-radius: 9999px; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 20px; }
+    h1 { font-size: 22px; font-weight: 900; color: #ffffff; margin: 0 0 12px; }
+    p { font-size: 14px; line-height: 1.6; color: #94a3b8; margin: 0 0 24px; }
+    .btn { display: inline-flex; align-items: center; justify-content: center; padding: 12px 28px; background: #b91c1c; color: #ffffff; text-decoration: none; border-radius: 14px; font-weight: 700; font-size: 14px; transition: background 0.2s; }
+    .btn:hover { background: #dc2626; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="badge">Security Policy</div>
+    <h1>Certificate Access Restricted</h1>
+    <p>You can only access official certificates tagged with your verified Membership ID. Please sign in to your Member Dashboard to view and download your certificates.</p>
+    <a href="/" class="btn">Return to Member Dashboard</a>
+  </div>
+</body>
+</html>`);
+          }
+
           return res.status(403).json({
             error: 'forbidden',
             message: 'Access denied: You are only authorized to access your own certificates.'
@@ -4350,7 +4554,28 @@ Recipient:        ${RECIPIENT_EMAIL}
         }
 
         // Check approval status: regular users can only download approved certificates
-        const approvalStatus = meta.properties?.approvalStatus || (meta.properties?.uploadSource === 'user' ? 'pending' : 'not_required');
+        let approvalStatus = meta.properties?.approvalStatus || (meta.properties?.uploadSource === 'user' ? 'pending' : 'not_required');
+        if (meta.name && meta.name.startsWith('PENDING_')) {
+          approvalStatus = 'pending';
+        }
+
+        // Check Firestore approval if Drive properties are still pending
+        if (approvalStatus === 'pending' || approvalStatus === 'pending_approval') {
+          try {
+            const adminDb = getAdminFirestore();
+            if (adminDb) {
+              const [docCap, docLow] = await Promise.all([
+                adminDb.collection('Certificates').doc(fileId).get().catch(() => null),
+                adminDb.collection('certificates').doc(fileId).get().catch(() => null)
+              ]);
+              const fsData = docCap?.data() || docLow?.data();
+              if (fsData && fsData.approvalStatus === 'approved') {
+                approvalStatus = 'approved';
+              }
+            }
+          } catch (e) {}
+        }
+
         if (approvalStatus === 'pending' || approvalStatus === 'pending_approval') {
           return res.status(403).json({
             error: 'pending_approval',

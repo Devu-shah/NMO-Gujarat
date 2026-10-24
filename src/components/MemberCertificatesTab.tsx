@@ -157,7 +157,10 @@ export const MemberCertificatesTab: React.FC = () => {
   const handleDownload = async (cert: DriveCertificateFile) => {
     setDownloadingId(cert.id);
     try {
-      await downloadDriveCertificate(cert.id, cert.name);
+      const proxyDownloadUrl = cert.proxyDownloadUrl
+        ? (cert.proxyDownloadUrl.startsWith('http') ? cert.proxyDownloadUrl : apiUrl(cert.proxyDownloadUrl))
+        : undefined;
+      await downloadDriveCertificate(cert.id, cert.name, memberNo, proxyDownloadUrl);
     } catch (err: any) {
       alert(err.message || 'Failed to download certificate from Google Drive.');
     } finally {
@@ -460,7 +463,11 @@ export const MemberCertificatesTab: React.FC = () => {
                         {!isPending && !isRejected && (
                           <>
                             <a
-                              href={apiUrl(`/api/drive/file/${cert.id}`)}
+                              href={
+                                cert.proxyViewUrl
+                                  ? (cert.proxyViewUrl.startsWith('http') ? cert.proxyViewUrl : apiUrl(cert.proxyViewUrl))
+                                  : apiUrl(`/api/drive/file/${cert.id}?memberId=${encodeURIComponent(memberNo)}`)
+                              }
                               target="_blank"
                               rel="noreferrer"
                               className="p-2 text-slate-600 hover:text-slate-900 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
