@@ -1364,7 +1364,7 @@ export const AdminEventsManager: React.FC<AdminEventsManagerProps> = ({
               </div>
             </div>
 
-            <label className="flex items-start gap-2.5 p-3 rounded-xl border border-slate-200 bg-slate-50 cursor-pointer mb-5 text-xs select-none">
+            <label className="flex items-start gap-2.5 p-3 rounded-xl border border-red-200 bg-red-50/50 cursor-pointer mb-5 text-xs select-none">
               <input
                 type="checkbox"
                 checked={deleteDriveFoldersChecked}
@@ -1372,11 +1372,11 @@ export const AdminEventsManager: React.FC<AdminEventsManagerProps> = ({
                 className="mt-0.5 rounded text-red-600 focus:ring-red-500 h-4 w-4"
               />
               <div>
-                <span className="font-bold text-slate-800 block">
-                  Also move associated Google Drive folders to Trash
+                <span className="font-bold text-slate-900 block">
+                  Delete associated Google Drive folders in both root/Events and root/pending
                 </span>
-                <span className="text-[11px] text-slate-500 block mt-0.5">
-                  Trash the specific event folders in Drive. Central root and parent directories are strictly protected and will never be deleted.
+                <span className="text-[11px] text-slate-600 block mt-0.5">
+                  Permanently moves the event folders in Google Drive (under both <code className="bg-white px-1 py-0.5 rounded border font-mono">Events/{eventToDelete.title}</code> and <code className="bg-white px-1 py-0.5 rounded border font-mono">pending/{eventToDelete.title}</code>) to Trash. Structural root folders are strictly protected.
                 </span>
               </div>
             </label>

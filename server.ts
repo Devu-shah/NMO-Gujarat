@@ -4129,61 +4129,115 @@ Recipient:        ${RECIPIENT_EMAIL}
 
       const approvedFolderId = eventDocData?.driveFolderId || req.body.approvedFolderId;
       const pendingFolderId = eventDocData?.pendingDriveFolderId || req.body.pendingFolderId;
-      const eventTitle = eventDocData?.title || confirmationTitle || eventId;
+      const eventTitle = (eventDocData?.title || confirmationTitle || req.body.eventTitle || eventId || '').trim();
 
-      const deletedFolders: { approved?: string | null; pending?: string | null } = {};
+      const deletedFolders: { approved?: string | null; pending?: string | null; allDeleted?: string[] } = { allDeleted: [] };
       const errors: string[] = [];
 
       if (deleteDriveFolders && token) {
-        // Guardrail: NEVER delete protected root folders
-        if (approvedFolderId) {
-          if (protectedFolderIds.has(approvedFolderId)) {
-            console.warn(`[Safe Delete] Prevented deletion of protected folder: ${approvedFolderId}`);
-            errors.push('Cannot delete protected root/events folder');
-          } else {
-            try {
-              const trashResp = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(approvedFolderId)}?fields=id,trashed`, {
+        const foldersToTrash = new Map<string, { id: string; name: string; type: 'approved' | 'pending' }>();
+
+        // 1. Add explicitly known folder IDs
+        if (approvedFolderId && !protectedFolderIds.has(approvedFolderId)) {
+          foldersToTrash.set(approvedFolderId, { id: approvedFolderId, name: eventTitle, type: 'approved' });
+        }
+        if (pendingFolderId && !protectedFolderIds.has(pendingFolderId)) {
+          foldersToTrash.set(pendingFolderId, { id: pendingFolderId, name: eventTitle, type: 'pending' });
+        }
+
+        // 2. Proactively search under Events subfolder and Root for folders matching eventTitle or eventId
+        try {
+          const hierarchy = await resolveDriveHierarchy(token).catch(() => null);
+          const searchParentIds = [ROOT_DRIVE_FOLDER_ID];
+          if (hierarchy?.eventsFolder?.id && hierarchy.eventsFolder.id !== ROOT_DRIVE_FOLDER_ID) {
+            searchParentIds.push(hierarchy.eventsFolder.id);
+          }
+
+          for (const parentId of searchParentIds) {
+            const query = `'${parentId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+            const qResp = await fetch(
+              `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=files(id,name,properties)&pageSize=100`,
+              { headers: { Authorization: `Bearer ${token}` } }
+            );
+            if (qResp.ok) {
+              const qData = await qResp.json();
+              const list: any[] = qData.files || [];
+              for (const f of list) {
+                if (protectedFolderIds.has(f.id)) continue;
+                const fName = (f.name || '').trim().toLowerCase();
+                const isMatch = (eventTitle && fName === eventTitle.toLowerCase()) || (f.properties?.eventId && f.properties.eventId === eventId);
+                if (isMatch) {
+                  foldersToTrash.set(f.id, { id: f.id, name: f.name, type: 'approved' });
+                }
+              }
+            }
+          }
+        } catch (sErr: any) {
+          console.warn('[Delete Event] Search for approved folders notice:', sErr?.message);
+        }
+
+        // 3. Proactively search under "pending" root folder for folders matching eventTitle or eventId
+        try {
+          const pendingRoot = await getOrCreatePendingRootFolder(token).catch(() => null);
+          if (pendingRoot?.id) {
+            const pQuery = `'${pendingRoot.id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+            const pResp = await fetch(
+              `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(pQuery)}&fields=files(id,name,properties)&pageSize=100`,
+              { headers: { Authorization: `Bearer ${token}` } }
+            );
+            if (pResp.ok) {
+              const pData = await pResp.json();
+              const pList: any[] = pData.files || [];
+              for (const pf of pList) {
+                if (protectedFolderIds.has(pf.id)) continue;
+                const pfName = (pf.name || '').trim().toLowerCase();
+                const isMatch = (eventTitle && pfName === eventTitle.toLowerCase()) || (pf.properties?.eventId && pf.properties.eventId === eventId);
+                if (isMatch) {
+                  foldersToTrash.set(pf.id, { id: pf.id, name: pf.name, type: 'pending' });
+                }
+              }
+            }
+          }
+        } catch (pErr: any) {
+          console.warn('[Delete Event] Search for pending folders notice:', pErr?.message);
+        }
+
+        // 4. Trash all discovered matching event folders in both root/events and root/pending
+        for (const [fId, info] of foldersToTrash.entries()) {
+          if (protectedFolderIds.has(fId)) {
+            console.warn(`[Safe Delete] Strictly blocked deletion of protected root folder: ${fId} (${info.name})`);
+            continue;
+          }
+          try {
+            console.log(`[Delete Event] Trashing Google Drive ${info.type} folder: "${info.name}" (${fId})...`);
+            const trashResp = await fetch(
+              `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fId)}?fields=id,trashed`,
+              {
                 method: 'PATCH',
                 headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
                 body: JSON.stringify({ trashed: true })
-              });
-              if (trashResp.ok) {
-                deletedFolders.approved = approvedFolderId;
-              } else {
-                const errTxt = await trashResp.text().catch(() => '');
-                errors.push(`Approved folder trash failed: ${errTxt}`);
               }
-            } catch (e: any) {
-              errors.push(`Approved folder error: ${e.message}`);
+            );
+            if (trashResp.ok) {
+              if (info.type === 'approved' && !deletedFolders.approved) deletedFolders.approved = fId;
+              if (info.type === 'pending' && !deletedFolders.pending) deletedFolders.pending = fId;
+              deletedFolders.allDeleted?.push(fId);
+              console.log(`[Delete Event] Successfully trashed folder "${info.name}" (${fId}) from Google Drive.`);
+            } else {
+              const errTxt = await trashResp.text().catch(() => '');
+              errors.push(`Failed to trash ${info.type} folder (${fId}): ${errTxt}`);
             }
+          } catch (tErr: any) {
+            errors.push(`Folder trash error (${fId}): ${tErr.message}`);
           }
         }
 
-        if (pendingFolderId) {
-          if (protectedFolderIds.has(pendingFolderId)) {
-            console.warn(`[Safe Delete] Prevented deletion of protected pending root: ${pendingFolderId}`);
-            errors.push('Cannot delete protected pending root folder');
-          } else {
-            try {
-              const trashResp = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(pendingFolderId)}?fields=id,trashed`, {
-                method: 'PATCH',
-                headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ trashed: true })
-              });
-              if (trashResp.ok) {
-                deletedFolders.pending = pendingFolderId;
-              } else {
-                const errTxt = await trashResp.text().catch(() => '');
-                errors.push(`Pending folder trash failed: ${errTxt}`);
-              }
-            } catch (e: any) {
-              errors.push(`Pending folder error: ${e.message}`);
-            }
-          }
+        if (foldersToTrash.size > 0) {
+          invalidateDiscoveredFoldersCache();
         }
       }
 
-      // Delete from Firestore
+      // Delete event document from Firestore
       if (adminDb) {
         await adminDb.collection('Events').doc(eventId).delete().catch(() => {});
       }
@@ -4195,11 +4249,107 @@ Recipient:        ${RECIPIENT_EMAIL}
         deletedFolders,
         driveCleanupPerformed: Boolean(deleteDriveFolders),
         errors: errors.length > 0 ? errors : undefined,
-        message: `Event "${eventTitle}" deleted successfully.`
+        message: `Event "${eventTitle}" and its Google Drive folders in root/events and root/pending were deleted successfully.`
       });
     } catch (err: any) {
       console.error('[Delete Event API] Error deleting event:', err);
       return res.status(500).json({ error: err.message || 'Internal server error deleting event' });
+    }
+  });
+
+  /**
+   * POST /api/drive/user/delete-certificate
+   * Allows members to delete certificates they uploaded (e.g. pending submissions or rejected submissions).
+   * Strictly protects admin-issued official certificates from deletion by members.
+   */
+  app.post('/api/drive/user/delete-certificate', async (req, res) => {
+    try {
+      const { driveFileId, certId, membershipNumber } = req.body;
+      const fileId = driveFileId || certId;
+      if (!fileId) {
+        return res.status(400).json({ error: 'driveFileId or certId is required' });
+      }
+
+      const requesterMemberId = (membershipNumber || getRequesterMemberId(req) || '').trim().toUpperCase();
+
+      const adminDb = getAdminFirestore();
+      let certDocData: any = null;
+      let matchedDocId: string | null = null;
+
+      if (adminDb) {
+        const [d1, d2, d3, d4] = await Promise.all([
+          certId ? adminDb.collection('Certificates').doc(certId).get().catch(() => null) : null,
+          certId ? adminDb.collection('certificates').doc(certId).get().catch(() => null) : null,
+          fileId ? adminDb.collection('Certificates').doc(fileId).get().catch(() => null) : null,
+          fileId ? adminDb.collection('certificates').doc(fileId).get().catch(() => null) : null
+        ]);
+        const found = (d1 && d1.exists) ? d1 : ((d2 && d2.exists) ? d2 : ((d3 && d3.exists) ? d3 : ((d4 && d4.exists) ? d4 : null)));
+        if (found && found.exists) {
+          certDocData = found.data();
+          matchedDocId = found.id;
+        }
+      }
+
+      // Check if this certificate is admin-issued: admin-issued cannot be deleted by users!
+      if (certDocData) {
+        const isUserSubmission =
+          certDocData.uploadSource === 'user' ||
+          certDocData.uploadedBy === 'member' ||
+          certDocData.approvalStatus === 'pending' ||
+          certDocData.approvalStatus === 'pending_approval' ||
+          certDocData.approvalStatus === 'rejected' ||
+          certDocData.status === 'pending' ||
+          certDocData.status === 'rejected';
+
+        if (!isUserSubmission && certDocData.uploadSource === 'admin') {
+          return res.status(403).json({
+            error: 'Permission denied: Official administrator-issued certificates cannot be deleted by members.'
+          });
+        }
+
+        const docMember = (certDocData.membershipNumber || certDocData.membershipId || '').trim().toUpperCase();
+        if (requesterMemberId && docMember && docMember !== requesterMemberId) {
+          return res.status(403).json({
+            error: 'Permission denied: You can only delete your own certificate submissions.'
+          });
+        }
+      }
+
+      // Delete file from Google Drive
+      const token = await getValidServerDriveToken();
+      if (token && fileId) {
+        try {
+          console.log(`[User Delete Cert] Deleting file ${fileId} from Google Drive...`);
+          await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`, {
+            method: 'DELETE',
+            headers: { Authorization: `Bearer ${token}` }
+          });
+        } catch (dErr: any) {
+          console.warn('[User Delete Cert] Drive delete notice:', dErr?.message);
+        }
+      }
+
+      // Remove from Firestore
+      if (adminDb) {
+        const idsToRemove = new Set<string>();
+        if (fileId) idsToRemove.add(fileId);
+        if (certId) idsToRemove.add(certId);
+        if (matchedDocId) idsToRemove.add(matchedDocId);
+        for (const id of idsToRemove) {
+          await Promise.all([
+            adminDb.collection('Certificates').doc(id).delete().catch(() => {}),
+            adminDb.collection('certificates').doc(id).delete().catch(() => {})
+          ]);
+        }
+      }
+
+      return res.json({
+        success: true,
+        message: 'Your certificate submission has been deleted successfully.'
+      });
+    } catch (err: any) {
+      console.error('[User Delete Cert] Error:', err);
+      return res.status(500).json({ error: err.message || 'Internal server error deleting certificate' });
     }
   });
 

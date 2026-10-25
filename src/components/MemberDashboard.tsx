@@ -309,7 +309,10 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
             </button>
             <button
               type="button"
-              onClick={() => setIsShowCertModalOpen(true)}
+              onClick={() => {
+                setCertModalEvent({});
+                setIsShowCertModalOpen(true);
+              }}
               className="px-3 py-2 bg-blue-700 hover:bg-blue-800 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-xs cursor-pointer"
               title="Show my certificates from Google Drive"
             >
@@ -1151,7 +1154,10 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
                                 </button>
                                 <button
                                   type="button"
-                                  onClick={() => setIsShowCertModalOpen(true)}
+                                  onClick={() => {
+                                    setCertModalEvent({ id: r.eventId, title: evt?.title });
+                                    setIsShowCertModalOpen(true);
+                                  }}
                                   className="px-2.5 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded text-xs font-semibold inline-flex items-center gap-1 transition-colors cursor-pointer"
                                   title="Show my certificates from Google Drive"
                                 >
@@ -1492,8 +1498,20 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
       {/* Show Certificate Modal (Calls Membership ID) */}
       <ShowCertificateModal
         isOpen={isShowCertModalOpen}
-        onClose={() => setIsShowCertModalOpen(false)}
-        onOpenUpload={() => setIsUploadModalOpen(true)}
+        onClose={() => {
+          setIsShowCertModalOpen(false);
+          setCertModalEvent({});
+        }}
+        membershipNumber={currentMember?.membershipNumber || currentUser?.membershipNumber}
+        memberName={currentMember?.name || currentUser?.name}
+        selectedEventId={certModalEvent.id}
+        selectedEventTitle={certModalEvent.title}
+        onOpenUpload={(eventInfo) => {
+          if (eventInfo) {
+            setCertModalEvent({ id: eventInfo.eventId, title: eventInfo.eventTitle });
+          }
+          setIsUploadModalOpen(true);
+        }}
       />
     </div>
   );

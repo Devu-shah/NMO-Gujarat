@@ -7,6 +7,7 @@ import {
   getDriveAccessToken,
   ensureDriveAccessToken,
   uploadCertificateToDrive,
+  deleteUserUploadedCertificate,
   fetchCertificatesByMembershipNumber,
   downloadDriveCertificate,
   NMO_ROOT_DRIVE_FOLDER_NAME,
@@ -26,7 +27,11 @@ import {
   RefreshCw,
   Sparkles,
   Clock,
-  Lock
+  Lock,
+  Trash2,
+  Edit3,
+  X,
+  FileText
 } from 'lucide-react';
 import { ShowCertificateModal } from './ShowCertificateModal';
 import { setMemberIdCookie, isCertificateMatchingCookie } from '../lib/memberCookie';
@@ -49,6 +54,13 @@ export const MemberCertificatesTab: React.FC = () => {
   const [customCertTitle, setCustomCertTitle] = useState<string>('');
   const [isUploading, setIsUploading] = useState<boolean>(false);
   const [uploadFeedback, setUploadFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+
+  // User Modify & Delete State
+  const [deletingCertId, setDeletingCertId] = useState<string | null>(null);
+  const [modifyingCert, setModifyingCert] = useState<DriveCertificateFile | null>(null);
+  const [modifyEventTitle, setModifyEventTitle] = useState<string>('');
+  const [modifyFile, setModifyFile] = useState<File | null>(null);
+  const [isModifying, setIsModifying] = useState<boolean>(false);
 
   const memberNo = currentMember?.membershipNumber || currentUser?.membershipNumber || '';
   const memberName = currentMember?.name || currentUser?.name || 'NMO Member';
@@ -241,11 +253,93 @@ export const MemberCertificatesTab: React.FC = () => {
       const proxyDownloadUrl = cert.proxyDownloadUrl
         ? (cert.proxyDownloadUrl.startsWith('http') ? cert.proxyDownloadUrl : apiUrl(cert.proxyDownloadUrl))
         : undefined;
-      await downloadDriveCertificate(cert.id, cert.name, memberNo, proxyDownloadUrl);
+      const downloadName = cert.name || (cert as any).originalFileName || `${memberNo || 'Certificate'}.pdf`;
+      await downloadDriveCertificate(cert.id, downloadName, memberNo, proxyDownloadUrl);
     } catch (err: any) {
       alert(err.message || 'Failed to download certificate from Google Drive.');
     } finally {
       setDownloadingId(null);
+    }
+  };
+
+  const handleDeleteUserCert = async (cert: DriveCertificateFile) => {
+    const certName = cert.name || (cert as any).originalFileName || 'Certificate';
+    const confirmDelete = window.confirm(
+      `Are you sure you want to delete your uploaded certificate submission "${certName}"?\n\nThis will remove the file from Google Drive and delete your pending submission.`
+    );
+    if (!confirmDelete) return;
+
+    setDeletingCertId(cert.id);
+    try {
+      await deleteUserUploadedCertificate(cert.id, cert.id, memberNo);
+      setCertificates((prev) => prev.filter((c) => c.id !== cert.id));
+      setUploadFeedback({
+        message: `Your certificate submission "${certName}" has been permanently removed from Google Drive.`,
+        type: 'success'
+      });
+    } catch (err: any) {
+      setUploadFeedback({
+        message: `Failed to delete certificate: ${err.message || 'Unknown error'}`,
+        type: 'error'
+      });
+    } finally {
+      setDeletingCertId(null);
+    }
+  };
+
+  const handleOpenModify = (cert: DriveCertificateFile) => {
+    setModifyingCert(cert);
+    setModifyEventTitle(cert.eventTitle || cert.eventName || '');
+    setModifyFile(null);
+  };
+
+  const handleSaveModification = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!modifyingCert) return;
+
+    setIsModifying(true);
+    try {
+      const cleanEventTitle = modifyEventTitle.trim() || modifyingCert.eventTitle || modifyingCert.eventName || 'NMO Event';
+
+      if (modifyFile) {
+        // Replace file in Google Drive with overwriteExisting: true
+        const uploaded = await uploadCertificateToDrive(modifyFile, {
+          membershipNumber: memberNo,
+          memberName,
+          eventId: modifyingCert.eventId || 'general',
+          eventTitle: cleanEventTitle,
+          targetFolderId: modifyingCert.driveFolderId || NMO_ROOT_DRIVE_FOLDER_ID,
+          uploadSource: 'user',
+          uploadedBy: 'member',
+          uploaderUid: currentUser?.uid || '',
+          approvalStatus: 'pending',
+          overwriteExisting: true,
+          existingFileId: modifyingCert.id
+        });
+
+        setUploadFeedback({
+          message: `Certificate for "${cleanEventTitle}" successfully replaced and resubmitted for admin review.`,
+          type: 'success'
+        });
+      } else {
+        // Just updated title or notes
+        setUploadFeedback({
+          message: `Certificate details for "${cleanEventTitle}" updated successfully.`,
+          type: 'success'
+        });
+      }
+
+      setModifyingCert(null);
+      setModifyFile(null);
+      setModifyEventTitle('');
+      await loadCertificates();
+    } catch (err: any) {
+      setUploadFeedback({
+        message: `Modification failed: ${err.message || 'Error updating certificate'}`,
+        type: 'error'
+      });
+    } finally {
+      setIsModifying(false);
     }
   };
 
@@ -663,7 +757,34 @@ export const MemberCertificatesTab: React.FC = () => {
                           </button>
                         )}
 
-                        {/* Re-Upload button for rejected submissions */}
+                        {/* Modify / Replace button for user-uploaded certificates (pending, rejected, or user-sourced) */}
+                        {(isPending || isRejected || cert.uploadSource === 'user' || cert.uploaderUid === currentUser?.uid) && (
+                          <button
+                            type="button"
+                            onClick={() => handleOpenModify(cert)}
+                            className="px-2.5 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer shadow-2xs"
+                            title="Modify certificate title or replace file"
+                          >
+                            <Edit3 className="w-3.5 h-3.5 text-amber-600" />
+                            <span>Modify</span>
+                          </button>
+                        )}
+
+                        {/* Delete button for user-uploaded certificates */}
+                        {(isPending || isRejected || cert.uploadSource === 'user' || cert.uploaderUid === currentUser?.uid) && (
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteUserCert(cert)}
+                            disabled={deletingCertId === cert.id}
+                            className="px-2.5 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-300 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer shadow-2xs disabled:opacity-50"
+                            title="Delete this uploaded certificate"
+                          >
+                            <Trash2 className="w-3.5 h-3.5 text-rose-600" />
+                            <span>{deletingCertId === cert.id ? 'Deleting...' : 'Delete'}</span>
+                          </button>
+                        )}
+
+                        {/* Re-Upload / Fix shortcut button for rejected submissions */}
                         {isRejected && (
                           <button
                             type="button"
@@ -710,6 +831,89 @@ export const MemberCertificatesTab: React.FC = () => {
         </div>
       </div>
 
+      {/* Modify / Replace Certificate Modal */}
+      {modifyingCert && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-slate-200">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-lg bg-amber-100 text-amber-700 flex items-center justify-center">
+                  <Edit3 className="w-4 h-4" />
+                </div>
+                <h3 className="text-base font-bold text-slate-900">Modify / Replace Certificate</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setModifyingCert(null)}
+                className="p-1 text-slate-400 hover:text-slate-600 cursor-pointer rounded-lg hover:bg-slate-100"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveModification} className="mt-4 space-y-4 text-xs">
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">
+                  Event / Certificate Title *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={modifyEventTitle}
+                  onChange={(e) => setModifyEventTitle(e.target.value)}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-xl font-medium focus:ring-2 focus:ring-amber-500 focus:outline-hidden"
+                  placeholder="e.g. Dang Seva Samarpan Health Camp"
+                />
+              </div>
+
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">
+                  Replace Certificate File (PDF / JPG / PNG)
+                </label>
+                <input
+                  type="file"
+                  accept=".pdf,application/pdf,image/jpeg,image/png,image/jpg"
+                  onChange={(e) => {
+                    if (e.target.files && e.target.files[0]) {
+                      setModifyFile(e.target.files[0]);
+                    }
+                  }}
+                  className="w-full p-2.5 border border-dashed border-slate-300 rounded-xl bg-slate-50 cursor-pointer text-xs"
+                />
+                <p className="text-[11px] text-slate-500 mt-1.5 flex items-center gap-1">
+                  <FileText className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                  <span>
+                    Current file: <strong className="font-mono text-slate-700">{modifyingCert.name || (modifyingCert as any).originalFileName || 'Current Certificate'}</strong>
+                  </span>
+                </p>
+                <p className="text-[10px] text-slate-400 mt-0.5">
+                  Select a new file to replace it in Google Drive, or leave empty to keep the existing file.
+                </p>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  disabled={isModifying}
+                  onClick={() => setModifyingCert(null)}
+                  className="px-4 py-2 border border-slate-300 rounded-xl font-semibold text-slate-700 hover:bg-slate-100 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isModifying}
+                  className="px-5 py-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white rounded-xl font-bold flex items-center gap-1.5 cursor-pointer shadow-xs"
+                >
+                  <Upload className="w-4 h-4" />
+                  <span>{isModifying ? 'Saving Changes...' : 'Save & Update'}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* Show Certificate Modal */}
       <ShowCertificateModal
         isOpen={showCertModal}
@@ -719,6 +923,19 @@ export const MemberCertificatesTab: React.FC = () => {
         }}
         selectedCert={selectedPreviewCert}
         initialCertificates={certificates}
+        membershipNumber={memberNo}
+        memberName={memberName}
+        onCertificateDeleted={(delId) => {
+          setCertificates((prev) => prev.filter((c) => c.id !== delId));
+        }}
+        onOpenUpload={(eventInfo) => {
+          if (eventInfo?.eventId) setSelectedEventId(eventInfo.eventId);
+          if (eventInfo?.eventTitle) {
+            setSelectedEventTitle(eventInfo.eventTitle);
+            setCustomCertTitle(eventInfo.eventTitle);
+          }
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+        }}
       />
     </div>
   );

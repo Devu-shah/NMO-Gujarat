@@ -2147,4 +2147,48 @@ export const deleteEventWithDriveFolders = async (
   return resJson;
 };
 
+/**
+ * Allows a member to delete their own uploaded certificate submission.
+ * Calls backend API to safely delete the file from Google Drive and Firestore.
+ */
+export const deleteUserUploadedCertificate = async (
+  driveFileId: string,
+  certId?: string,
+  membershipNumber?: string
+): Promise<{ success: boolean; message?: string }> => {
+  const resp = await fetch(apiUrl('/api/drive/user/delete-certificate'), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    credentials: 'include',
+    body: JSON.stringify({
+      driveFileId,
+      certId: certId || driveFileId,
+      membershipNumber
+    })
+  });
+
+  const resJson = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    throw new Error(resJson.error || resJson.message || 'Failed to delete certificate submission');
+  }
+
+  // Also purge from client-side Firestore cache if present
+  try {
+    const idToDelete = certId || driveFileId;
+    await Promise.all([
+      deleteDoc(doc(db, 'Certificates', idToDelete)).catch(() => {}),
+      deleteDoc(doc(db, 'certificates', idToDelete)).catch(() => {}),
+      deleteDoc(doc(db, 'Certificates', driveFileId)).catch(() => {}),
+      deleteDoc(doc(db, 'certificates', driveFileId)).catch(() => {})
+    ]);
+  } catch (err) {
+    console.debug('Client Firestore cache deletion notice:', err);
+  }
+
+  return { success: true, message: resJson.message };
+};
+
+
 
