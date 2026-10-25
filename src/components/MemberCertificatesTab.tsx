@@ -1,4 +1,6 @@
 import React, { useState, useEffect } from 'react';
+import { collection, query, where, onSnapshot } from 'firebase/firestore';
+import { db } from '../lib/firebase';
 import { useNMO } from '../context/NMOContext';
 import {
   connectGoogleDrive,
@@ -23,7 +25,8 @@ import {
   FileCheck,
   RefreshCw,
   Sparkles,
-  Clock
+  Clock,
+  Lock
 } from 'lucide-react';
 import { ShowCertificateModal } from './ShowCertificateModal';
 import { setMemberIdCookie, isCertificateMatchingCookie } from '../lib/memberCookie';
@@ -37,6 +40,7 @@ export const MemberCertificatesTab: React.FC = () => {
   const [isLoadingCerts, setIsLoadingCerts] = useState<boolean>(false);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [showCertModal, setShowCertModal] = useState<boolean>(false);
+  const [selectedPreviewCert, setSelectedPreviewCert] = useState<DriveCertificateFile | null>(null);
 
   // Upload Form State
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -72,11 +76,33 @@ export const MemberCertificatesTab: React.FC = () => {
     return true;
   });
 
-  // Load certificates on mount or when memberNo changes
+  // Load certificates on mount or when memberNo changes with real-time Firestore sync
   useEffect(() => {
-    if (memberNo) {
-      loadCertificates();
+    if (!memberNo) return;
+    loadCertificates();
+
+    // Listen to real-time changes in Certificates so admin approvals/rejections reflect instantly
+    let unsubscribe1: (() => void) | undefined;
+    let unsubscribe2: (() => void) | undefined;
+
+    try {
+      const q1 = query(collection(db, 'Certificates'), where('membershipNumber', '==', memberNo));
+      unsubscribe1 = onSnapshot(q1, () => {
+        loadCertificates();
+      });
+
+      const q2 = query(collection(db, 'certificates'), where('membershipNumber', '==', memberNo));
+      unsubscribe2 = onSnapshot(q2, () => {
+        loadCertificates();
+      });
+    } catch (e) {
+      console.warn('Real-time certificate sync notice:', e);
     }
+
+    return () => {
+      if (unsubscribe1) unsubscribe1();
+      if (unsubscribe2) unsubscribe2();
+    };
   }, [memberNo]);
 
   const loadCertificates = async () => {
@@ -123,6 +149,14 @@ export const MemberCertificatesTab: React.FC = () => {
 
     // Determine target subfolder if event has one
     const matchedEvent = events.find((ev) => ev.eventId === selectedEventId);
+    if (matchedEvent && matchedEvent.certificateUploadMode === 'admin') {
+      setUploadFeedback({
+        message: `Certificates for "${matchedEvent.title}" are uploaded exclusively by administrators. Member upload is disabled for this event; please wait for the administrator to issue and upload your certificate.`,
+        type: 'error'
+      });
+      return;
+    }
+
     const targetFolderId = matchedEvent?.driveFolderId || NMO_ROOT_DRIVE_FOLDER_ID;
     const eventTitle = customCertTitle.trim() || matchedEvent?.title || selectedEventTitle || 'NMO Participation Certificate';
 
@@ -344,11 +378,28 @@ export const MemberCertificatesTab: React.FC = () => {
                   <option value="">-- Choose Event or Workshop --</option>
                   {events.map((evt) => (
                     <option key={evt.eventId} value={evt.eventId}>
-                      {evt.title} ({evt.city}) {evt.driveFolderId ? '📁' : ''}
+                      {evt.title} ({evt.city}) {evt.certificateUploadMode === 'admin' ? '🔒 [Admin-Issued Only]' : '📤 [Member Upload]'}
                     </option>
                   ))}
                 </select>
               </div>
+
+              {/* Notice if event is configured as Admin Upload Only */}
+              {selectedEventId && events.find((ev) => ev.eventId === selectedEventId)?.certificateUploadMode === 'admin' && (
+                <div className="p-4 bg-purple-50 border border-purple-200 rounded-2xl text-purple-950 space-y-2 text-xs animate-in fade-in duration-200 shadow-xs">
+                  <div className="flex items-center gap-2 font-bold text-purple-900">
+                    <Lock className="w-4 h-4 text-purple-700" />
+                    <span>Admin-Issued Certificates Only</span>
+                  </div>
+                  <p className="text-[11px] text-purple-800 leading-relaxed">
+                    Certificates for <strong>"{events.find((ev) => ev.eventId === selectedEventId)?.title}"</strong> are uploaded directly by NMO Gujarat administrators. Participants cannot self-upload certificates for this event.
+                  </p>
+                  <div className="p-2.5 bg-white/80 rounded-xl border border-purple-200 text-[11px] text-purple-900 font-medium flex items-center gap-2">
+                    <Clock className="w-3.5 h-3.5 text-purple-600 shrink-0" />
+                    <span>Please wait for the administrator to issue and upload your certificate to Google Drive.</span>
+                  </div>
+                </div>
+              )}
 
               {/* Custom Title */}
               <div>
@@ -358,19 +409,29 @@ export const MemberCertificatesTab: React.FC = () => {
                 <input
                   type="text"
                   value={customCertTitle}
+                  disabled={Boolean(selectedEventId && events.find((ev) => ev.eventId === selectedEventId)?.certificateUploadMode === 'admin')}
                   onChange={(e) => setCustomCertTitle(e.target.value)}
                   placeholder="e.g. State CME Delegate Participation Certificate"
-                  className="w-full px-3 py-2 border border-slate-300 rounded-xl"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-xl disabled:bg-slate-100 disabled:text-slate-400"
                 />
               </div>
 
               <div className="pt-2">
                 <button
                   type="submit"
-                  disabled={isUploading || !selectedFile}
+                  disabled={
+                    isUploading ||
+                    !selectedFile ||
+                    Boolean(selectedEventId && events.find((ev) => ev.eventId === selectedEventId)?.certificateUploadMode === 'admin')
+                  }
                   className="w-full py-2.5 px-4 bg-red-700 hover:bg-red-800 disabled:bg-slate-300 text-white font-bold rounded-xl transition-all shadow-xs flex items-center justify-center gap-2 cursor-pointer"
                 >
-                  {isUploading ? (
+                  {Boolean(selectedEventId && events.find((ev) => ev.eventId === selectedEventId)?.certificateUploadMode === 'admin') ? (
+                    <>
+                      <Lock className="w-4 h-4" />
+                      <span>Awaiting Administrator Upload</span>
+                    </>
+                  ) : isUploading ? (
                     <>
                       <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
                       <span>Uploading to Google Drive...</span>
@@ -576,16 +637,18 @@ export const MemberCertificatesTab: React.FC = () => {
 
                       <div className="flex flex-wrap items-center gap-2 shrink-0">
                         {/* Universal Preview button for all certificates (approved, pending, and rejected) */}
-                        <a
-                          href={previewLink}
-                          target="_blank"
-                          rel="noreferrer"
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedPreviewCert(cert);
+                            setShowCertModal(true);
+                          }}
                           className="px-2.5 py-1.5 text-slate-700 bg-white border border-slate-300 hover:bg-slate-100 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer shadow-2xs"
-                          title="Preview certificate file"
+                          title="Preview certificate in official viewer"
                         >
-                          <Eye className="w-3.5 h-3.5" />
+                          <Eye className="w-3.5 h-3.5 text-slate-600" />
                           <span>Preview</span>
-                        </a>
+                        </button>
 
                         {/* Download button for approved and official certificates */}
                         {(isApproved || isAdminIssued) && (
@@ -650,7 +713,12 @@ export const MemberCertificatesTab: React.FC = () => {
       {/* Show Certificate Modal */}
       <ShowCertificateModal
         isOpen={showCertModal}
-        onClose={() => setShowCertModal(false)}
+        onClose={() => {
+          setShowCertModal(false);
+          setSelectedPreviewCert(null);
+        }}
+        selectedCert={selectedPreviewCert}
+        initialCertificates={certificates}
       />
     </div>
   );

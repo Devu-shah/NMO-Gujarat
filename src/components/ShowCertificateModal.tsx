@@ -33,6 +33,8 @@ interface ShowCertificateModalProps {
   membershipNumber?: string;
   memberName?: string;
   onOpenUpload?: () => void;
+  selectedCert?: DriveCertificateFile | null;
+  initialCertificates?: DriveCertificateFile[];
 }
 
 export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
@@ -40,20 +42,23 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
   onClose,
   membershipNumber,
   memberName,
-  onOpenUpload
+  onOpenUpload,
+  selectedCert,
+  initialCertificates
 }) => {
   const { currentMember, currentUser } = useNMO();
 
   const targetMemberNo = (
     membershipNumber ||
+    selectedCert?.membershipNumber ||
     currentMember?.membershipNumber ||
     currentUser?.membershipNumber ||
     ''
   ).trim().toUpperCase();
 
-  const displayName = memberName || currentMember?.name || currentUser?.name || 'NMO Member';
+  const displayName = memberName || selectedCert?.memberName || currentMember?.name || currentUser?.name || 'NMO Member';
 
-  const [certificates, setCertificates] = useState<DriveCertificateFile[]>([]);
+  const [certificates, setCertificates] = useState<DriveCertificateFile[]>(initialCertificates || (selectedCert ? [selectedCert] : []));
   const [selectedIndex, setSelectedIndex] = useState<number>(0);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isDownloading, setIsDownloading] = useState<boolean>(false);
@@ -62,10 +67,23 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
   const [isFullScreen, setIsFullScreen] = useState<boolean>(false);
 
   useEffect(() => {
-    if (isOpen && targetMemberNo) {
-      loadMemberCertificates();
+    if (isOpen) {
+      if (initialCertificates && initialCertificates.length > 0) {
+        setCertificates(initialCertificates);
+        if (selectedCert) {
+          const idx = initialCertificates.findIndex((c) => c.id === selectedCert.id);
+          setSelectedIndex(idx >= 0 ? idx : 0);
+        } else {
+          setSelectedIndex(0);
+        }
+      } else if (selectedCert) {
+        setCertificates([selectedCert]);
+        setSelectedIndex(0);
+      } else if (targetMemberNo) {
+        loadMemberCertificates();
+      }
     }
-  }, [isOpen, targetMemberNo]);
+  }, [isOpen, targetMemberNo, selectedCert, initialCertificates]);
 
   const loadMemberCertificates = async () => {
     if (!targetMemberNo) return;
@@ -80,7 +98,12 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
       // Filter certificates that belong to this member
       const memberCerts = results.filter((c) => isCertificateMatchingCookie(c, targetMemberNo));
       setCertificates(memberCerts);
-      setSelectedIndex(0);
+      if (selectedCert) {
+        const foundIdx = memberCerts.findIndex((c) => c.id === selectedCert.id);
+        setSelectedIndex(foundIdx >= 0 ? foundIdx : 0);
+      } else {
+        setSelectedIndex(0);
+      }
     } catch (err) {
       console.warn('Error fetching member certificates for modal:', err);
     } finally {
@@ -338,22 +361,24 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
                         />
                       </div>
                     ) : imageError ? (
-                      <div className="text-center p-8 text-slate-300 space-y-3">
-                        <AlertCircle className="w-10 h-10 text-amber-400 mx-auto" />
-                        <p className="text-xs text-slate-300">
-                          Direct image preview is unavailable in browser sandbox. You can preview directly in Google Drive or download below.
-                        </p>
-                        {currentCert.webViewLink && (
+                      <div className="w-full flex flex-col items-center justify-center p-2">
+                        <iframe
+                          src={`https://drive.google.com/file/d/${currentCert.id}/preview`}
+                          title={`Certificate for ${targetMemberNo}`}
+                          className="w-full h-[400px] rounded-xl border border-slate-700 bg-white"
+                          onLoad={() => setImageLoaded(true)}
+                        />
+                        <div className="mt-3 flex items-center justify-center gap-3">
                           <a
-                            href={currentCert.webViewLink}
+                            href={currentCert.webViewLink || `https://drive.google.com/file/d/${currentCert.id}/view`}
                             target="_blank"
                             rel="noreferrer"
-                            className="inline-flex items-center gap-1.5 px-4 py-2 bg-white text-slate-900 rounded-xl text-xs font-bold hover:bg-slate-100"
+                            className="inline-flex items-center gap-1.5 px-4 py-2 bg-white text-slate-900 rounded-xl text-xs font-bold hover:bg-slate-100 transition-colors shadow-xs"
                           >
                             <ExternalLink className="w-4 h-4" />
-                            <span>Open in Google Drive</span>
+                            <span>Open in Google Drive ↗</span>
                           </a>
-                        )}
+                        </div>
                       </div>
                     ) : (
                       /* Main Certificate High-Res Image */

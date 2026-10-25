@@ -35,7 +35,8 @@ import {
   Copy,
   ExternalLink,
   FolderOpen,
-  ShieldAlert
+  ShieldAlert,
+  Award
 } from 'lucide-react';
 import {
   connectGoogleDrive,
@@ -259,7 +260,8 @@ export const AdminEventsManager: React.FC<AdminEventsManagerProps> = ({
     participants: [],
     isDynamicMemberField: true,
     fieldDisplayName: '',
-    fieldType: 'Attended/Not Attended'
+    fieldType: 'Attended/Not Attended',
+    certificateUploadMode: 'admin'
   };
 
   const handleSave = async (e: React.FormEvent) => {
@@ -426,9 +428,20 @@ export const AdminEventsManager: React.FC<AdminEventsManagerProps> = ({
                 >
                   {evt.prant} Prant
                 </span>
-                <span className="text-[11px] font-semibold text-slate-600 bg-slate-100 px-2 py-0.5 rounded">
-                  {evt.status}
-                </span>
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {evt.certificateUploadMode === 'admin' ? (
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-purple-100 text-purple-800 border border-purple-200" title="Only Admins can issue/upload certificates for this event">
+                      Admin-Issued
+                    </span>
+                  ) : (
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-100 text-amber-800 border border-amber-200" title="Members can submit certificates for approval">
+                      Member Uploads
+                    </span>
+                  )}
+                  <span className="text-[11px] font-semibold text-slate-600 bg-slate-100 px-2 py-0.5 rounded">
+                    {evt.status}
+                  </span>
+                </div>
               </div>
 
               <div>
@@ -736,6 +749,71 @@ export const AdminEventsManager: React.FC<AdminEventsManagerProps> = ({
                     onChange={(e) => setEditingEvent({ ...editingEvent, registrationEnd: e.target.value })}
                     className="w-full px-3 py-2 border border-slate-300 rounded-lg"
                   />
+                </div>
+              </div>
+
+              {/* Certificate Upload Mode: Admins vs Users */}
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
+                <div className="flex items-center gap-2">
+                  <Award className="w-4 h-4 text-red-700" />
+                  <span className="font-bold text-slate-900 text-xs">
+                    Certificate Upload & Issuance Method *
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-500 leading-relaxed">
+                  Specify who will upload certificates for this event. When set to <strong>Uploaded by Admins Only</strong>, participants cannot upload certificates and will be instructed to wait for the administration team.
+                </p>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                  <label
+                    className={`flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition-all ${
+                      editingEvent.certificateUploadMode === 'admin' || !editingEvent.certificateUploadMode
+                        ? 'border-red-600 bg-red-50/60 shadow-xs ring-1 ring-red-600'
+                        : 'border-slate-200 bg-white hover:bg-slate-100/60'
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="certificateUploadMode"
+                      value="admin"
+                      checked={editingEvent.certificateUploadMode === 'admin' || !editingEvent.certificateUploadMode}
+                      onChange={() => setEditingEvent({ ...editingEvent, certificateUploadMode: 'admin' })}
+                      className="mt-0.5 text-red-700 focus:ring-red-600 cursor-pointer"
+                    />
+                    <div className="space-y-0.5">
+                      <span className="font-bold text-slate-900 text-xs block">
+                        Uploaded by Admins Only
+                      </span>
+                      <span className="text-[11px] text-slate-600 block leading-normal">
+                        Admins issue official certificates. Participants cannot upload and must wait for admin upload.
+                      </span>
+                    </div>
+                  </label>
+
+                  <label
+                    className={`flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition-all ${
+                      editingEvent.certificateUploadMode === 'user'
+                        ? 'border-red-600 bg-red-50/60 shadow-xs ring-1 ring-red-600'
+                        : 'border-slate-200 bg-white hover:bg-slate-100/60'
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="certificateUploadMode"
+                      value="user"
+                      checked={editingEvent.certificateUploadMode === 'user'}
+                      onChange={() => setEditingEvent({ ...editingEvent, certificateUploadMode: 'user' })}
+                      className="mt-0.5 text-red-700 focus:ring-red-600 cursor-pointer"
+                    />
+                    <div className="space-y-0.5">
+                      <span className="font-bold text-slate-900 text-xs block">
+                        Uploaded by Users / Members
+                      </span>
+                      <span className="text-[11px] text-slate-600 block leading-normal">
+                        Participants upload their certificates. Submissions enter the admin review queue for approval.
+                      </span>
+                    </div>
+                  </label>
                 </div>
               </div>
 

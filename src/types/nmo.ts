@@ -141,6 +141,11 @@ export interface NMOEvent {
   isDynamicMemberField?: boolean;
   fieldDisplayName?: string;
   fieldType?: string;
+
+  // Certificate Upload Authorization Mode:
+  // 'admin' = Uploaded by administrators only (members cannot upload and are told to wait)
+  // 'user'  = Members can upload certificates for review
+  certificateUploadMode?: 'admin' | 'user';
 }
 
 export interface NMOEventRegistration extends EventParticipant {

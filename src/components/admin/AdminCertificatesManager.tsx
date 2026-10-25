@@ -35,6 +35,8 @@ import {
   rejectAndDeleteCertificate,
   deleteDriveCertificate,
   reconcileAllEventDriveFolders,
+  migrateLegacyEventFolders,
+  migratePendingCertificatesToEvents,
   isDriveConnected
 } from '../../lib/googleDrive';
 import { apiUrl } from '../../lib/api';
@@ -69,7 +71,8 @@ import {
   Filter,
   ArrowRight
 } from 'lucide-react';
-import { auth, firebaseConfig } from '../../lib/firebase';
+import { auth, db, firebaseConfig } from '../../lib/firebase';
+import { collection, onSnapshot } from 'firebase/firestore';
 import { DriveIntegrationGuideModal, GuideTab } from './DriveIntegrationGuideModal';
 import { BulkCertificateUploadModal } from './BulkCertificateUploadModal';
 import { NMOEvent, NMOMember } from '../../types/nmo';
@@ -157,6 +160,9 @@ export const AdminCertificatesManager: React.FC = () => {
   const [processingPendingId, setProcessingPendingId] = useState<string | null>(null);
   const [rejectModalCert, setRejectModalCert] = useState<DriveCertificateFile | null>(null);
   const [rejectionReasonText, setRejectionReasonText] = useState<string>('');
+  const [selectedPreviewCert, setSelectedPreviewCert] = useState<DriveCertificateFile | null>(null);
+  const [isMigratingFolders, setIsMigratingFolders] = useState<boolean>(false);
+  const [isMigratingPending, setIsMigratingPending] = useState<boolean>(false);
 
   // Delete Certificate Confirmation Modal State
   const [deleteModalCert, setDeleteModalCert] = useState<{
@@ -265,6 +271,25 @@ export const AdminCertificatesManager: React.FC = () => {
     };
 
     initDrive();
+
+    // Listen to real-time changes in Certificates so admin approvals/rejections update immediately
+    let unsub1: (() => void) | undefined;
+    let unsub2: (() => void) | undefined;
+    try {
+      unsub1 = onSnapshot(collection(db, 'Certificates'), () => {
+        loadPendingCertificates();
+      });
+      unsub2 = onSnapshot(collection(db, 'certificates'), () => {
+        loadPendingCertificates();
+      });
+    } catch (e) {
+      console.warn('Real-time admin certificates listener notice:', e);
+    }
+
+    return () => {
+      if (unsub1) unsub1();
+      if (unsub2) unsub2();
+    };
   }, []);
 
   // Dynamically discover all event folders inside "NMO Gujarat → Events" with full pagination
@@ -425,6 +450,73 @@ export const AdminCertificatesManager: React.FC = () => {
       });
     } finally {
       setIsReconcilingFolders(false);
+    }
+  };
+
+  const handleMigrateFolders = async () => {
+    setIsMigratingFolders(true);
+    try {
+      const res = await migrateLegacyEventFolders();
+      setFeedback({
+        message: res.message || `Migrated ${res.migratedCount} legacy folders into "Events" successfully!`,
+        type: 'success'
+      });
+      await loadDiscoveredFolders(true);
+      if (selectedEvent) {
+        const result = await resolveEventDriveFolder(
+          selectedEvent.eventId,
+          selectedEvent.title,
+          selectedEvent.driveFolderId
+        );
+        if (result.success && result.eventFolder) {
+          setEventFolderInfo({
+            resolved: true,
+            folder: result.eventFolder,
+            eventsFolder: result.eventsFolder
+          });
+          await loadEventFolderFiles(result.eventFolder.id);
+        }
+      }
+    } catch (err: any) {
+      setFeedback({
+        message: err.message || 'Failed to migrate legacy folders.',
+        type: 'error'
+      });
+    } finally {
+      setIsMigratingFolders(false);
+    }
+  };
+
+  const handleMigratePendingToEvents = async () => {
+    if (
+      !window.confirm(
+        'Migrate all certificates from "root/pending/{event name}" into "root/Events/{event name}"?\n\nThis will safely move all certificate files into their respective event folders under Events, strip pending prefixes, and record them as Approved in Google Drive and database.'
+      )
+    ) {
+      return;
+    }
+
+    setIsMigratingPending(true);
+    try {
+      const res = await migratePendingCertificatesToEvents();
+      setFeedback({
+        message:
+          res.message ||
+          `Successfully migrated ${res.totalCertificatesMigrated} certificates from "pending" into "Events"!`,
+        type: 'success'
+      });
+      await loadPendingCertificates();
+      await loadDiscoveredFolders(true);
+      if (selectedEvent && eventFolderInfo.folder) {
+        await loadEventFolderFiles(eventFolderInfo.folder.id);
+      }
+    } catch (err: any) {
+      setFeedback({
+        message: err.message || 'Failed to migrate pending certificates to Events.',
+        type: 'error'
+      });
+    } finally {
+      setIsMigratingPending(false);
     }
   };
 
@@ -1236,6 +1328,28 @@ export const AdminCertificatesManager: React.FC = () => {
 
             <button
               type="button"
+              onClick={handleMigrateFolders}
+              disabled={isMigratingFolders}
+              className="px-3.5 py-2 bg-purple-50 hover:bg-purple-100 text-purple-900 border border-purple-300 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs disabled:opacity-50"
+              title="Migrate legacy event folders sitting directly in Root 'NMO Gujarat' into 'NMO Gujarat -> Events'"
+            >
+              <FolderPlus className={`w-4 h-4 text-purple-700 ${isMigratingFolders ? 'animate-spin' : ''}`} />
+              <span>{isMigratingFolders ? 'Migrating...' : 'Migrate Legacy Folders'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleMigratePendingToEvents}
+              disabled={isMigratingPending}
+              className="px-3.5 py-2 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs disabled:opacity-50"
+              title="Migrate all certificates from 'pending/{event name}' into 'Events/{event name}'"
+            >
+              <ArrowRight className={`w-4 h-4 text-amber-700 ${isMigratingPending ? 'animate-pulse' : ''}`} />
+              <span>{isMigratingPending ? 'Migrating Pending...' : 'Migrate Pending → Events'}</span>
+            </button>
+
+            <button
+              type="button"
               onClick={() => {
                 setGuideInitialTab('manual_token');
                 setShowGuideModal(true);
@@ -1831,15 +1945,14 @@ export const AdminCertificatesManager: React.FC = () => {
                                     {row.files.length > 1 && (
                                       <span className="text-[10px] text-slate-400 font-mono mr-1">#{idx + 1}</span>
                                     )}
-                                    <a
-                                      href={getAdminPreviewUrl(file.id)}
-                                      target="_blank"
-                                      rel="noreferrer"
+                                    <button
+                                      type="button"
+                                      onClick={() => setSelectedPreviewCert(file)}
                                       className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
                                       title={`Preview ${file.name}`}
                                     >
                                       <Eye className="w-4 h-4" />
-                                    </a>
+                                    </button>
                                     <button
                                       type="button"
                                       onClick={() => handleDownload(file)}
@@ -1924,15 +2037,14 @@ export const AdminCertificatesManager: React.FC = () => {
                         </td>
                         <td className="p-3 text-right">
                           <div className="flex items-center justify-end gap-1.5">
-                            <a
-                              href={getAdminPreviewUrl(file.id)}
-                              target="_blank"
-                              rel="noreferrer"
+                            <button
+                              type="button"
+                              onClick={() => setSelectedPreviewCert(file)}
                               className="p-1.5 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
                               title="Preview file"
                             >
                               <Eye className="w-4 h-4" />
-                            </a>
+                            </button>
                             <button
                               type="button"
                               onClick={() => handleDownload(file)}
@@ -2085,7 +2197,35 @@ export const AdminCertificatesManager: React.FC = () => {
                     </p>
                   </div>
                 ) : (
-                  <div className="overflow-x-auto bg-white rounded-2xl border border-slate-200">
+                  <div className="space-y-4">
+                    <div className="p-4 bg-gradient-to-r from-amber-50 to-orange-50 border border-amber-200 rounded-2xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-2xs">
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-8 h-8 rounded-xl bg-amber-100 text-amber-800 flex items-center justify-center font-bold shrink-0">
+                          <Clock className="w-4 h-4 text-amber-700" />
+                        </div>
+                        <div>
+                          <div className="font-bold text-slate-900 text-xs">
+                            {scopedPendingCertificates.length} Pending Member Submission{scopedPendingCertificates.length > 1 ? 's' : ''} in Queue
+                          </div>
+                          <div className="text-[11px] text-slate-600">
+                            Review individually below or batch migrate all pending submissions directly into their respective event folders inside <strong className="text-slate-800">Events</strong>.
+                          </div>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={handleMigratePendingToEvents}
+                        disabled={isMigratingPending}
+                        className="px-4 py-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 transition-colors shadow-xs shrink-0 cursor-pointer"
+                        title="Migrate all pending certificates to their respective event folders in Events"
+                      >
+                        <ArrowRight className={`w-3.5 h-3.5 ${isMigratingPending ? 'animate-pulse' : ''}`} />
+                        <span>{isMigratingPending ? 'Migrating Pending...' : 'Migrate All Pending → Events'}</span>
+                      </button>
+                    </div>
+
+                    <div className="overflow-x-auto bg-white rounded-2xl border border-slate-200">
                     <table className="w-full text-left text-xs min-w-[850px] border-collapse">
                       <thead className="bg-amber-50/80 text-amber-950 font-bold border-b border-amber-200">
                         <tr>
@@ -2143,16 +2283,15 @@ export const AdminCertificatesManager: React.FC = () => {
                               <td className="p-3.5 text-right whitespace-nowrap">
                                 <div className="flex items-center justify-end gap-2">
                                   {/* Preview */}
-                                  <a
-                                    href={getAdminPreviewUrl(cert.id)}
-                                    target="_blank"
-                                    rel="noreferrer"
+                                  <button
+                                    type="button"
+                                    onClick={() => setSelectedPreviewCert(cert)}
                                     className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
-                                    title="Preview certificate file directly via secure stream"
+                                    title="Preview certificate file in-app"
                                   >
                                     <Eye className="w-3.5 h-3.5" />
                                     <span>Preview</span>
-                                  </a>
+                                  </button>
 
                                   {/* Approve Button */}
                                   <button
@@ -2205,7 +2344,8 @@ export const AdminCertificatesManager: React.FC = () => {
                       </tbody>
                     </table>
                   </div>
-                )}
+                </div>
+              )}
               </div>
             )}
 
@@ -2272,16 +2412,15 @@ export const AdminCertificatesManager: React.FC = () => {
                               <td className="p-3.5 text-right whitespace-nowrap">
                                 <div className="flex items-center justify-end gap-2">
                                   {/* Preview */}
-                                  <a
-                                    href={getAdminPreviewUrl(cert.id)}
-                                    target="_blank"
-                                    rel="noreferrer"
+                                  <button
+                                    type="button"
+                                    onClick={() => setSelectedPreviewCert(cert)}
                                     className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
-                                    title="Preview certificate file directly"
+                                    title="Preview certificate file in-app"
                                   >
                                     <Eye className="w-3.5 h-3.5" />
                                     <span>Preview</span>
-                                  </a>
+                                  </button>
 
                                   {/* Download */}
                                   <button
@@ -2401,16 +2540,15 @@ export const AdminCertificatesManager: React.FC = () => {
                               <td className="p-3.5 text-right whitespace-nowrap">
                                 <div className="flex items-center justify-end gap-2">
                                   {/* Preview */}
-                                  <a
-                                    href={getAdminPreviewUrl(cert.id)}
-                                    target="_blank"
-                                    rel="noreferrer"
+                                  <button
+                                    type="button"
+                                    onClick={() => setSelectedPreviewCert(cert)}
                                     className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
-                                    title="Preview rejected certificate file"
+                                    title="Preview rejected certificate file in-app"
                                   >
                                     <Eye className="w-3.5 h-3.5" />
                                     <span>Preview</span>
-                                  </a>
+                                  </button>
 
                                   {/* Re-Approve Button */}
                                   <button
@@ -3023,6 +3161,162 @@ export const AdminCertificatesManager: React.FC = () => {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* ----------------------------------------------------------------------- */}
+      {/* IN-APP ADMIN CERTIFICATE PREVIEW MODAL */}
+      {/* ----------------------------------------------------------------------- */}
+      {selectedPreviewCert && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-xs animate-in fade-in duration-200">
+          <div className="bg-white rounded-3xl shadow-2xl border border-slate-200 max-w-4xl w-full max-h-[92vh] flex flex-col overflow-hidden">
+            {/* Header */}
+            <div className="p-4 sm:p-5 border-b border-slate-100 flex items-center justify-between gap-4 bg-slate-50/70">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-10 h-10 rounded-xl bg-amber-100 text-amber-800 flex items-center justify-center font-bold shrink-0">
+                  <Award className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-base font-bold text-slate-900 truncate">
+                    {selectedPreviewCert.name}
+                  </h3>
+                  <div className="flex flex-wrap items-center gap-2 mt-0.5 text-xs text-slate-500">
+                    <span className="font-semibold text-slate-700">
+                      {selectedPreviewCert.memberName || 'NMO Member'}
+                    </span>
+                    {selectedPreviewCert.membershipNumber && (
+                      <span className="px-1.5 py-0.2 bg-slate-200 text-slate-800 font-mono text-[10px] rounded font-bold">
+                        {selectedPreviewCert.membershipNumber}
+                      </span>
+                    )}
+                    {selectedPreviewCert.eventTitle && (
+                      <span className="text-slate-400">· {selectedPreviewCert.eventTitle}</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                <a
+                  href={`https://drive.google.com/file/d/${selectedPreviewCert.id}/view`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-2xs"
+                  title="Open file directly in Google Drive"
+                >
+                  <span>Open in Drive</span>
+                  <ExternalLink className="w-3.5 h-3.5 text-slate-400" />
+                </a>
+
+                <button
+                  type="button"
+                  onClick={() => handleDownload(selectedPreviewCert)}
+                  disabled={downloadingId === selectedPreviewCert.id}
+                  className="px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-2xs"
+                  title="Download Certificate"
+                >
+                  <Download className="w-3.5 h-3.5 text-slate-600" />
+                  <span>Download</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setSelectedPreviewCert(null)}
+                  className="w-8 h-8 rounded-full hover:bg-slate-200 flex items-center justify-center text-slate-500 hover:text-slate-800 transition-colors cursor-pointer"
+                  title="Close preview"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Preview Frame */}
+            <div className="flex-1 bg-slate-900/95 relative min-h-[420px] max-h-[65vh] flex items-center justify-center overflow-hidden">
+              <iframe
+                src={`https://drive.google.com/file/d/${selectedPreviewCert.id}/preview`}
+                title={selectedPreviewCert.name}
+                className="w-full h-full border-0 min-h-[420px]"
+                allow="autoplay"
+              />
+            </div>
+
+            {/* Modal Footer with Metadata and Quick Action Buttons */}
+            <div className="p-4 border-t border-slate-100 bg-white flex flex-col sm:flex-row items-center justify-between gap-3 text-xs">
+              <div className="flex flex-wrap items-center gap-2 text-slate-600">
+                <span className="font-semibold text-slate-700">Status:</span>
+                {selectedPreviewCert.approvalStatus === 'approved' || selectedPreviewCert.status === 'approved' ? (
+                  <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300 flex items-center gap-1">
+                    <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                    <span>Approved & Official</span>
+                  </span>
+                ) : selectedPreviewCert.approvalStatus === 'rejected' || selectedPreviewCert.status === 'rejected' ? (
+                  <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-rose-100 text-rose-800 border border-rose-300 flex items-center gap-1">
+                    <AlertCircle className="w-3 h-3 text-rose-600" />
+                    <span>Rejected</span>
+                  </span>
+                ) : (
+                  <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-amber-100 text-amber-800 border border-amber-300 flex items-center gap-1">
+                    <Clock className="w-3 h-3 text-amber-600" />
+                    <span>Pending Review</span>
+                  </span>
+                )}
+
+                {selectedPreviewCert.rejectionReason && (
+                  <span className="text-rose-700 italic">
+                    Reason: {selectedPreviewCert.rejectionReason}
+                  </span>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2">
+                {/* If Pending or Rejected, allow Approving */}
+                {(selectedPreviewCert.approvalStatus === 'pending' ||
+                  selectedPreviewCert.status === 'pending' ||
+                  selectedPreviewCert.approvalStatus === 'rejected' ||
+                  selectedPreviewCert.status === 'rejected') && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const certToApprove = selectedPreviewCert;
+                      setSelectedPreviewCert(null);
+                      await handleApproveSubmission(certToApprove);
+                    }}
+                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer"
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>Approve Certificate</span>
+                  </button>
+                )}
+
+                {/* If Pending or Approved, allow Rejecting */}
+                {(selectedPreviewCert.approvalStatus === 'pending' ||
+                  selectedPreviewCert.status === 'pending' ||
+                  selectedPreviewCert.approvalStatus === 'approved' ||
+                  selectedPreviewCert.status === 'approved') && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const certToReject = selectedPreviewCert;
+                      setSelectedPreviewCert(null);
+                      handleOpenRejectModal(certToReject);
+                    }}
+                    className="px-4 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-xl font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                  >
+                    <AlertCircle className="w-4 h-4" />
+                    <span>Reject Certificate</span>
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => setSelectedPreviewCert(null)}
+                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-semibold transition-colors cursor-pointer"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

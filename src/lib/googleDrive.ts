@@ -1223,14 +1223,41 @@ export const fetchMemberCertificatesFromFirestore = async (
   const cleanNo = membershipNumber.trim().toUpperCase();
   if (!cleanNo) return [];
 
+  const foundMap = new Map<string, DriveCertificateFile>();
+
   try {
-    const q = query(collection(db, 'Certificates'), where('membershipNumber', '==', cleanNo));
-    const snapshot = await getDocs(q);
-    return snapshot.docs.map((d) => d.data() as DriveCertificateFile);
+    const collectionsToTry = ['Certificates', 'certificates'];
+    const fieldsToTry = ['membershipNumber', 'membershipId'];
+
+    const queries = collectionsToTry.flatMap((col) =>
+      fieldsToTry.map((field) =>
+        getDocs(query(collection(db, col), where(field, '==', cleanNo))).catch(() => ({ docs: [] } as any))
+      )
+    );
+
+    const snapshots = await Promise.all(queries);
+    for (const snap of snapshots) {
+      if (snap?.docs && Array.isArray(snap.docs)) {
+        for (const docSnap of snap.docs) {
+          const data = docSnap.data() as DriveCertificateFile;
+          const id = data.id || (data as any).driveFileId || (data as any).certId || docSnap.id;
+          if (id && !foundMap.has(id)) {
+            foundMap.set(id, {
+              ...data,
+              id,
+              approvalStatus: (data.approvalStatus || (data as any).status || 'approved') as any,
+              proxyViewUrl: data.proxyViewUrl || `/api/drive/file/${id}?memberId=${encodeURIComponent(cleanNo)}`,
+              proxyDownloadUrl: data.proxyDownloadUrl || `/api/drive/file/${id}?download=true&memberId=${encodeURIComponent(cleanNo)}`
+            });
+          }
+        }
+      }
+    }
   } catch (err) {
     console.warn('Error fetching certificates from Firestore:', err);
-    return [];
   }
+
+  return Array.from(foundMap.values());
 };
 
 /**
@@ -1399,6 +1426,93 @@ export const reconcileAllEventDriveFolders = async (): Promise<{
 };
 
 /**
+ * Migrates any legacy event folders sitting directly under Root "NMO Gujarat" into "NMO Gujarat -> Events".
+ */
+export const migrateLegacyEventFolders = async (): Promise<{
+  success: boolean;
+  migratedCount: number;
+  migratedFolders: Array<{ id: string; name: string }>;
+  errors: string[];
+  message: string;
+}> => {
+  const adminRole = localStorage.getItem('nmo_user_role') || 'super_admin';
+  const adminEmail = auth?.currentUser?.email || localStorage.getItem('nmo_user_email') || '';
+  let idToken = '';
+  try {
+    if (auth?.currentUser) {
+      idToken = await auth.currentUser.getIdToken();
+    }
+  } catch {}
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'x-admin-role': adminRole
+  };
+  if (adminEmail) headers['x-admin-email'] = adminEmail;
+  if (idToken) headers['Authorization'] = `Bearer ${idToken}`;
+
+  const res = await fetch(apiUrl('/api/drive/events/migrate-folders'), {
+    method: 'POST',
+    headers,
+    credentials: 'include'
+  });
+
+  const data = await res.json().catch(() => ({}));
+  if (res.ok && data?.success) {
+    return data;
+  }
+  throw new Error(data?.error || data?.message || 'Failed to migrate legacy folders.');
+};
+
+/**
+ * Migrates all certificate files from "root/pending/{event name}" into "root/Events/{event name}".
+ */
+export const migratePendingCertificatesToEvents = async (): Promise<{
+  success: boolean;
+  totalEventsScanned: number;
+  totalCertificatesMigrated: number;
+  migratedEvents: Array<{
+    eventName: string;
+    pendingFolderId: string;
+    approvedFolderId: string;
+    migratedFilesCount: number;
+    files: string[];
+  }>;
+  errors: string[];
+  message: string;
+}> => {
+  const adminRole = localStorage.getItem('nmo_user_role') || 'super_admin';
+  const adminEmail = auth?.currentUser?.email || localStorage.getItem('nmo_user_email') || '';
+  let idToken = '';
+  try {
+    if (auth?.currentUser) {
+      idToken = await auth.currentUser.getIdToken();
+    }
+  } catch {}
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'x-admin-role': adminRole
+  };
+  if (adminEmail) headers['x-admin-email'] = adminEmail;
+  if (idToken) headers['Authorization'] = `Bearer ${idToken}`;
+
+  const res = await fetch(apiUrl('/api/drive/migrate-pending-to-events'), {
+    method: 'POST',
+    headers,
+    credentials: 'include'
+  });
+
+  const data = await res.json().catch(() => ({}));
+  if (res.ok && data?.success) {
+    return data;
+  }
+  throw new Error(data?.error || data?.message || 'Failed to migrate pending certificates.');
+};
+
+
+
+/**
  * Admin approves a certificate submission:
  * Moves file in Google Drive from pending folder to approved event folder,
  * updates properties on Google Drive, and marks approvalStatus as 'approved' in Firestore.
@@ -1543,23 +1657,31 @@ export interface SubmissionListsResult {
  */
 export const fetchSubmissionLists = async (): Promise<SubmissionListsResult> => {
   // 1. Try server endpoint first (has privileged admin Firestore access)
+  const pendingMap = new Map<string, DriveCertificateFile>();
+  const approvedMap = new Map<string, DriveCertificateFile>();
+  const rejectedMap = new Map<string, DriveCertificateFile>();
+
   try {
     const serverRes = await fetch(apiUrl('/api/drive/pending-certificates'), {
       credentials: 'include'
     });
     if (serverRes.ok) {
       const data = await serverRes.json();
-      return {
-        pending: Array.isArray(data.pending) ? data.pending : [],
-        approved: Array.isArray(data.approved) ? data.approved : [],
-        rejected: Array.isArray(data.rejected) ? data.rejected : []
-      };
+      if (Array.isArray(data.pending)) {
+        data.pending.forEach((c: any) => { if (c?.id) pendingMap.set(c.id, c); });
+      }
+      if (Array.isArray(data.approved)) {
+        data.approved.forEach((c: any) => { if (c?.id) approvedMap.set(c.id, c); });
+      }
+      if (Array.isArray(data.rejected)) {
+        data.rejected.forEach((c: any) => { if (c?.id) rejectedMap.set(c.id, c); });
+      }
     }
   } catch (e) {
     console.debug('Backend pending certificates endpoint note:', e);
   }
 
-  // 2. Query Firestore directly from both 'Certificates' and 'certificates' collections as fallback
+  // 2. Query Firestore directly from both 'Certificates' and 'certificates' collections to merge and catch any client-created records
   try {
     const [snapCap, snapLower] = await Promise.all([
       getDocs(collection(db, 'Certificates')).catch(() => ({ docs: [] } as any)),
@@ -1567,9 +1689,6 @@ export const fetchSubmissionLists = async (): Promise<SubmissionListsResult> => 
     ]);
 
     const allDocs = [...snapCap.docs, ...snapLower.docs];
-    const pendingMap = new Map<string, DriveCertificateFile>();
-    const approvedMap = new Map<string, DriveCertificateFile>();
-    const rejectedMap = new Map<string, DriveCertificateFile>();
 
     allDocs.forEach((d) => {
       const c = d.data() as any;
@@ -1617,16 +1736,15 @@ export const fetchSubmissionLists = async (): Promise<SubmissionListsResult> => 
         if (!rejectedMap.has(fileId)) rejectedMap.set(fileId, certObj);
       }
     });
-
-    return {
-      pending: Array.from(pendingMap.values()),
-      approved: Array.from(approvedMap.values()),
-      rejected: Array.from(rejectedMap.values())
-    };
   } catch (err: any) {
-    console.warn('Notice loading member submissions:', err);
-    return { pending: [], approved: [], rejected: [] };
+    console.warn('Notice loading member submissions from Firestore:', err);
   }
+
+  return {
+    pending: Array.from(pendingMap.values()),
+    approved: Array.from(approvedMap.values()),
+    rejected: Array.from(rejectedMap.values())
+  };
 };
 
 /**
@@ -1762,11 +1880,8 @@ export const fetchCertificatesByMembershipNumber = async (
 
   // 3. Fallback / standard retrieval from indexed Firestore certificates (No user Drive login required!)
   const firestoreCerts = await fetchMemberCertificatesFromFirestore(cleanNo);
-  // Ensure strict filtering using cookie validator and remove rejected items
-  return firestoreCerts.filter((c) => {
-    if (c.approvalStatus === 'rejected') return false;
-    return isCertificateMatchingCookie(c, cleanNo);
-  });
+  // Strictly filter using cookie validator (includes approved, pending, and rejected submissions)
+  return firestoreCerts.filter((c) => isCertificateMatchingCookie(c, cleanNo));
 };
 
 /**

@@ -2650,6 +2650,84 @@ Recipient:        ${RECIPIENT_EMAIL}
     }
   }
 
+  /**
+   * Automatically migrates legacy event folders located directly in "NMO Gujarat" root into the "Events" subfolder.
+   * Preserves structural folders ('Events', 'pending') and safely moves event folders via addParents/removeParents.
+   */
+  async function migrateLegacyRootFoldersToEvents(token: string): Promise<{
+    success: boolean;
+    migratedCount: number;
+    migratedFolders: Array<{ id: string; name: string }>;
+    errors: string[];
+  }> {
+    const hierarchy = await resolveDriveHierarchy(token);
+    if (!hierarchy.success || !hierarchy.eventsFolder || !hierarchy.rootFolder) {
+      return { success: false, migratedCount: 0, migratedFolders: [], errors: [hierarchy.error || 'Hierarchy resolution failed'] };
+    }
+    const rootId = hierarchy.rootFolder.id;
+    const eventsId = hierarchy.eventsFolder.id;
+    if (rootId === eventsId) {
+      return { success: true, migratedCount: 0, migratedFolders: [], errors: [] };
+    }
+
+    try {
+      const query = `'${rootId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+      const resp = await fetch(
+        `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=files(id,name,parents)&pageSize=100`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (!resp.ok) {
+        const errTxt = await resp.text().catch(() => '');
+        return { success: false, migratedCount: 0, migratedFolders: [], errors: [`Failed to list root folders: ${errTxt}`] };
+      }
+      const data = await resp.json();
+      const rootFolders: any[] = data.files || [];
+
+      const migratedFolders: Array<{ id: string; name: string }> = [];
+      const errors: string[] = [];
+
+      for (const f of rootFolders) {
+        const fn = (f.name || '').trim().toLowerCase();
+        // Do not touch structural folders
+        if (fn === 'events' || fn === 'pending' || f.id === eventsId) {
+          continue;
+        }
+
+        try {
+          const moveResp = await fetch(
+            `https://www.googleapis.com/drive/v3/files/${f.id}?addParents=${encodeURIComponent(eventsId)}&removeParents=${encodeURIComponent(rootId)}&fields=id,name,webViewLink,parents`,
+            {
+              method: 'PATCH',
+              headers: { Authorization: `Bearer ${token}` }
+            }
+          );
+          if (moveResp.ok) {
+            migratedFolders.push({ id: f.id, name: f.name });
+            console.log(`[Drive Folder Migration] Successfully migrated "${f.name}" (${f.id}) from Root into Events subfolder.`);
+          } else {
+            const errText = await moveResp.text().catch(() => '');
+            errors.push(`Failed to migrate "${f.name}": ${errText}`);
+          }
+        } catch (e: any) {
+          errors.push(`Error migrating "${f.name}": ${e.message}`);
+        }
+      }
+
+      if (migratedFolders.length > 0) {
+        invalidateDiscoveredFoldersCache();
+      }
+
+      return {
+        success: errors.length === 0,
+        migratedCount: migratedFolders.length,
+        migratedFolders,
+        errors
+      };
+    } catch (err: any) {
+      return { success: false, migratedCount: 0, migratedFolders: [], errors: [err.message || 'Migration error'] };
+    }
+  }
+
   async function resolveEventFolder(token: string, eventId: string, eventTitle?: string, knownDriveFolderId?: string) {
     const hierarchy = await resolveDriveHierarchy(token);
     if (!hierarchy.success || !hierarchy.eventsFolder) {
@@ -2768,6 +2846,55 @@ Recipient:        ${RECIPIENT_EMAIL}
         eventsFolder: hierarchy.eventsFolder,
         matchingFolders: subMatches.map((f) => ({ id: f.id, name: f.name }))
       };
+    }
+
+    // Fallback Migration Check: Check if folder exists directly under root "NMO Gujarat"
+    // If found under root, automatically migrate (move) it into the "Events" subfolder!
+    if (hierarchy.rootFolder && hierarchy.rootFolder.id !== eventsFolderId) {
+      try {
+        const rootQuery = `'${hierarchy.rootFolder.id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+        const rootResp = await fetch(
+          `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(rootQuery)}&fields=files(id,name,webViewLink,properties)&pageSize=100`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        if (rootResp.ok) {
+          const rootData = await rootResp.json();
+          const rootFolders: any[] = rootData.files || [];
+          const matchedInRoot = rootFolders.find((f) => {
+            const fn = (f.name || '').trim().toLowerCase();
+            if (fn === 'events' || fn === 'pending') return false;
+            if (cleanTitle && fn === cleanTitle) return true;
+            if (cleanId && (fn === cleanId || f.properties?.eventId === cleanId)) return true;
+            if (knownDriveFolderId && f.id === knownDriveFolderId) return true;
+            if (normTitle && normalize(fn) === normTitle) return true;
+            return false;
+          });
+
+          if (matchedInRoot) {
+            console.log(`[Drive Folder Migration] Found event folder "${matchedInRoot.name}" in Root. Automatically migrating into "Events" subfolder...`);
+            const moveResp = await fetch(
+              `https://www.googleapis.com/drive/v3/files/${matchedInRoot.id}?addParents=${encodeURIComponent(eventsFolderId)}&removeParents=${encodeURIComponent(hierarchy.rootFolder.id)}&fields=id,name,webViewLink,parents`,
+              {
+                method: 'PATCH',
+                headers: { Authorization: `Bearer ${token}` }
+              }
+            );
+            if (moveResp.ok) {
+              const movedFolder = await moveResp.json();
+              invalidateDiscoveredFoldersCache();
+              return {
+                success: true,
+                migrated: true,
+                rootFolder: hierarchy.rootFolder,
+                eventsFolder: hierarchy.eventsFolder,
+                eventFolder: { id: movedFolder.id, name: movedFolder.name, webViewLink: movedFolder.webViewLink || `https://drive.google.com/drive/folders/${movedFolder.id}` }
+              };
+            }
+          }
+        }
+      } catch (rootCheckErr) {
+        console.warn('[Drive Migration] Error checking/migrating folder from root:', rootCheckErr);
+      }
     }
 
     return {
@@ -3386,6 +3513,319 @@ Recipient:        ${RECIPIENT_EMAIL}
   };
 
   /**
+   * Migrates all certificates from "root/pending/{event name}" into "root/Events/{event name}".
+   * 1. Finds the "pending" folder under ROOT_DRIVE_FOLDER_ID.
+   * 2. Finds the "Events" folder under ROOT_DRIVE_FOLDER_ID.
+   * 3. Scans all event subfolders inside "pending".
+   * 4. For each event subfolder, finds or creates the matching event folder under "Events".
+   * 5. Moves every certificate file from "pending/{event name}" into "Events/{event name}".
+   * 6. Strips any "PENDING_" prefix from filenames and updates Drive properties to approvalStatus = 'approved'.
+   * 7. Updates Firestore database records to mark certificates as approved.
+   * 8. Also checks for loose certificate files directly inside "pending" root and moves them into their corresponding event folder.
+   */
+  async function migratePendingCertificatesToEvents(token: string): Promise<{
+    success: boolean;
+    totalEventsScanned: number;
+    totalCertificatesMigrated: number;
+    migratedEvents: Array<{
+      eventName: string;
+      pendingFolderId: string;
+      approvedFolderId: string;
+      migratedFilesCount: number;
+      files: string[];
+    }>;
+    errors: string[];
+    message: string;
+  }> {
+    const errors: string[] = [];
+    const migratedEvents: Array<{
+      eventName: string;
+      pendingFolderId: string;
+      approvedFolderId: string;
+      migratedFilesCount: number;
+      files: string[];
+    }> = [];
+    let totalCertificatesMigrated = 0;
+
+    try {
+      const hierarchy = await resolveDriveHierarchy(token);
+      if (!hierarchy.success || !hierarchy.eventsFolder) {
+        return {
+          success: false,
+          totalEventsScanned: 0,
+          totalCertificatesMigrated: 0,
+          migratedEvents: [],
+          errors: ['Failed to resolve "Events" folder in Google Drive hierarchy.'],
+          message: 'Failed to resolve "Events" folder in Google Drive.'
+        };
+      }
+
+      const pendingRoot = await getOrCreatePendingRootFolder(token);
+      if (!pendingRoot || !pendingRoot.id) {
+        return {
+          success: false,
+          totalEventsScanned: 0,
+          totalCertificatesMigrated: 0,
+          migratedEvents: [],
+          errors: ['Could not find or create "pending" root folder.'],
+          message: 'Could not access "pending" root folder.'
+        };
+      }
+
+      // Step 1: Scan all child folders inside "pending"
+      let pendingEventFolders: any[] = [];
+      let pageToken: string | undefined = undefined;
+
+      do {
+        const query = `'${pendingRoot.id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+        let url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(
+          query
+        )}&fields=nextPageToken,files(id,name,properties)&pageSize=100`;
+        if (pageToken) url += `&pageToken=${encodeURIComponent(pageToken)}`;
+
+        const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+        if (!resp.ok) {
+          const errText = await resp.text().catch(() => '');
+          errors.push(`Failed to list folders inside pending root: ${errText}`);
+          break;
+        }
+        const data = await resp.json();
+        if (data.files && Array.isArray(data.files)) {
+          pendingEventFolders.push(...data.files);
+        }
+        pageToken = data.nextPageToken;
+      } while (pageToken);
+
+      console.log(`[Pending Migration] Found ${pendingEventFolders.length} event folders inside "pending" root.`);
+
+      const adminDb = getAdminFirestore();
+
+      // Step 2: For each event subfolder inside "pending", move its certificate files to the approved "Events/{eventName}" folder
+      for (const pFolder of pendingEventFolders) {
+        const eventTitle = (pFolder.name || '').trim();
+        const eventId = pFolder.properties?.eventId;
+        if (!eventTitle) continue;
+
+        try {
+          // Resolve or ensure destination folder inside "Events"
+          const ensureRes = await ensureEventDriveFolders(token, eventTitle, eventId);
+          if (!ensureRes.success || !ensureRes.approvedFolder?.id) {
+            errors.push(`Could not resolve approved folder for event "${eventTitle}": ${ensureRes.error || 'Unknown error'}`);
+            continue;
+          }
+
+          const approvedFolderId = ensureRes.approvedFolder.id;
+
+          // Scan all certificate files inside this pending event subfolder
+          let eventFiles: any[] = [];
+          let fPageToken: string | undefined = undefined;
+
+          do {
+            const fQuery = `'${pFolder.id}' in parents and mimeType != 'application/vnd.google-apps.folder' and trashed = false`;
+            let fUrl = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(
+              fQuery
+            )}&fields=nextPageToken,files(id,name,mimeType,parents,properties,size)&pageSize=100`;
+            if (fPageToken) fUrl += `&pageToken=${encodeURIComponent(fPageToken)}`;
+
+            const fResp = await fetch(fUrl, { headers: { Authorization: `Bearer ${token}` } });
+            if (!fResp.ok) {
+              const errTxt = await fResp.text().catch(() => '');
+              errors.push(`Failed to list files in pending folder "${eventTitle}": ${errTxt}`);
+              break;
+            }
+            const fData = await fResp.json();
+            if (fData.files && Array.isArray(fData.files)) {
+              eventFiles.push(...fData.files);
+            }
+            fPageToken = fData.nextPageToken;
+          } while (fPageToken);
+
+          const migratedFileNames: string[] = [];
+
+          for (const file of eventFiles) {
+            try {
+              const currentParents: string[] = file.parents || [];
+
+              let cleanFileName: string | undefined;
+              if (file.name && /^PENDING_/i.test(file.name)) {
+                cleanFileName = file.name.replace(/^PENDING_/i, '');
+              }
+
+              const patchBody: Record<string, any> = {
+                properties: {
+                  approvalStatus: 'approved',
+                  status: 'approved',
+                  migratedFrom: 'pending_to_events',
+                  migratedAt: new Date().toISOString()
+                }
+              };
+              if (cleanFileName) {
+                patchBody.name = cleanFileName;
+              }
+
+              // Move file: add approvedFolderId, remove pFolder.id
+              let patchUrl = `https://www.googleapis.com/drive/v3/files/${file.id}?addParents=${encodeURIComponent(approvedFolderId)}&fields=id,name,parents,properties`;
+              if (currentParents.length > 0) {
+                const parentsToRemove = currentParents.filter((p) => p !== approvedFolderId).join(',');
+                if (parentsToRemove) {
+                  patchUrl += `&removeParents=${encodeURIComponent(parentsToRemove)}`;
+                }
+              }
+
+              const patchResp = await fetch(patchUrl, {
+                method: 'PATCH',
+                headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify(patchBody)
+              });
+
+              if (patchResp.ok) {
+                migratedFileNames.push(cleanFileName || file.name);
+                totalCertificatesMigrated++;
+
+                // Sync to Firestore
+                if (adminDb) {
+                  const memNo = (file.properties?.membershipNumber || file.properties?.membershipId || '').trim().toUpperCase();
+                  const updateObj: Record<string, any> = {
+                    approvalStatus: 'approved',
+                    status: 'approved',
+                    driveFolderId: approvedFolderId,
+                    originalFileName: cleanFileName || file.name,
+                    migratedAt: new Date().toISOString(),
+                    updatedAt: new Date().toISOString()
+                  };
+
+                  const batchOps: Promise<any>[] = [
+                    adminDb.collection('Certificates').doc(file.id).set(updateObj, { merge: true }),
+                    adminDb.collection('certificates').doc(file.id).set(updateObj, { merge: true })
+                  ];
+
+                  if (eventId && memNo) {
+                    const compoundId = `${eventId}_${memNo}`;
+                    batchOps.push(
+                      adminDb.collection('Certificates').doc(compoundId).set(updateObj, { merge: true }),
+                      adminDb.collection('certificates').doc(compoundId).set(updateObj, { merge: true })
+                    );
+                  }
+
+                  await Promise.all(batchOps).catch((err) => {
+                    console.warn(`[Pending Migration] Notice updating Firestore for file ${file.id}:`, err);
+                  });
+                }
+              } else {
+                const errTxt = await patchResp.text().catch(() => '');
+                errors.push(`Failed to move file "${file.name}" (${file.id}): ${errTxt}`);
+              }
+            } catch (fileErr: any) {
+              errors.push(`Error moving file "${file.name}": ${fileErr.message}`);
+            }
+          }
+
+          migratedEvents.push({
+            eventName: eventTitle,
+            pendingFolderId: pFolder.id,
+            approvedFolderId,
+            migratedFilesCount: migratedFileNames.length,
+            files: migratedFileNames
+          });
+        } catch (eventErr: any) {
+          errors.push(`Error processing pending folder "${eventTitle}": ${eventErr.message}`);
+        }
+      }
+
+      // Step 3: Check for loose certificate files directly inside "pending" root folder
+      let looseFiles: any[] = [];
+      let lPageToken: string | undefined = undefined;
+
+      do {
+        const lQuery = `'${pendingRoot.id}' in parents and mimeType != 'application/vnd.google-apps.folder' and trashed = false`;
+        let lUrl = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(
+          lQuery
+        )}&fields=nextPageToken,files(id,name,mimeType,parents,properties,size)&pageSize=100`;
+        if (lPageToken) lUrl += `&pageToken=${encodeURIComponent(lPageToken)}`;
+
+        const lResp = await fetch(lUrl, { headers: { Authorization: `Bearer ${token}` } });
+        if (lResp.ok) {
+          const lData = await lResp.json();
+          if (lData.files && Array.isArray(lData.files)) {
+            looseFiles.push(...lData.files);
+          }
+          lPageToken = lData.nextPageToken;
+        } else {
+          break;
+        }
+      } while (lPageToken);
+
+      if (looseFiles.length > 0) {
+        console.log(`[Pending Migration] Found ${looseFiles.length} loose certificate files in "pending" root.`);
+        for (const file of looseFiles) {
+          const fileEventTitle = file.properties?.eventTitle || file.properties?.eventName;
+          const fileEventId = file.properties?.eventId;
+
+          if (fileEventTitle) {
+            try {
+              const ensureRes = await ensureEventDriveFolders(token, fileEventTitle, fileEventId);
+              if (ensureRes.success && ensureRes.approvedFolder?.id) {
+                const destFolderId = ensureRes.approvedFolder.id;
+                let cleanFileName = file.name;
+                if (/^PENDING_/i.test(cleanFileName)) {
+                  cleanFileName = cleanFileName.replace(/^PENDING_/i, '');
+                }
+
+                const moveResp = await fetch(
+                  `https://www.googleapis.com/drive/v3/files/${file.id}?addParents=${encodeURIComponent(destFolderId)}&removeParents=${encodeURIComponent(pendingRoot.id)}&fields=id,name,parents,properties`,
+                  {
+                    method: 'PATCH',
+                    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      name: cleanFileName,
+                      properties: { approvalStatus: 'approved', status: 'approved', migratedFrom: 'pending_to_events', migratedAt: new Date().toISOString() }
+                    })
+                  }
+                );
+
+                if (moveResp.ok) {
+                  totalCertificatesMigrated++;
+                  if (adminDb) {
+                    await Promise.all([
+                      adminDb.collection('Certificates').doc(file.id).set({ approvalStatus: 'approved', status: 'approved', driveFolderId: destFolderId, originalFileName: cleanFileName }, { merge: true }),
+                      adminDb.collection('certificates').doc(file.id).set({ approvalStatus: 'approved', status: 'approved', driveFolderId: destFolderId, originalFileName: cleanFileName }, { merge: true })
+                    ]).catch(() => {});
+                  }
+                }
+              }
+            } catch (looseErr: any) {
+              errors.push(`Error moving loose file "${file.name}": ${looseErr.message}`);
+            }
+          }
+        }
+      }
+
+      if (totalCertificatesMigrated > 0) {
+        invalidateDiscoveredFoldersCache();
+      }
+
+      return {
+        success: errors.length === 0,
+        totalEventsScanned: pendingEventFolders.length,
+        totalCertificatesMigrated,
+        migratedEvents,
+        errors,
+        message: `Successfully migrated ${totalCertificatesMigrated} certificate(s) from pending folders to "Events" across ${pendingEventFolders.length} event(s).`
+      };
+    } catch (fatalErr: any) {
+      console.error('[Pending Migration] Fatal error:', fatalErr);
+      return {
+        success: false,
+        totalEventsScanned: 0,
+        totalCertificatesMigrated: 0,
+        migratedEvents: [],
+        errors: [fatalErr.message || 'Fatal error during pending certificates migration'],
+        message: fatalErr.message || 'Error migrating pending certificates'
+      };
+    }
+  }
+
+  /**
    * POST /api/drive/events/ensure-folders
    * POST /api/drive/events/create-folder
    * POST /api/events/create-folder
@@ -3489,9 +3929,71 @@ Recipient:        ${RECIPIENT_EMAIL}
   app.post('/api/events/create-folder', handleEventFolderCreation);
 
   /**
+   * POST /api/drive/events/migrate-folders
+   * Migrates legacy event folders located directly in Root "NMO Gujarat" into "Events" subfolder.
+   */
+  app.post('/api/drive/events/migrate-folders', async (req, res) => {
+    try {
+      const authResult = await verifyAdminAuthorization(req);
+      if (!authResult.authorized) {
+        return res.status(403).json({ error: 'Unauthorized: Administrator access required.' });
+      }
+
+      const token = await getValidServerDriveToken();
+      if (!token) {
+        return res.status(503).json({ error: 'Google Drive is disconnected on server.' });
+      }
+
+      const migrationResult = await migrateLegacyRootFoldersToEvents(token);
+      return res.json({
+        success: migrationResult.success,
+        migratedCount: migrationResult.migratedCount,
+        migratedFolders: migrationResult.migratedFolders,
+        errors: migrationResult.errors,
+        message: `Successfully migrated ${migrationResult.migratedCount} event folders into "Events" subfolder.`
+      });
+    } catch (err: any) {
+      console.error('[Drive Folder Migration Endpoint] Error:', err);
+      return res.status(500).json({ error: err.message || 'Error migrating folders' });
+    }
+  });
+
+  /**
+   * POST /api/drive/migrate-pending-to-events
+   * POST /api/drive/certificates/migrate-pending-to-events
+   * POST /api/drive/events/migrate-pending-to-events
+   * Migrates certificates from "root/pending/{event name}" into "root/Events/{event name}".
+   */
+  const handleMigratePendingCertificatesEndpoint = async (req: express.Request, res: express.Response) => {
+    try {
+      const authResult = await verifyAdminAuthorization(req);
+      if (!authResult.authorized) {
+        return res.status(403).json({ error: 'Unauthorized: Administrator access required.' });
+      }
+
+      const token = await getValidServerDriveToken();
+      if (!token) {
+        return res.status(503).json({ error: 'Google Drive is disconnected on server.' });
+      }
+
+      const migrationResult = await migratePendingCertificatesToEvents(token);
+      return res.json(migrationResult);
+    } catch (err: any) {
+      console.error('[Drive Pending Migration Endpoint] Error:', err);
+      return res.status(500).json({ error: err.message || 'Error migrating pending certificates' });
+    }
+  };
+
+  app.post('/api/drive/migrate-pending-to-events', handleMigratePendingCertificatesEndpoint);
+  app.post('/api/drive/certificates/migrate-pending-to-events', handleMigratePendingCertificatesEndpoint);
+  app.post('/api/drive/events/migrate-pending-to-events', handleMigratePendingCertificatesEndpoint);
+
+  /**
    * POST /api/drive/events/reconcile-all-folders
-   * Privileged endpoint: iterates through all events in Firestore and ensures both
-   * approved and pending Google Drive folders exist without creating duplicates.
+   * Privileged endpoint:
+   * 1. Migrates any legacy event folders found in Root into "Events" subfolder.
+   * 2. Iterates through all events (via Admin Firestore or client-provided events list).
+   * 3. Ensures both approved and pending Google Drive folders exist without creating duplicates.
    */
   app.post('/api/drive/events/reconcile-all-folders', async (req, res) => {
     try {
@@ -3505,53 +4007,78 @@ Recipient:        ${RECIPIENT_EMAIL}
         return res.status(503).json({ error: 'Google Drive is disconnected on server.' });
       }
 
+      // Step 1: Run Root -> Events migration first
+      const migrationRes = await migrateLegacyRootFoldersToEvents(token).catch((mErr) => ({
+        success: false,
+        migratedCount: 0,
+        migratedFolders: [],
+        errors: [mErr?.message || 'Migration notice']
+      }));
+
       const adminDb = getAdminFirestore();
-      if (!adminDb) {
-        return res.status(500).json({ error: 'Firestore Admin is not initialized.' });
+      let eventDocs: Array<{ id: string; title: string; driveFolderId?: string }> = [];
+
+      if (adminDb) {
+        const snap = await adminDb.collection('Events').get();
+        eventDocs = snap.docs.map((d) => {
+          const data = d.data();
+          return {
+            id: d.id,
+            title: data.title || data.name || d.id,
+            driveFolderId: data.driveFolderId
+          };
+        });
+      } else if (Array.isArray(req.body.events) && req.body.events.length > 0) {
+        eventDocs = req.body.events.map((e: any) => ({
+          id: e.eventId || e.id || `EVT-${Date.now()}`,
+          title: e.title || e.name || 'Event',
+          driveFolderId: e.driveFolderId
+        }));
       }
 
-      const snap = await adminDb.collection('Events').get();
       let reconciledCount = 0;
       const details: any[] = [];
 
-      for (const d of snap.docs) {
-        const evtData = d.data();
-        const eventTitle = evtData.title || evtData.name || d.id;
+      for (const evt of eventDocs) {
+        const eventTitle = evt.title;
         try {
-          const resFolder = await ensureEventDriveFolders(token, eventTitle, d.id, evtData.driveFolderId);
+          const resFolder = await ensureEventDriveFolders(token, eventTitle, evt.id, evt.driveFolderId);
           if (resFolder.success) {
-            await adminDb.collection('Events').doc(d.id).set(
-              {
-                driveFolderId: resFolder.approvedFolder.id,
-                driveFolderName: resFolder.approvedFolder.name,
-                driveFolderLink: resFolder.approvedFolder.webViewLink,
-                pendingDriveFolderId: resFolder.pendingFolder.id,
-                pendingDriveFolderName: resFolder.pendingFolder.name,
-                pendingDriveFolderLink: resFolder.pendingFolder.webViewLink,
-                driveFolderCreated: true,
-                updatedAt: new Date().toISOString()
-              },
-              { merge: true }
-            );
+            if (adminDb) {
+              await adminDb.collection('Events').doc(evt.id).set(
+                {
+                  driveFolderId: resFolder.approvedFolder.id,
+                  driveFolderName: resFolder.approvedFolder.name,
+                  driveFolderLink: resFolder.approvedFolder.webViewLink,
+                  pendingDriveFolderId: resFolder.pendingFolder.id,
+                  pendingDriveFolderName: resFolder.pendingFolder.name,
+                  pendingDriveFolderLink: resFolder.pendingFolder.webViewLink,
+                  driveFolderCreated: true,
+                  updatedAt: new Date().toISOString()
+                },
+                { merge: true }
+              );
+            }
             reconciledCount++;
             details.push({
-              eventId: d.id,
+              eventId: evt.id,
               eventTitle,
               approvedFolderId: resFolder.approvedFolder.id,
               pendingFolderId: resFolder.pendingFolder.id
             });
           }
         } catch (e: any) {
-          console.warn(`[Reconcile Event Folders] Failed for event ${d.id}:`, e.message);
+          console.warn(`[Reconcile Event Folders] Failed for event ${evt.id}:`, e.message);
         }
       }
 
       return res.json({
         success: true,
         reconciledCount,
-        totalEvents: snap.docs.length,
+        totalEvents: eventDocs.length,
+        migratedCount: migrationRes.migratedCount,
         details,
-        message: `Successfully reconciled Google Drive folders for ${reconciledCount} events.`
+        message: `Successfully reconciled Google Drive folders for ${reconciledCount} events (${migrationRes.migratedCount} folders migrated from Root into Events).`
       });
     } catch (err: any) {
       console.error('[Reconcile Folders] Error reconciling all event folders:', err);
@@ -4359,13 +4886,58 @@ Recipient:        ${RECIPIENT_EMAIL}
         });
       }
 
+      // Check Firestore database for indexed certificates as durable fallback
+      const adminDb = getAdminFirestore();
+      let fallbackCerts: any[] = [];
+      if (adminDb) {
+        try {
+          const [cSnap, lowSnap] = await Promise.all([
+            adminDb.collection('Certificates').where('membershipNumber', '==', cleanMemNo).get().catch(() => null),
+            adminDb.collection('certificates').where('membershipNumber', '==', cleanMemNo).get().catch(() => null)
+          ]);
+          const map = new Map<string, any>();
+          [...(cSnap?.docs || []), ...(lowSnap?.docs || [])].forEach((d) => {
+            const data = d.data();
+            const id = data.id || data.driveFileId || d.id;
+            if (id && !map.has(id)) {
+              map.set(id, {
+                id,
+                name: data.name || data.originalFileName || `${cleanMemNo}.pdf`,
+                mimeType: data.mimeType || 'application/pdf',
+                size: data.size || data.fileSize,
+                createdTime: data.createdTime || data.uploadedAt,
+                membershipNumber: cleanMemNo,
+                memberName: data.memberName || data.membershipName,
+                eventId: data.eventId,
+                eventTitle: data.eventTitle || data.eventName,
+                eventName: data.eventName || data.eventTitle,
+                approvalStatus: data.approvalStatus || data.status || 'approved',
+                uploadSource: data.uploadSource || 'user',
+                uploadedBy: data.uploadedBy || 'member',
+                rejectionReason: data.rejectionReason,
+                webViewLink: data.webViewLink || data.googleDriveLink || `https://drive.google.com/file/d/${id}/view`,
+                proxyViewUrl: `/api/drive/file/${id}?memberId=${encodeURIComponent(cleanMemNo)}`,
+                proxyDownloadUrl: `/api/drive/file/${id}?download=true&memberId=${encodeURIComponent(cleanMemNo)}`
+              });
+            }
+          });
+          fallbackCerts = Array.from(map.values());
+        } catch (fsErr) {
+          console.warn('[Drive Certificates] Firestore fallback query notice:', fsErr);
+        }
+      }
+
       const token = await getValidServerDriveToken();
       if (!token) {
         return res.json({
           connected: false,
           membershipNumber: cleanMemNo,
-          certificates: [],
-          message: 'Google Drive integration not currently connected on server.'
+          certificates: fallbackCerts,
+          fromFirestoreFallback: true,
+          count: fallbackCerts.length,
+          message: fallbackCerts.length > 0
+            ? `Retrieved ${fallbackCerts.length} certificates from database while Google Drive sync is offline.`
+            : 'Google Drive integration not currently connected on server.'
         });
       }
 
@@ -4381,6 +4953,17 @@ Recipient:        ${RECIPIENT_EMAIL}
       if (!driveResp.ok) {
         const errText = await driveResp.text().catch(() => '');
         console.warn('[Drive Certificates] Google Drive query error:', driveResp.status, errText);
+        if (fallbackCerts.length > 0) {
+          return res.json({
+            success: true,
+            connected: false,
+            membershipNumber: cleanMemNo,
+            certificates: fallbackCerts,
+            fromFirestoreFallback: true,
+            count: fallbackCerts.length,
+            message: `Retrieved ${fallbackCerts.length} cached certificates from database.`
+          });
+        }
         return res.status(502).json({
           error: 'drive_api_error',
           message: 'Failed to query Google Drive certificates repository.'
@@ -4444,6 +5027,14 @@ Recipient:        ${RECIPIENT_EMAIL}
         })
       );
 
+      // Merge any unique stored records from Firestore
+      const seenIds = new Set(strictlyFiltered.map((c) => c.id));
+      for (const fc of fallbackCerts) {
+        if (!seenIds.has(fc.id)) {
+          strictlyFiltered.push(fc);
+        }
+      }
+
       return res.json({
         success: true,
         connected: true,
@@ -4459,9 +5050,60 @@ Recipient:        ${RECIPIENT_EMAIL}
   });
 
   /**
+   * Helper to render branded HTML certificate viewer for direct browser access.
+   */
+  function renderCertificateHtmlViewer(fileId: string, fileName?: string, errorMessage?: string): string {
+    const cleanName = escapeHtml(fileName || 'NMO Gujarat Certificate');
+    const directViewUrl = `https://drive.google.com/file/d/${encodeURIComponent(fileId)}/view`;
+    const embedUrl = `https://drive.google.com/file/d/${encodeURIComponent(fileId)}/preview`;
+
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>${cleanName} — NMO Gujarat Certificate Portal</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #090d16; color: #f1f5f9; margin: 0; padding: 16px; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; box-sizing: border-box; }
+    .container { max-width: 960px; width: 100%; background: #131b2e; border: 1px solid #1e293b; border-radius: 24px; overflow: hidden; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.7); display: flex; flex-direction: column; }
+    .header { padding: 16px 24px; background: linear-gradient(135deg, #b91c1c, #991b1b, #1e3a8a); display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
+    .header h2 { margin: 0; font-size: 15px; font-weight: 800; color: #ffffff; letter-spacing: 0.3px; display: flex; align-items: center; gap: 8px; }
+    .badge { font-size: 10px; font-weight: 700; text-transform: uppercase; background: rgba(255,255,255,0.2); padding: 3px 8px; border-radius: 9999px; }
+    .actions { display: flex; items-center; gap: 8px; }
+    .btn { display: inline-flex; align-items: center; justify-content: center; padding: 8px 16px; background: #ffffff; color: #0f172a; text-decoration: none; border-radius: 12px; font-weight: 700; font-size: 12px; transition: all 0.2s; box-shadow: 0 1px 3px rgba(0,0,0,0.2); }
+    .btn:hover { background: #f8fafc; transform: translateY(-1px); }
+    .btn-secondary { background: rgba(255,255,255,0.15); color: #ffffff; }
+    .btn-secondary:hover { background: rgba(255,255,255,0.25); }
+    .viewer-frame { width: 100%; height: 75vh; min-height: 480px; border: none; background: #0f172a; }
+    .notice-bar { background: #1e293b; padding: 10px 24px; font-size: 11px; color: #94a3b8; display: flex; align-items: center; justify-content: space-between; border-top: 1px solid #334155; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h2>
+        <span>${cleanName}</span>
+        <span class="badge">Google Drive Verified</span>
+      </h2>
+      <div class="actions">
+        <a href="${directViewUrl}" target="_blank" rel="noreferrer" class="btn">Open in Google Drive ↗</a>
+        <a href="/" class="btn btn-secondary">Return to Portal</a>
+      </div>
+    </div>
+    <iframe class="viewer-frame" src="${embedUrl}" allow="autoplay"></iframe>
+    <div class="notice-bar">
+      <span>National Medicos Organisation (NMO) Gujarat CME Certificate Portal</span>
+      ${errorMessage ? `<span style="color: #f59e0b;">${escapeHtml(errorMessage)}</span>` : '<span style="color: #10b981;">✓ Secure Certificate View</span>'}
+    </div>
+  </div>
+</body>
+</html>`;
+  }
+
+  /**
    * GET /api/drive/file/:fileId
-   * Streams certificate file content directly from Google Drive.
-   * Allows members to preview or download their certificate without requiring public Drive permissions.
+   * Streams certificate file content directly from Google Drive or Firestore database cache.
+   * Handles direct browser navigation with elegant HTML viewer instead of raw errors.
    */
   app.get('/api/drive/file/:fileId', async (req, res) => {
     try {
@@ -4470,9 +5112,48 @@ Recipient:        ${RECIPIENT_EMAIL}
         return res.status(400).send('File ID required');
       }
 
+      const acceptsHtml = req.accepts && req.accepts('html') && !req.xhr && !req.accepts('json');
+
+      // Check Firestore first: some uploaded certificates have stored base64 or dataUrl
+      try {
+        const adminDb = getAdminFirestore();
+        if (adminDb) {
+          const [docCap, docLow] = await Promise.all([
+            adminDb.collection('Certificates').doc(fileId).get().catch(() => null),
+            adminDb.collection('certificates').doc(fileId).get().catch(() => null)
+          ]);
+          const fsData = docCap?.data() || docLow?.data();
+          if (fsData) {
+            const rawBase64 = fsData.fileBase64 || fsData.base64 || (fsData.dataUrl && fsData.dataUrl.includes('base64,') ? fsData.dataUrl.split('base64,')[1] : null);
+            if (rawBase64) {
+              const buffer = Buffer.from(rawBase64, 'base64');
+              const mime = fsData.mimeType || 'image/jpeg';
+              res.setHeader('Content-Type', mime);
+              res.setHeader('Cache-Control', 'private, max-age=3600');
+              const downloadName = encodeURIComponent(fsData.name || fsData.originalFileName || `${fileId}.jpg`);
+              if (req.query.download === 'true') {
+                res.setHeader('Content-Disposition', `attachment; filename="${downloadName}"`);
+              } else {
+                res.setHeader('Content-Disposition', `inline; filename="${downloadName}"`);
+              }
+              return res.send(buffer);
+            }
+          }
+        }
+      } catch (fsErr) {
+        console.warn('[File Proxy] Firestore base64 check notice:', fsErr);
+      }
+
       const token = await getValidServerDriveToken();
       if (!token) {
-        return res.status(503).send('Google Drive storage is currently disconnected.');
+        if (acceptsHtml) {
+          return res.send(renderCertificateHtmlViewer(fileId, 'Certificate', 'Google Drive streaming offline. Viewing via direct Drive embed.'));
+        }
+        return res.status(503).json({
+          error: 'drive_disconnected',
+          message: 'Google Drive storage is disconnected.',
+          googleDriveUrl: `https://drive.google.com/file/d/${fileId}/view`
+        });
       }
 
       // Fetch metadata first to get correct filename, mimeType, and properties
@@ -4482,6 +5163,9 @@ Recipient:        ${RECIPIENT_EMAIL}
       );
 
       if (!metaResp.ok) {
+        if (acceptsHtml) {
+          return res.send(renderCertificateHtmlViewer(fileId, 'Certificate File'));
+        }
         return res.status(metaResp.status).send('Certificate file not found in Google Drive');
       }
 
@@ -4529,7 +5213,6 @@ Recipient:        ${RECIPIENT_EMAIL}
         }
 
         if (!isOwner) {
-          const acceptsHtml = req.accepts && req.accepts('html') && !req.xhr && !req.accepts('json');
           if (acceptsHtml) {
             return res.status(403).send(`<!DOCTYPE html>
 <html lang="en">
@@ -4563,10 +5246,9 @@ Recipient:        ${RECIPIENT_EMAIL}
             message: 'Access denied: You are only authorized to access your own certificates.'
           });
         }
-
-        // Verified owner authenticated. Proceed to stream file content.
       }
 
+      // Verified owner authenticated. Proceed to stream file content.
       const isDownload = req.query.download === 'true';
 
       // Stream file content
@@ -5220,7 +5902,7 @@ Recipient:        ${RECIPIENT_EMAIL}
     try {
       const adminDb = getAdminFirestore();
       if (!adminDb) {
-        return res.json({ success: true, count: 0, pending: [] });
+        return res.status(503).json({ success: false, error: 'Firestore Admin not initialized', count: 0, pending: [], approved: [], rejected: [] });
       }
 
       const [snapCap, snapLower] = await Promise.all([
