@@ -4536,12 +4536,57 @@ Recipient:        ${RECIPIENT_EMAIL}
         : null;
       const verifiedMemberNo = (source === 'user' && cookieMemberId) ? cookieMemberId : cleanNo;
 
+      // 1. Enforce 1 MB limit for user-uploaded certificates only (admins can upload up to 15MB)
+      if (source === 'user') {
+        const fileBuffer = Buffer.from(fileBase64, 'base64');
+        if (fileBuffer.byteLength > 1 * 1024 * 1024) {
+          return res.status(400).json({
+            error: 'File size exceeds the 1 MB limit for user-uploaded certificates. Please compress your file to under 1 MB.'
+          });
+        }
+      }
+
+      // 2. Enforce confirmed attendance for user-uploaded certificates for specific events:
+      // "those whose attendance hasn't been confirmed from admin side, shouldn't be allowed to upload or see their certificates for that specific event"
+      if (source === 'user' && eventId && eventId !== 'general') {
+        const adminDb = getAdminFirestore();
+        if (adminDb) {
+          let isConfirmedAttended = false;
+          // Check event_registrations
+          const regDoc = await adminDb.collection('event_registrations').doc(`${eventId}_${verifiedMemberNo}`).get().catch(() => null);
+          if (regDoc && regDoc.exists) {
+            const regData = regDoc.data();
+            if (regData?.attendanceStatus === 'Attended' || regData?.status === 'Attended') {
+              isConfirmedAttended = true;
+            }
+          }
+          // Check Events/{eventId}.participants
+          if (!isConfirmedAttended) {
+            const evtDoc = await adminDb.collection('Events').doc(eventId).get().catch(() => null);
+            if (evtDoc && evtDoc.exists) {
+              const evtData = evtDoc.data();
+              const participants = Array.isArray(evtData?.participants) ? evtData.participants : [];
+              const p = participants.find((part: any) => (part.membershipNumber || '').toString().trim().toUpperCase() === verifiedMemberNo);
+              if (p && (p.attendanceStatus === 'Attended' || p.presence === 'Present')) {
+                isConfirmedAttended = true;
+              }
+            }
+          }
+
+          if (!isConfirmedAttended) {
+            return res.status(403).json({
+              error: 'Attendance verification required: Only participants whose attendance has been officially confirmed by event administrators are permitted to upload certificates for this event.'
+            });
+          }
+        }
+      }
+
       const token = await getValidServerDriveToken();
       if (!token) {
         return res.status(503).json({ error: 'Google Drive storage is disconnected.' });
       }
 
-      // 1. Resolve or verify event folders (Approved and Pending)
+      // 3. Resolve or verify event folders (Approved and Pending)
       const eventFoldersRes = await ensureEventDriveFolders(token, eventTitle || 'General', eventId);
       let folderId = targetFolderId;
       if (source === 'user') {

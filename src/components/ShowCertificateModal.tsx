@@ -27,7 +27,8 @@ import {
   ChevronLeft,
   ChevronRight,
   Trash2,
-  Edit3
+  Edit3,
+  Lock
 } from 'lucide-react';
 
 interface ShowCertificateModalProps {
@@ -55,7 +56,7 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
   selectedEventTitle,
   onCertificateDeleted
 }) => {
-  const { currentMember, currentUser } = useNMO();
+  const { currentMember, currentUser, events } = useNMO();
 
   const targetMemberNo = (
     membershipNumber ||
@@ -66,6 +67,35 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
   ).trim().toUpperCase();
 
   const displayName = memberName || selectedCert?.memberName || currentMember?.name || currentUser?.name || 'NMO Member';
+
+  // Attendance check helper: if certificate or modal is linked to a specific event, member must have attended
+  const isMemberAttendedForEvent = (eventId?: string, eventTitle?: string): boolean => {
+    // Admins previewing certificates are not restricted
+    const viewerRole = currentUser?.role || currentMember?.role;
+    if (viewerRole && ['city_admin', 'prant_admin', 'state_admin', 'super_admin'].includes(viewerRole)) {
+      return true;
+    }
+
+    if (!eventId || eventId === 'general') {
+      if (eventTitle) {
+        const cleanTitle = eventTitle.trim().toLowerCase();
+        const matched = events?.find((e) => e.title.trim().toLowerCase() === cleanTitle);
+        if (matched) {
+          const p = matched.participants?.find(
+            (part) => part.membershipNumber.trim().toUpperCase() === targetMemberNo.trim().toUpperCase()
+          );
+          return p?.attendanceStatus === 'Attended';
+        }
+      }
+      return true;
+    }
+    const evt = events?.find((e) => e.eventId === eventId);
+    if (!evt) return true;
+    const p = evt.participants?.find(
+      (part) => part.membershipNumber.trim().toUpperCase() === targetMemberNo.trim().toUpperCase()
+    );
+    return p?.attendanceStatus === 'Attended';
+  };
 
   const [certificates, setCertificates] = useState<DriveCertificateFile[]>(initialCertificates || (selectedCert ? [selectedCert] : []));
   const [selectedIndex, setSelectedIndex] = useState<number>(0);
@@ -112,11 +142,16 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
   useEffect(() => {
     if (isOpen) {
       if (initialCertificates && initialCertificates.length > 0) {
-        setCertificates(initialCertificates);
-        autoSelectMatchingEvent(initialCertificates);
+        const allowed = initialCertificates.filter((c) => isMemberAttendedForEvent(c.eventId, c.eventTitle || c.eventName));
+        setCertificates(allowed);
+        autoSelectMatchingEvent(allowed);
       } else if (selectedCert) {
-        setCertificates([selectedCert]);
-        setSelectedIndex(0);
+        if (isMemberAttendedForEvent(selectedCert.eventId, selectedCert.eventTitle || selectedCert.eventName)) {
+          setCertificates([selectedCert]);
+          setSelectedIndex(0);
+        } else {
+          setCertificates([]);
+        }
       } else if (targetMemberNo) {
         loadMemberCertificates();
       }
@@ -133,8 +168,10 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
       setMemberIdCookie(targetMemberNo);
       // Mechanism: Call the membership ID to retrieve only this member's certificates
       const results = await fetchCertificatesByMembershipNumber(targetMemberNo);
-      // Filter certificates that belong to this member
-      const memberCerts = results.filter((c) => isCertificateMatchingCookie(c, targetMemberNo));
+      // Filter certificates that belong to this member AND satisfy attendance confirmation rule
+      const memberCerts = results
+        .filter((c) => isCertificateMatchingCookie(c, targetMemberNo))
+        .filter((c) => isMemberAttendedForEvent(c.eventId, c.eventTitle || c.eventName));
       setCertificates(memberCerts);
       autoSelectMatchingEvent(memberCerts);
     } catch (err) {
@@ -144,10 +181,30 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
     }
   };
 
-  if (!isOpen) return null;
-
   const currentCert = certificates[selectedIndex] || null;
   const currentFileName = getCertFileName(currentCert);
+
+  const previewSource = useMemo(() => {
+    if (!currentCert) return '';
+    const cleanMem = encodeURIComponent(targetMemberNo);
+    const isAdminUser = ['super_admin', 'state_admin', 'prant_admin', 'city_admin'].includes(currentUser?.role || '');
+    let url = currentCert.proxyViewUrl || '';
+    if (!url) {
+      url = `/api/drive/file/${currentCert.id}`;
+    }
+    const fullUrl = url.startsWith('http') ? url : apiUrl(url);
+    const sep = fullUrl.includes('?') ? '&' : '?';
+    const params: string[] = [];
+    if (cleanMem && !fullUrl.includes('memberId=')) params.push(`memberId=${cleanMem}`);
+    if (isAdminUser && !fullUrl.includes('admin=')) {
+      params.push('admin=true');
+      if (currentUser?.role) params.push(`adminRole=${encodeURIComponent(currentUser.role)}`);
+      if (currentUser?.email) params.push(`adminEmail=${encodeURIComponent(currentUser.email)}`);
+    }
+    return params.length > 0 ? `${fullUrl}${sep}${params.join('&')}` : fullUrl;
+  }, [currentCert, targetMemberNo, currentUser]);
+
+  if (!isOpen) return null;
 
   const handleDownload = async () => {
     if (!currentCert) return;
@@ -223,26 +280,6 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
         currentCert.approvalStatus === 'rejected')
   );
 
-  const previewSource = useMemo(() => {
-    if (!currentCert) return '';
-    const cleanMem = encodeURIComponent(targetMemberNo);
-    const isAdminUser = ['super_admin', 'state_admin', 'prant_admin', 'city_admin'].includes(currentUser?.role || '');
-    let url = currentCert.proxyViewUrl || '';
-    if (!url) {
-      url = `/api/drive/file/${currentCert.id}`;
-    }
-    const fullUrl = url.startsWith('http') ? url : apiUrl(url);
-    const sep = fullUrl.includes('?') ? '&' : '?';
-    const params: string[] = [];
-    if (cleanMem && !fullUrl.includes('memberId=')) params.push(`memberId=${cleanMem}`);
-    if (isAdminUser && !fullUrl.includes('admin=')) {
-      params.push('admin=true');
-      if (currentUser?.role) params.push(`adminRole=${encodeURIComponent(currentUser.role)}`);
-      if (currentUser?.email) params.push(`adminEmail=${encodeURIComponent(currentUser.email)}`);
-    }
-    return params.length > 0 ? `${fullUrl}${sep}${params.join('&')}` : fullUrl;
-  }, [currentCert, targetMemberNo, currentUser]);
-
   const imageUrl = previewSource;
 
   return (
@@ -295,7 +332,27 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
 
         {/* Modal Content */}
         <div className="p-4 sm:p-6 overflow-y-auto flex-1 flex flex-col justify-between space-y-4">
-          {isLoading ? (
+          {selectedEventId && !isMemberAttendedForEvent(selectedEventId, selectedEventTitle) ? (
+            /* Attendance Confirmation Required Block */
+            <div className="py-16 text-center space-y-4 my-auto">
+              <div className="w-16 h-16 rounded-3xl bg-amber-50 text-amber-700 flex items-center justify-center mx-auto border border-amber-200 shadow-inner">
+                <Lock className="w-8 h-8" />
+              </div>
+              <div className="max-w-md mx-auto space-y-2">
+                <h4 className="text-base font-bold text-slate-900">
+                  Attendance Confirmation Required
+                </h4>
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  Certificates for <strong>&quot;{selectedEventTitle || 'this event'}&quot;</strong> are strictly restricted to members whose attendance has been officially confirmed as <strong>&quot;Attended&quot;</strong> by administrators.
+                </p>
+                <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-[11px] text-amber-900 leading-relaxed text-left space-y-1">
+                  <p className="font-semibold text-amber-950">Verification Notice:</p>
+                  <p>Your attendance has not been confirmed from the admin side yet. Only verified attendees are permitted to view or upload certificates for this event.</p>
+                  <p className="text-amber-800 font-medium">Please visit the event attendance desk or have an event administrator scan your Member ID Card QR to unlock your certificate.</p>
+                </div>
+              </div>
+            </div>
+          ) : isLoading ? (
             <div className="py-24 text-center text-slate-500 space-y-3">
               <div className="w-10 h-10 border-3 border-red-700 border-t-transparent rounded-full animate-spin mx-auto" />
               <p className="text-sm font-semibold text-slate-800">
@@ -326,7 +383,7 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
                 </p>
               </div>
 
-              {onOpenUpload && (
+              {onOpenUpload && (!selectedEventId || isMemberAttendedForEvent(selectedEventId, selectedEventTitle)) && (
                 <div className="pt-2">
                   <button
                     type="button"

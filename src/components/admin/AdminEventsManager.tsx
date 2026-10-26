@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { useNMO } from '../../context/NMOContext';
+import { AdminQRScannerModal } from './AdminQRScannerModal';
 import {
   NMOEvent,
   EventStatus,
@@ -36,7 +37,8 @@ import {
   ExternalLink,
   FolderOpen,
   ShieldAlert,
-  Award
+  Award,
+  ScanLine
 } from 'lucide-react';
 import {
   connectGoogleDrive,
@@ -145,6 +147,7 @@ export const AdminEventsManager: React.FC<AdminEventsManagerProps> = ({
   const [eventToDelete, setEventToDelete] = useState<NMOEvent | null>(null);
   const [deleteDriveFoldersChecked, setDeleteDriveFoldersChecked] = useState(true);
   const [isDeletingEvent, setIsDeletingEvent] = useState(false);
+  const [qrScannerEventId, setQrScannerEventId] = useState<string | null>(null);
 
   const handleCreateDriveSubfolder = async (evt: NMOEvent) => {
     setDriveActionId(evt.eventId);
@@ -1003,6 +1006,16 @@ export const AdminEventsManager: React.FC<AdminEventsManagerProps> = ({
 
                 <div className="flex flex-wrap items-center gap-2">
                   <button
+                    type="button"
+                    onClick={() => setQrScannerEventId(activeRsvpEvent.eventId)}
+                    className="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
+                    title="Scan Member ID Card QR to record presence and attendance"
+                  >
+                    <ScanLine className="w-3.5 h-3.5" />
+                    <span>Scan ID Card</span>
+                  </button>
+
+                  <button
                     onClick={() => setShowAddRsvpForm(!showAddRsvpForm)}
                     className="px-3 py-1.5 bg-red-700 hover:bg-red-800 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
                   >
@@ -1418,6 +1431,13 @@ export const AdminEventsManager: React.FC<AdminEventsManagerProps> = ({
           </div>
         </div>
       )}
+
+      {/* Admin QR Attendance Scanner Modal */}
+      <AdminQRScannerModal
+        isOpen={Boolean(qrScannerEventId)}
+        onClose={() => setQrScannerEventId(null)}
+        defaultEventId={qrScannerEventId}
+      />
     </div>
   );
 };

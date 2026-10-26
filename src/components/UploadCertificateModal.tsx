@@ -70,8 +70,8 @@ export const UploadCertificateModal: React.FC<UploadCertificateModalProps> = ({
       return;
     }
 
-    if (file.size > 15 * 1024 * 1024) {
-      setErrorMessage('File size exceeds the 15MB limit. Please upload a smaller certificate file.');
+    if (file.size > 1 * 1024 * 1024) {
+      setErrorMessage('File size exceeds the 1 MB limit for member uploads. Please compress your certificate file to under 1 MB.');
       setSelectedFile(null);
       setPreviewUrl(null);
       return;
@@ -86,6 +86,17 @@ export const UploadCertificateModal: React.FC<UploadCertificateModalProps> = ({
     }
   };
 
+  // Check if member is confirmed attendee for an event
+  const isMemberAttendedForEvent = (evtId: string): boolean => {
+    if (!evtId || evtId === 'general') return true;
+    const evt = events.find((e) => e.eventId === evtId);
+    if (!evt) return false;
+    const p = evt.participants?.find(
+      (part) => part.membershipNumber.trim().toUpperCase() === memberNo.trim().toUpperCase()
+    );
+    return p?.attendanceStatus === 'Attended';
+  };
+
   const handleUploadSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
@@ -96,9 +107,21 @@ export const UploadCertificateModal: React.FC<UploadCertificateModalProps> = ({
       return;
     }
 
+    if (selectedFile.size > 1 * 1024 * 1024) {
+      setErrorMessage('File size exceeds the 1 MB limit for member uploads. Please select a certificate file under 1 MB.');
+      return;
+    }
+
     // Ensure memberNo is obtained from verified authenticated user profile only
     if (!memberNo) {
       setErrorMessage('Authentication error: No linked membership ID found on your current session. Please verify your member profile.');
+      return;
+    }
+
+    // Check confirmed attendance for specific event
+    if (selectedEventId && !isMemberAttendedForEvent(selectedEventId)) {
+      const matchedEvt = events.find((ev) => ev.eventId === selectedEventId);
+      setErrorMessage(`Attendance verification required: Only participants with confirmed attendance ("Attended") by administrators can upload certificates for "${matchedEvt?.title || 'this event'}".`);
       return;
     }
 
@@ -239,7 +262,7 @@ export const UploadCertificateModal: React.FC<UploadCertificateModalProps> = ({
                     {selectedFile ? selectedFile.name : 'Click to select certificate file'}
                   </span>
                   <span className="text-[11px] text-slate-500 mt-0.5">
-                    Accepted formats: .PDF, .JPG, .JPEG, .PNG (Max: 15MB)
+                    Accepted formats: .PDF, .JPG, .JPEG, .PNG (Max: 1 MB)
                   </span>
                 </label>
               </div>
@@ -280,11 +303,14 @@ export const UploadCertificateModal: React.FC<UploadCertificateModalProps> = ({
                 className="w-full px-3 py-2.5 border border-slate-300 rounded-xl bg-white font-medium focus:ring-2 focus:ring-red-600 focus:outline-hidden"
               >
                 <option value="">-- General Certificate / Independent CME --</option>
-                {events.map((evt) => (
-                  <option key={evt.eventId} value={evt.eventId}>
-                    {evt.title} ({evt.city}) {evt.certificateUploadMode === 'admin' ? '🔒 [Admin-Issued Only]' : '📤 [Member Upload]'}
-                  </option>
-                ))}
+                {events.map((evt) => {
+                  const attended = isMemberAttendedForEvent(evt.eventId);
+                  return (
+                    <option key={evt.eventId} value={evt.eventId}>
+                      {evt.title} ({evt.city}) {evt.certificateUploadMode === 'admin' ? '🔒 [Admin-Issued Only]' : attended ? '✓ [Attendance Confirmed]' : '⚠️ [Attendance Not Confirmed]'}
+                    </option>
+                  );
+                })}
               </select>
             </div>
 
@@ -300,6 +326,29 @@ export const UploadCertificateModal: React.FC<UploadCertificateModalProps> = ({
                     <span className="font-bold block text-purple-900">Admin-Issued Event: Upload Restricted</span>
                     <p className="mt-0.5 text-purple-800 leading-relaxed">
                       Certificates for <strong>{selectedEvt?.title}</strong> are uploaded directly by the NMO Gujarat Admin team. Members cannot submit certificates for this event. Please wait for administrators to upload and issue your verified certificate.
+                    </p>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* Attendance Confirmation Warning / Notice */}
+            {(() => {
+              if (!selectedEventId || selectedEventId === 'general') return null;
+              const selectedEvt = events.find((ev) => ev.eventId === selectedEventId);
+              if (selectedEvt?.certificateUploadMode === 'admin') return null; // already shown above
+              const attended = isMemberAttendedForEvent(selectedEventId);
+              if (attended) return null;
+              return (
+                <div className="p-3.5 bg-amber-50 border border-amber-300 rounded-xl text-[11px] text-amber-950 flex items-start gap-2.5">
+                  <AlertCircle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-bold block text-amber-900">Attendance Confirmation Required</span>
+                    <p className="mt-0.5 text-amber-800 leading-relaxed">
+                      Certificates for <strong>{selectedEvt?.title || 'this event'}</strong> are strictly restricted to members who attended the event. Your attendance has not been confirmed as &quot;Attended&quot; by event administrators yet.
+                    </p>
+                    <p className="mt-1 text-[10px] text-amber-700 font-medium">
+                      If you attended this event, please request an event administrator to scan your ID card or mark your attendance in the Admin Portal.
                     </p>
                   </div>
                 </div>
@@ -324,7 +373,7 @@ export const UploadCertificateModal: React.FC<UploadCertificateModalProps> = ({
             <div className="p-3 bg-amber-50/80 border border-amber-200 rounded-xl text-[11px] text-amber-900 flex items-start gap-2">
               <Sparkles className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
               <p className="leading-relaxed">
-                <strong>Storage Policy:</strong> The certificate will be saved using your Membership ID only (<code>{memberNo ? `${memberNo}.${selectedFile?.name.split('.').pop()?.toLowerCase() || 'jpg'}` : 'MEMBERSHIP_ID'}</code>) directly into Google Drive and linked for instant retrieval in your Show Certificate modal.
+                <strong>Storage Policy:</strong> Max size 1 MB. The certificate will be saved using your Membership ID only (<code>{memberNo ? `${memberNo}.${selectedFile?.name.split('.').pop()?.toLowerCase() || 'jpg'}` : 'MEMBERSHIP_ID'}</code>) directly into Google Drive and submitted for admin review.
               </p>
             </div>
 
@@ -332,6 +381,9 @@ export const UploadCertificateModal: React.FC<UploadCertificateModalProps> = ({
             {(() => {
               const selectedEvt = events.find((ev) => ev.eventId === selectedEventId);
               const isAdminOnly = selectedEvt?.certificateUploadMode === 'admin';
+              const isNotAttended = Boolean(selectedEventId && !isMemberAttendedForEvent(selectedEventId));
+              const isBlocked = isAdminOnly || isNotAttended;
+
               return (
                 <div className="pt-2 flex items-center justify-end gap-3 border-t border-slate-100">
                   <button
@@ -344,10 +396,10 @@ export const UploadCertificateModal: React.FC<UploadCertificateModalProps> = ({
                   </button>
                   <button
                     type="submit"
-                    disabled={isUploading || !selectedFile || isAdminOnly}
+                    disabled={isUploading || !selectedFile || isBlocked}
                     className={`px-5 py-2.5 font-bold rounded-xl transition-all shadow-md flex items-center gap-2 ${
-                      isAdminOnly
-                        ? 'bg-purple-200 text-purple-700 border border-purple-300 cursor-not-allowed shadow-none'
+                      isBlocked
+                        ? 'bg-amber-100 text-amber-800 border border-amber-300 cursor-not-allowed shadow-none'
                         : 'bg-red-700 hover:bg-red-800 disabled:bg-slate-300 text-white cursor-pointer'
                     }`}
                   >
@@ -355,6 +407,11 @@ export const UploadCertificateModal: React.FC<UploadCertificateModalProps> = ({
                       <>
                         <Lock className="w-4 h-4 text-purple-600" />
                         <span>Awaiting Administrator Upload</span>
+                      </>
+                    ) : isNotAttended ? (
+                      <>
+                        <Lock className="w-4 h-4 text-amber-700" />
+                        <span>Attendance Not Confirmed</span>
                       </>
                     ) : isUploading ? (
                       <>

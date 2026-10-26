@@ -1053,12 +1053,19 @@ export const uploadCertificateToDrive = async (
     throw new Error('Invalid file type: Only PDF, JPG, JPEG, and PNG files are allowed for certificates.');
   }
 
-  if (file.size > 15 * 1024 * 1024) {
-    throw new Error('File exceeds 15MB size limit. Please upload a smaller certificate file.');
-  }
-
   const source: 'admin' | 'user' =
     metadata.uploadSource || (metadata.uploadedBy === 'member' ? 'user' : 'admin');
+
+  // Enforce 1 MB limit for user-uploaded certificates only (admins can upload up to 15MB)
+  const isUserUpload = source === 'user';
+  const maxBytes = isUserUpload ? 1 * 1024 * 1024 : 15 * 1024 * 1024;
+  if (file.size > maxBytes) {
+    throw new Error(
+      isUserUpload
+        ? 'File exceeds 1 MB limit for member uploads. Please select or compress your certificate to under 1 MB.'
+        : 'File exceeds 15MB size limit. Please upload a smaller certificate file.'
+    );
+  }
 
   const finalApprovalStatus: 'not_required' | 'pending' =
     source === 'admin' ? 'not_required' : 'pending';

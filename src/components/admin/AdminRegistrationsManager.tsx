@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { useNMO } from '../../context/NMOContext';
 import { ApprovalStatus, AttendanceStatus } from '../../types/nmo';
+import { AdminQRScannerModal } from './AdminQRScannerModal';
 import {
   CheckCircle2,
   XCircle,
@@ -16,7 +17,8 @@ import {
   X,
   UserPlus,
   Copy,
-  Trash2
+  Trash2,
+  ScanLine
 } from 'lucide-react';
 
 interface AdminRegistrationsManagerProps {
@@ -49,6 +51,7 @@ export const AdminRegistrationsManager: React.FC<AdminRegistrationsManagerProps>
   const [attendanceFilter, setAttendanceFilter] = useState<string>('All');
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [showQRScanner, setShowQRScanner] = useState<boolean>(false);
 
   React.useEffect(() => {
     if (initialEventId) {
@@ -201,6 +204,15 @@ export const AdminRegistrationsManager: React.FC<AdminRegistrationsManagerProps>
             <RefreshCw className={`w-3.5 h-3.5 text-slate-600 ${isSyncing ? 'animate-spin text-red-600' : ''}`} />
             <span>{isSyncing ? 'Syncing...' : 'Refresh DB'}</span>
             {lastSyncTime && <span className="text-[10px] text-slate-500 font-mono hidden md:inline">({lastSyncTime})</span>}
+          </button>
+
+          <button
+            onClick={() => setShowQRScanner(true)}
+            className="px-3.5 py-2 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
+            title="Scan Member ID Card QR to automatically record presence and approve attendance"
+          >
+            <ScanLine className="w-3.5 h-3.5" />
+            <span>Scan ID Card (Attendance)</span>
           </button>
 
           <button
@@ -532,6 +544,13 @@ export const AdminRegistrationsManager: React.FC<AdminRegistrationsManagerProps>
           </table>
         </div>
       </div>
+
+      {/* Admin QR Attendance Scanner Modal */}
+      <AdminQRScannerModal
+        isOpen={showQRScanner}
+        onClose={() => setShowQRScanner(false)}
+        defaultEventId={selectedEventId !== 'All' ? selectedEventId : null}
+      />
     </div>
   );
 };

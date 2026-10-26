@@ -65,17 +65,45 @@ export const MemberCertificatesTab: React.FC = () => {
   const memberNo = currentMember?.membershipNumber || currentUser?.membershipNumber || '';
   const memberName = currentMember?.name || currentUser?.name || 'NMO Member';
 
-  const approvedCerts = certificates.filter(
+  // Attendance check helper: if certificate is linked to an event, member must have attended
+  const isMemberAttendedForEvent = (eventId?: string, eventTitle?: string): boolean => {
+    if (!eventId || eventId === 'general') {
+      if (eventTitle) {
+        const cleanTitle = eventTitle.trim().toLowerCase();
+        const matched = events.find((e) => e.title.trim().toLowerCase() === cleanTitle);
+        if (matched) {
+          const p = matched.participants?.find(
+            (part) => part.membershipNumber.trim().toUpperCase() === memberNo.trim().toUpperCase()
+          );
+          return p?.attendanceStatus === 'Attended';
+        }
+      }
+      return true;
+    }
+    const evt = events.find((e) => e.eventId === eventId);
+    if (!evt) return true;
+    const p = evt.participants?.find(
+      (part) => part.membershipNumber.trim().toUpperCase() === memberNo.trim().toUpperCase()
+    );
+    return p?.attendanceStatus === 'Attended';
+  };
+
+  // Only display certificates where the member has attended the specific event (or general certificates)
+  const attendeeAllowedCertificates = certificates.filter((c) => {
+    return isMemberAttendedForEvent(c.eventId, c.eventTitle || c.eventName);
+  });
+
+  const approvedCerts = attendeeAllowedCertificates.filter(
     (c) => c.approvalStatus === 'approved' || c.approvalStatus === 'not_required' || (!c.approvalStatus && c.uploadSource === 'admin')
   );
-  const pendingCerts = certificates.filter(
+  const pendingCerts = attendeeAllowedCertificates.filter(
     (c) => c.approvalStatus === 'pending' || c.approvalStatus === 'pending_approval'
   );
-  const rejectedCerts = certificates.filter(
+  const rejectedCerts = attendeeAllowedCertificates.filter(
     (c) => c.approvalStatus === 'rejected'
   );
 
-  const displayedCertificates = certificates.filter((c) => {
+  const displayedCertificates = attendeeAllowedCertificates.filter((c) => {
     if (statusFilter === 'approved') {
       return c.approvalStatus === 'approved' || c.approvalStatus === 'not_required' || (!c.approvalStatus && c.uploadSource === 'admin');
     }
@@ -88,6 +116,9 @@ export const MemberCertificatesTab: React.FC = () => {
     return true;
   });
 
+  // Count certificates hidden due to unconfirmed attendance
+  const unconfirmedAttendanceCertsCount = certificates.length - attendeeAllowedCertificates.length;
+
   // Load certificates on mount or when memberNo changes with real-time Firestore sync
   useEffect(() => {
     if (!memberNo) return;
@@ -99,14 +130,26 @@ export const MemberCertificatesTab: React.FC = () => {
 
     try {
       const q1 = query(collection(db, 'Certificates'), where('membershipNumber', '==', memberNo));
-      unsubscribe1 = onSnapshot(q1, () => {
-        loadCertificates();
-      });
+      unsubscribe1 = onSnapshot(
+        q1,
+        () => {
+          loadCertificates();
+        },
+        (err) => {
+          console.warn('Real-time sync Certificates listener notice:', err?.message || err);
+        }
+      );
 
       const q2 = query(collection(db, 'certificates'), where('membershipNumber', '==', memberNo));
-      unsubscribe2 = onSnapshot(q2, () => {
-        loadCertificates();
-      });
+      unsubscribe2 = onSnapshot(
+        q2,
+        () => {
+          loadCertificates();
+        },
+        (err) => {
+          console.warn('Real-time sync certificates listener notice:', err?.message || err);
+        }
+      );
     } catch (e) {
       console.warn('Real-time certificate sync notice:', e);
     }
@@ -149,13 +192,23 @@ export const MemberCertificatesTab: React.FC = () => {
       return;
     }
 
-    if (selectedFile.size > 15 * 1024 * 1024) {
-      setUploadFeedback({ message: 'File size exceeds the 15MB limit. Please upload a smaller file.', type: 'error' });
+    if (selectedFile.size > 1 * 1024 * 1024) {
+      setUploadFeedback({ message: 'File size exceeds the 1 MB limit for member uploads. Please upload a certificate file under 1 MB.', type: 'error' });
       return;
     }
 
     if (!memberNo) {
       setUploadFeedback({ message: 'No linked membership number found on your profile.', type: 'error' });
+      return;
+    }
+
+    // Attendance verification: only attendees confirmed as Attended can upload certificates for a specific event
+    if (selectedEventId && !isMemberAttendedForEvent(selectedEventId, selectedEventTitle)) {
+      const evtTitle = events.find((ev) => ev.eventId === selectedEventId)?.title || selectedEventTitle || 'this event';
+      setUploadFeedback({
+        message: `Attendance verification required: Only members whose attendance has been officially confirmed as "Attended" by administrators can upload certificates for "${evtTitle}".`,
+        type: 'error'
+      });
       return;
     }
 
@@ -302,6 +355,15 @@ export const MemberCertificatesTab: React.FC = () => {
       const cleanEventTitle = modifyEventTitle.trim() || modifyingCert.eventTitle || modifyingCert.eventName || 'NMO Event';
 
       if (modifyFile) {
+        if (modifyFile.size > 1 * 1024 * 1024) {
+          setUploadFeedback({
+            message: 'File size exceeds the 1 MB limit for member uploads. Please select a file under 1 MB.',
+            type: 'error'
+          });
+          setIsModifying(false);
+          return;
+        }
+
         // Replace file in Google Drive with overwriteExisting: true
         const uploaded = await uploadCertificateToDrive(modifyFile, {
           membershipNumber: memberNo,
@@ -434,7 +496,7 @@ export const MemberCertificatesTab: React.FC = () => {
               {/* File Dropzone */}
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">
-                  Select Certificate File (PDF / JPG / PNG) *
+                  Select Certificate File (PDF / JPG / PNG - Max 1 MB) *
                 </label>
                 <input
                   type="file"
@@ -448,8 +510,8 @@ export const MemberCertificatesTab: React.FC = () => {
                   className="w-full text-xs text-slate-500 file:mr-3 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-red-50 file:text-red-700 hover:file:bg-red-100 cursor-pointer border border-slate-200 rounded-xl p-2 bg-slate-50"
                 />
                 {selectedFile && (
-                  <div className="mt-1.5 text-[11px] text-emerald-600 flex items-center gap-1 font-mono">
-                    <span>✓ {selectedFile.name}</span>
+                  <div className={`mt-1.5 text-[11px] flex items-center gap-1 font-mono ${selectedFile.size > 1 * 1024 * 1024 ? 'text-red-600 font-bold' : 'text-emerald-600'}`}>
+                    <span>{selectedFile.size > 1 * 1024 * 1024 ? '⚠️ File exceeds 1 MB limit:' : '✓'} {selectedFile.name}</span>
                     <span>({(selectedFile.size / 1024).toFixed(1)} KB)</span>
                   </div>
                 )}
@@ -469,12 +531,15 @@ export const MemberCertificatesTab: React.FC = () => {
                   }}
                   className="w-full px-3 py-2 border border-slate-300 rounded-xl bg-white font-medium"
                 >
-                  <option value="">-- Choose Event or Workshop --</option>
-                  {events.map((evt) => (
-                    <option key={evt.eventId} value={evt.eventId}>
-                      {evt.title} ({evt.city}) {evt.certificateUploadMode === 'admin' ? '🔒 [Admin-Issued Only]' : '📤 [Member Upload]'}
-                    </option>
-                  ))}
+                  <option value="">-- General Certificate / Independent CME --</option>
+                  {events.map((evt) => {
+                    const attended = isMemberAttendedForEvent(evt.eventId, evt.title);
+                    return (
+                      <option key={evt.eventId} value={evt.eventId}>
+                        {evt.title} ({evt.city}) {evt.certificateUploadMode === 'admin' ? '🔒 [Admin-Issued Only]' : attended ? '✓ [Attendance Confirmed]' : '⚠️ [Attendance Not Confirmed]'}
+                      </option>
+                    );
+                  })}
                 </select>
               </div>
 
@@ -495,6 +560,30 @@ export const MemberCertificatesTab: React.FC = () => {
                 </div>
               )}
 
+              {/* Attendance Confirmation Warning / Notice */}
+              {(() => {
+                if (!selectedEventId || selectedEventId === 'general') return null;
+                const selectedEvt = events.find((ev) => ev.eventId === selectedEventId);
+                if (selectedEvt?.certificateUploadMode === 'admin') return null;
+                const attended = isMemberAttendedForEvent(selectedEventId, selectedEventTitle);
+                if (attended) return null;
+                return (
+                  <div className="p-4 bg-amber-50 border border-amber-300 rounded-2xl text-amber-950 space-y-2 text-xs animate-in fade-in duration-200 shadow-xs">
+                    <div className="flex items-center gap-2 font-bold text-amber-900">
+                      <AlertCircle className="w-4 h-4 text-amber-700" />
+                      <span>Attendance Confirmation Required</span>
+                    </div>
+                    <p className="text-[11px] text-amber-800 leading-relaxed">
+                      Certificates for <strong>"{selectedEvt?.title || 'this event'}"</strong> are restricted to members whose attendance has been officially confirmed as <strong>Attended</strong> by administrators. Your attendance has not been confirmed yet.
+                    </p>
+                    <div className="p-2.5 bg-white/80 rounded-xl border border-amber-200 text-[11px] text-amber-900 font-medium flex items-center gap-2">
+                      <Clock className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                      <span>Please have an event organizer scan your ID card QR or mark your attendance in the Admin Attendance desk.</span>
+                    </div>
+                  </div>
+                );
+              })()}
+
               {/* Custom Title */}
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">
@@ -511,32 +600,52 @@ export const MemberCertificatesTab: React.FC = () => {
               </div>
 
               <div className="pt-2">
-                <button
-                  type="submit"
-                  disabled={
-                    isUploading ||
-                    !selectedFile ||
-                    Boolean(selectedEventId && events.find((ev) => ev.eventId === selectedEventId)?.certificateUploadMode === 'admin')
-                  }
-                  className="w-full py-2.5 px-4 bg-red-700 hover:bg-red-800 disabled:bg-slate-300 text-white font-bold rounded-xl transition-all shadow-xs flex items-center justify-center gap-2 cursor-pointer"
-                >
-                  {Boolean(selectedEventId && events.find((ev) => ev.eventId === selectedEventId)?.certificateUploadMode === 'admin') ? (
-                    <>
-                      <Lock className="w-4 h-4" />
-                      <span>Awaiting Administrator Upload</span>
-                    </>
-                  ) : isUploading ? (
-                    <>
-                      <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                      <span>Uploading to Google Drive...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Upload className="w-4 h-4" />
-                      <span>Upload Certificate to Drive</span>
-                    </>
-                  )}
-                </button>
+                {(() => {
+                  const selectedEvt = events.find((ev) => ev.eventId === selectedEventId);
+                  const isAdminOnly = selectedEvt?.certificateUploadMode === 'admin';
+                  const isNotAttended = Boolean(selectedEventId && !isMemberAttendedForEvent(selectedEventId, selectedEventTitle));
+                  const isOverLimit = Boolean(selectedFile && selectedFile.size > 1 * 1024 * 1024);
+                  const isBlocked = isAdminOnly || isNotAttended || isOverLimit;
+
+                  return (
+                    <button
+                      type="submit"
+                      disabled={isUploading || !selectedFile || isBlocked}
+                      className={`w-full py-2.5 px-4 font-bold rounded-xl transition-all shadow-xs flex items-center justify-center gap-2 ${
+                        isBlocked
+                          ? 'bg-amber-100 text-amber-800 border border-amber-300 cursor-not-allowed'
+                          : 'bg-red-700 hover:bg-red-800 disabled:bg-slate-300 text-white cursor-pointer'
+                      }`}
+                    >
+                      {isAdminOnly ? (
+                        <>
+                          <Lock className="w-4 h-4 text-purple-700" />
+                          <span>Awaiting Administrator Upload</span>
+                        </>
+                      ) : isNotAttended ? (
+                        <>
+                          <Lock className="w-4 h-4 text-amber-700" />
+                          <span>Attendance Not Confirmed</span>
+                        </>
+                      ) : isOverLimit ? (
+                        <>
+                          <AlertCircle className="w-4 h-4 text-red-600" />
+                          <span>File Exceeds 1 MB Limit</span>
+                        </>
+                      ) : isUploading ? (
+                        <>
+                          <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                          <span>Uploading to Google Drive...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Upload className="w-4 h-4" />
+                          <span>Upload Certificate to Drive</span>
+                        </>
+                      )}
+                    </button>
+                  );
+                })()}
               </div>
             </form>
           </div>
@@ -558,9 +667,16 @@ export const MemberCertificatesTab: React.FC = () => {
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4 pb-3 border-b border-slate-100">
               <div className="flex items-center gap-2.5">
                 <FileCheck className="w-5 h-5 text-emerald-600" />
-                <h4 className="font-bold text-slate-900 text-sm sm:text-base">
-                  My Assigned Certificates ({certificates.length})
-                </h4>
+                <div>
+                  <h4 className="font-bold text-slate-900 text-sm sm:text-base flex items-center gap-2">
+                    <span>My Assigned Certificates ({attendeeAllowedCertificates.length})</span>
+                    {unconfirmedAttendanceCertsCount > 0 && (
+                      <span className="text-[10px] text-amber-800 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-300 font-medium">
+                        {unconfirmedAttendanceCertsCount} unconfirmed locked
+                      </span>
+                    )}
+                  </h4>
+                </div>
               </div>
               <span className="text-[11px] font-mono text-slate-500">
                 Member ID: <strong className="text-red-700">{memberNo}</strong>
@@ -578,7 +694,7 @@ export const MemberCertificatesTab: React.FC = () => {
                     : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
                 }`}
               >
-                All ({certificates.length})
+                All ({attendeeAllowedCertificates.length})
               </button>
               <button
                 type="button"

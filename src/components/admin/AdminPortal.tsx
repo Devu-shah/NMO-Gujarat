@@ -18,6 +18,7 @@ import { AdminUsersManager } from './AdminUsersManager';
 import { AdminAdministratorsManager } from './AdminAdministratorsManager';
 import { AdminCertificatesManager } from './AdminCertificatesManager';
 import { AdminSettings } from './AdminSettings';
+import { AdminQRScannerModal } from './AdminQRScannerModal';
 import {
   LayoutDashboard,
   Database,
@@ -41,7 +42,8 @@ import {
   LogOut,
   ArrowLeft,
   Activity,
-  Sliders
+  Sliders,
+  ScanLine
 } from 'lucide-react';
 
 interface AdminPortalProps {
@@ -64,6 +66,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ onBackToSite, portalSc
     return paramEventId || null;
   });
   const [dataMenuOpen, setDataMenuOpen] = useState(true);
+  const [showQRScannerModal, setShowQRScannerModal] = useState<boolean>(false);
 
   // Sync state if URL query params update via back/forward navigation
   useEffect(() => {
@@ -223,6 +226,21 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ onBackToSite, portalSc
                   {pendingRegistrationsCount}
                 </span>
               )}
+            </button>
+
+            {/* Quick QR Attendance Scanner for ID Cards */}
+            <button
+              onClick={() => setShowQRScannerModal(true)}
+              className="w-full flex items-center justify-between px-3 py-2 rounded-lg font-bold text-emerald-300 hover:bg-emerald-950/60 hover:text-emerald-200 border border-emerald-700/50 transition-colors cursor-pointer"
+              title="Open camera to scan member ID cards and automatically mark attendance"
+            >
+              <div className="flex items-center gap-2.5">
+                <ScanLine className="w-4 h-4 text-emerald-400" />
+                <span>Scan ID Cards (QR)</span>
+              </div>
+              <span className="text-[9px] font-black uppercase bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 px-1.5 py-0.5 rounded">
+                Live
+              </span>
             </button>
 
             {/* Google Drive Certificates */}
@@ -464,6 +482,12 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ onBackToSite, portalSc
         {activeSection === 'data-validation' && <MemberDataImport initialMode="validate_only" />}
         {activeSection === 'settings' && <AdminSettings />}
       </main>
+
+      {/* Admin QR Attendance Scanner Modal */}
+      <AdminQRScannerModal
+        isOpen={showQRScannerModal}
+        onClose={() => setShowQRScannerModal(false)}
+      />
     </div>
   );
 };

@@ -70,6 +70,20 @@ service cloud.firestore {
     }
 
     /**
+     * Check if user is an Administrator (Super, State, Prant, or City Admin)
+     */
+    function isAdmin() {
+      return isAuthenticated() && (
+        isStateAdmin() ||
+        request.auth.token.role == 'super_admin' ||
+        request.auth.token.role == 'state_admin' ||
+        request.auth.token.role == 'prant_admin' ||
+        request.auth.token.role == 'city_admin' ||
+        request.auth.token.email == 'devanshshah768@gmail.com'
+      );
+    }
+
+    /**
      * Check if the user is the owner of the record (by UID or Email)
      */
     function isOwner(uid, email) {
@@ -162,14 +176,17 @@ service cloud.firestore {
     match /Events/{eventId} {
       allow read: if true;
 
-      allow create: if isStateAdmin() || (
+      allow create: if isStateAdmin() || isAdmin() || (
         isAuthenticated() && (
           (request.resource.data.prant != null && isPrantAdmin(request.resource.data.prant)) ||
           (request.resource.data.city != null && isCityAdmin(request.resource.data.city))
         )
       );
 
-      allow update: if isStateAdmin() || (
+      // Attendance Management & Event Updates:
+      // Admins (Super, State, Prant, City) have full update permissions for participant attendance and status
+      // Members can register/RSVP by updating participants array
+      allow update: if isStateAdmin() || isAdmin() || (
         isAuthenticated() && (
           (resource.data.prant != null && isPrantAdmin(resource.data.prant)) ||
           (resource.data.city != null && isCityAdmin(resource.data.city)) ||
@@ -188,17 +205,17 @@ service cloud.firestore {
     // =========================================================================
     // Read: Public & Members can verify registration; Admins view all
     // Create: Public & Members can submit registrations for open events
-    // Update: Owner can update or Admin can approve/mark attendance
+    // Update: Owner can update, or Admins can mark attendance / approve
     // Delete: Owner can cancel, or Admin can remove
     match /event_registrations/{regId} {
       allow read: if true;
       allow create: if true;
-      allow update: if isStateAdmin() || isAuthenticated() || (
+      allow update: if isStateAdmin() || isAdmin() || isAuthenticated() || (
         resource.data.email != null &&
         request.resource.data.email != null &&
         resource.data.email.lower() == request.resource.data.email.lower()
       );
-      allow delete: if isStateAdmin() || isAuthenticated();
+      allow delete: if isStateAdmin() || isAdmin() || isAuthenticated();
     }
 
     // =========================================================================
@@ -208,7 +225,7 @@ service cloud.firestore {
     // Read, Update, Delete: Administrators only
     match /inquiries/{inquiryId} {
       allow create: if true;
-      allow read, update, delete: if isStateAdmin() || isAuthenticated();
+      allow read, update, delete: if isStateAdmin() || isAdmin() || isAuthenticated();
     }
 
     // =========================================================================
@@ -218,7 +235,7 @@ service cloud.firestore {
     // Write: State & Prant Administrators
     match /announcements/{announcementId} {
       allow read: if true;
-      allow write: if isStateAdmin() || (
+      allow write: if isStateAdmin() || isAdmin() || (
         isAuthenticated() && (
           request.resource.data.prant != null && isPrantAdmin(request.resource.data.prant)
         )
@@ -228,18 +245,24 @@ service cloud.firestore {
     // =========================================================================
     // 9. CERTIFICATES COLLECTION (Google Drive Linked Certificates)
     // =========================================================================
-    // Read: Public & Members (downloading official CME certificates)
-    // Write: State Admins, Super Admins, and authenticated organizers
+    // Read: Authenticated users can read their certificate metadata, public can verify
+    // Write: Administrators and authenticated members submitting certificate records
     match /Certificates/{certId} {
       allow read: if true;
-      allow create, update, delete: if isStateAdmin() || isAuthenticated();
+      allow create, update: if isStateAdmin() || isAdmin() || isAuthenticated() || (
+        request.resource.data.membershipNumber != null
+      );
+      allow delete: if isStateAdmin() || isAdmin() || isAuthenticated();
     }
     match /certificates/{certId} {
       allow read: if true;
-      allow create, update, delete: if isStateAdmin() || isAuthenticated();
+      allow create, update: if isStateAdmin() || isAdmin() || isAuthenticated() || (
+        request.resource.data.membershipNumber != null
+      );
+      allow delete: if isStateAdmin() || isAdmin() || isAuthenticated();
     }
     match /CertificateTombstones/{tombstoneId} {
-      allow read, write: if isStateAdmin() || isAuthenticated();
+      allow read, write: if isStateAdmin() || isAdmin() || isAuthenticated();
     }
 
     // =========================================================================
