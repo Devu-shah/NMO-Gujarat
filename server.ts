@@ -5245,6 +5245,95 @@ Recipient:        ${RECIPIENT_EMAIL}
   });
 
   /**
+   * Helper to mark a certificate as missing in Firestore database collections:
+   * "Certificates" and "certificates".
+   */
+  async function markCertificateMissingInDatabase(
+    fileId: string,
+    details?: { membershipNumber?: string; eventId?: string; reason?: string }
+  ) {
+    if (!fileId) return;
+    try {
+      const adminDb = getAdminFirestore();
+      if (!adminDb) return;
+
+      const missingUpdate = {
+        status: 'missing',
+        approvalStatus: 'missing',
+        driveStatus: 'missing',
+        isMissingFromDrive: true,
+        missingReason: details?.reason || 'Certificate file missing or trashed in Google Drive',
+        missingDetectedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+
+      const docIds = new Set<string>([fileId]);
+      if (details?.eventId && details?.membershipNumber) {
+        docIds.add(`${details.eventId}_${details.membershipNumber}`);
+      }
+
+      // Also look up any documents that have driveFileId === fileId
+      try {
+        const [qCap, qLow] = await Promise.all([
+          adminDb.collection('Certificates').where('driveFileId', '==', fileId).get().catch(() => null),
+          adminDb.collection('certificates').where('driveFileId', '==', fileId).get().catch(() => null)
+        ]);
+        if (qCap && !qCap.empty) {
+          qCap.docs.forEach((d) => docIds.add(d.id));
+        }
+        if (qLow && !qLow.empty) {
+          qLow.docs.forEach((d) => docIds.add(d.id));
+        }
+      } catch {}
+
+      const ops: Promise<any>[] = [];
+      for (const id of docIds) {
+        ops.push(
+          adminDb.collection('Certificates').doc(id).set(missingUpdate, { merge: true }).catch(() => {}),
+          adminDb.collection('certificates').doc(id).set(missingUpdate, { merge: true }).catch(() => {})
+        );
+      }
+      await Promise.all(ops);
+      console.log(`[Missing Certificate] Successfully updated Firestore certificate record(s) for ${fileId} to status: missing`);
+    } catch (err: any) {
+      console.warn('[Missing Certificate] Error updating Firestore:', err?.message || err);
+    }
+  }
+
+  function renderCertificateMissingHtml(fileId: string, fileName?: string): string {
+    const cleanName = escapeHtml(fileName || 'Certificate');
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>${cleanName} — Certificate Missing from Drive</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #090d16; color: #f1f5f9; margin: 0; padding: 24px; min-height: 100vh; display: flex; align-items: center; justify-content: center; box-sizing: border-box; }
+    .card { background: #131b2e; border: 1px solid #334155; border-radius: 24px; padding: 40px 32px; max-width: 520px; text-align: center; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.7); }
+    .badge { display: inline-block; padding: 6px 14px; background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); border-radius: 9999px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 20px; }
+    h1 { font-size: 20px; font-weight: 900; color: #ffffff; margin: 0 0 12px; }
+    p { font-size: 13px; line-height: 1.6; color: #94a3b8; margin: 0 0 24px; }
+    .notice { background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.2); border-radius: 12px; padding: 12px; font-size: 12px; color: #fde68a; margin-bottom: 24px; text-align: left; }
+    .btn { display: inline-flex; align-items: center; justify-content: center; padding: 12px 24px; background: #b91c1c; color: #ffffff; text-decoration: none; border-radius: 14px; font-weight: 700; font-size: 13px; transition: background 0.2s; }
+    .btn:hover { background: #dc2626; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="badge">Missing from Google Drive</div>
+    <h1>Certificate File Unavailable</h1>
+    <p>The file associated with this certificate is no longer present in the NMO Gujarat Google Drive repository. The certificate has been marked as <strong>Missing</strong> in the database.</p>
+    <div class="notice">
+      <strong>Action Required:</strong> Please sign in to the Member Dashboard to upload a replacement certificate, or contact an administrator to restore the file in Google Drive.
+    </div>
+    <a href="/" class="btn">Return to Certificate Portal</a>
+  </div>
+</body>
+</html>`;
+  }
+
+  /**
    * Helper to render branded HTML certificate viewer for direct browser access.
    */
   function renderCertificateHtmlViewer(fileId: string, fileName?: string, errorMessage?: string): string {
@@ -5298,7 +5387,9 @@ Recipient:        ${RECIPIENT_EMAIL}
   /**
    * GET /api/drive/file/:fileId
    * Streams certificate file content directly from Google Drive or Firestore database cache.
-   * Handles direct browser navigation with elegant HTML viewer instead of raw errors.
+   * If file is missing or trashed in Google Drive:
+   * - Automatically updates Firestore database records to status 'missing'
+   * - Renders friendly missing screen or returns JSON with isMissingFromDrive: true instead of throwing a website error.
    */
   app.get('/api/drive/file/:fileId', async (req, res) => {
     try {
@@ -5351,20 +5442,45 @@ Recipient:        ${RECIPIENT_EMAIL}
         });
       }
 
-      // Fetch metadata first to get correct filename, mimeType, and properties
+      // Fetch metadata first to get correct filename, mimeType, properties, and trashed status
       const metaResp = await fetch(
-        `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,mimeType,size,properties`,
+        `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,mimeType,size,properties,trashed`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
 
       if (!metaResp.ok) {
+        console.warn(`[File Proxy] File ${fileId} not found in Google Drive (status: ${metaResp.status}). Updating database to missing...`);
+        await markCertificateMissingInDatabase(fileId, { reason: 'File not found in Google Drive' });
+
         if (acceptsHtml) {
-          return res.send(renderCertificateHtmlViewer(fileId, 'Certificate File'));
+          return res.send(renderCertificateMissingHtml(fileId, 'Certificate File'));
         }
-        return res.status(metaResp.status).send('Certificate file not found in Google Drive');
+        return res.status(200).json({
+          status: 'missing',
+          approvalStatus: 'missing',
+          isMissingFromDrive: true,
+          error: 'certificate_missing_from_drive',
+          message: 'Certificate file is missing from Google Drive repository.'
+        });
       }
 
       const meta = await metaResp.json();
+
+      if (meta.trashed) {
+        console.warn(`[File Proxy] File ${fileId} is trashed in Google Drive. Updating database to missing...`);
+        await markCertificateMissingInDatabase(fileId, { reason: 'File is trashed in Google Drive' });
+
+        if (acceptsHtml) {
+          return res.send(renderCertificateMissingHtml(fileId, meta.name));
+        }
+        return res.status(200).json({
+          status: 'missing',
+          approvalStatus: 'missing',
+          isMissingFromDrive: true,
+          error: 'certificate_missing_from_drive',
+          message: 'Certificate file is trashed in Google Drive.'
+        });
+      }
 
       // Enforce backend authorization & ownership
       const adminIdentity = getRequesterAdminIdentity(req);
@@ -5453,7 +5569,19 @@ Recipient:        ${RECIPIENT_EMAIL}
       );
 
       if (!mediaResp.ok) {
-        return res.status(mediaResp.status).send('Failed to stream certificate from Google Drive');
+        console.warn(`[File Proxy] Media stream failed for ${fileId} (status: ${mediaResp.status}). Marking missing in database...`);
+        await markCertificateMissingInDatabase(fileId, { reason: 'Media stream unavailable' });
+
+        if (acceptsHtml) {
+          return res.send(renderCertificateMissingHtml(fileId, meta.name));
+        }
+        return res.status(200).json({
+          status: 'missing',
+          approvalStatus: 'missing',
+          isMissingFromDrive: true,
+          error: 'certificate_missing_from_drive',
+          message: 'Failed to stream certificate from Google Drive. Marked as missing.'
+        });
       }
 
       res.setHeader('Content-Type', meta.mimeType || 'application/octet-stream');
@@ -5471,6 +5599,39 @@ Recipient:        ${RECIPIENT_EMAIL}
       return res.status(500).send('Error streaming file');
     }
   });
+
+  /**
+   * POST /api/drive/report-missing-certificate
+   * Explicit endpoint for reporting missing certificate from Google Drive.
+   * Updates database collection to status 'missing' so website never shows raw errors.
+   */
+  app.post('/api/drive/report-missing-certificate', async (req, res) => {
+    try {
+      const { fileId, certId, membershipNumber, eventId, reason } = req.body;
+      const targetId = fileId || certId;
+      if (!targetId) {
+        return res.status(400).json({ error: 'fileId or certId is required' });
+      }
+
+      await markCertificateMissingInDatabase(targetId, {
+        membershipNumber,
+        eventId,
+        reason: reason || 'Reported missing from Google Drive'
+      });
+
+      return res.json({
+        success: true,
+        status: 'missing',
+        approvalStatus: 'missing',
+        isMissingFromDrive: true,
+        message: 'Certificate status successfully updated to missing in database.'
+      });
+    } catch (err: any) {
+      console.error('[Report Missing] Error:', err);
+      return res.status(500).json({ error: err.message || 'Error updating missing certificate' });
+    }
+  });
+
 
   /**
    * DELETE /api/drive/file/:fileId

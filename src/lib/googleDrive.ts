@@ -649,7 +649,7 @@ export interface DriveCertificateFile {
   proxyDownloadUrl?: string;
   uploadSource?: 'admin' | 'user';
   uploadedBy?: 'admin' | 'member';
-  approvalStatus?: 'not_required' | 'pending' | 'approved' | 'rejected' | 'pending_approval';
+  approvalStatus?: 'not_required' | 'pending' | 'approved' | 'rejected' | 'pending_approval' | 'missing';
   rejectionReason?: string;
   uploaderUid?: string;
   decisionByAdminUid?: string;
@@ -660,6 +660,8 @@ export interface DriveCertificateFile {
   updatedAt?: string;
   isAmbiguous?: boolean;
   ambiguousMatchesCount?: number;
+  isMissingFromDrive?: boolean;
+  missingDetectedAt?: string;
 }
 
 /**
@@ -1249,10 +1251,14 @@ export const fetchMemberCertificatesFromFirestore = async (
           const data = docSnap.data() as DriveCertificateFile;
           const id = data.id || (data as any).driveFileId || (data as any).certId || docSnap.id;
           if (id && !foundMap.has(id)) {
+            const rawStatus = (data as any).status || data.approvalStatus || 'approved';
+            const isMissing = Boolean((data as any).isMissingFromDrive || rawStatus === 'missing' || data.approvalStatus === 'missing');
             foundMap.set(id, {
               ...data,
               id,
-              approvalStatus: (data.approvalStatus || (data as any).status || 'approved') as any,
+              status: isMissing ? 'missing' : rawStatus,
+              approvalStatus: (isMissing ? 'missing' : (data.approvalStatus || rawStatus || 'approved')) as any,
+              isMissingFromDrive: isMissing,
               proxyViewUrl: data.proxyViewUrl || `/api/drive/file/${id}?memberId=${encodeURIComponent(cleanNo)}`,
               proxyDownloadUrl: data.proxyDownloadUrl || `/api/drive/file/${id}?download=true&memberId=${encodeURIComponent(cleanNo)}`
             });
@@ -1780,10 +1786,35 @@ export const fetchCertificatesByMembershipNumber = async (
   // The server has the active Google Drive connection and searches Drive for files
   // where the file name contains the participant's membership ID.
   try {
-    const serverResp = await fetch(apiUrl(`/api/drive/member-certificates/${encodeURIComponent(cleanNo)}`));
-    if (serverResp.ok) {
-      const serverData = await serverResp.json();
-      if (serverData.certificates && Array.isArray(serverData.certificates) && serverData.certificates.length > 0) {
+    let idToken = '';
+    try {
+      if (auth?.currentUser) {
+        idToken = await auth.currentUser.getIdToken();
+      }
+    } catch {}
+
+    const headers: Record<string, string> = {
+      'Accept': 'application/json'
+    };
+    if (idToken) headers['Authorization'] = `Bearer ${idToken}`;
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 6000);
+
+    const serverResp = await fetch(
+      apiUrl(`/api/drive/member-certificates/${encodeURIComponent(cleanNo)}`),
+      {
+        credentials: 'include',
+        headers,
+        signal: controller.signal
+      }
+    ).catch(() => null);
+
+    clearTimeout(timeoutId);
+
+    if (serverResp && serverResp.ok) {
+      const serverData = await serverResp.json().catch(() => null);
+      if (serverData?.certificates && Array.isArray(serverData.certificates) && serverData.certificates.length > 0) {
         // Enforce strict filtering: Only certificates matching this participant's membership ID via cookie validator
         const strictlyFiltered: DriveCertificateFile[] = serverData.certificates
           .filter((c: any) => {
@@ -1806,7 +1837,7 @@ export const fetchCertificatesByMembershipNumber = async (
       }
     }
   } catch (err) {
-    console.warn('Notice querying server Drive certificates API:', err);
+    console.debug('Notice querying server Drive certificates API:', err);
   }
 
   const token = getDriveAccessToken();
@@ -1991,7 +2022,43 @@ export const listCertificatesInFolder = async (
 };
 
 /**
- * Download a certificate file directly from Google Drive or browser stream
+ * Report a missing certificate file in Google Drive.
+ * Notifies server to update Firestore database collection status to 'missing'
+ * so that all portals gracefully display 'Missing from Drive' with re-upload action.
+ */
+export const reportMissingCertificate = async (
+  fileId: string,
+  metadata?: {
+    certId?: string;
+    membershipNumber?: string;
+    eventId?: string;
+    reason?: string;
+  }
+): Promise<{ success: boolean; status?: string; message?: string }> => {
+  try {
+    const res = await fetch(apiUrl('/api/drive/report-missing-certificate'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fileId,
+        certId: metadata?.certId || fileId,
+        membershipNumber: metadata?.membershipNumber,
+        eventId: metadata?.eventId,
+        reason: metadata?.reason || 'Certificate file missing from Google Drive'
+      })
+    });
+    if (res.ok) {
+      return await res.json();
+    }
+  } catch (err) {
+    console.warn('Notice reporting missing certificate to server:', err);
+  }
+  return { success: false };
+};
+
+/**
+ * Download a certificate file directly from Google Drive or browser stream.
+ * Detects missing files and gracefully informs the user instead of downloading error JSON.
  */
 export const downloadDriveCertificate = async (
   fileId: string,
@@ -2004,6 +2071,15 @@ export const downloadDriveCertificate = async (
     const targetUrl = proxyDownloadUrl || apiUrl(`/api/drive/file/${fileId}?download=true${memberId ? `&memberId=${encodeURIComponent(memberId)}` : ''}`);
     const res = await fetch(targetUrl);
     if (res.ok) {
+      const contentType = res.headers.get('content-type') || '';
+      // If server returned JSON (e.g. { status: 'missing', isMissingFromDrive: true })
+      if (contentType.includes('application/json')) {
+        const data = await res.json().catch(() => ({}));
+        if (data.isMissingFromDrive || data.status === 'missing') {
+          throw new Error('This certificate file is missing from Google Drive. The certificate status has been updated to missing; please re-upload your certificate.');
+        }
+      }
+
       const blob = await res.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -2015,7 +2091,10 @@ export const downloadDriveCertificate = async (
       window.URL.revokeObjectURL(url);
       return;
     }
-  } catch (err) {
+  } catch (err: any) {
+    if (err.message?.includes('missing from Google Drive')) {
+      throw err;
+    }
     console.warn('Server proxy download failed, trying client direct:', err);
   }
 
@@ -2039,8 +2118,14 @@ export const downloadDriveCertificate = async (
         document.body.removeChild(a);
         window.URL.revokeObjectURL(url);
         return;
+      } else if (res.status === 404) {
+        await reportMissingCertificate(fileId, { membershipNumber: memberId, reason: 'Google Drive returned 404' });
+        throw new Error('Certificate file is missing from Google Drive. Please re-upload your certificate.');
       }
-    } catch (err) {
+    } catch (err: any) {
+      if (err.message?.includes('missing from Google Drive')) {
+        throw err;
+      }
       console.warn('Bearer download failed, opening direct link:', err);
     }
   }

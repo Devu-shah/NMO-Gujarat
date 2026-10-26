@@ -41,7 +41,7 @@ export const MemberCertificatesTab: React.FC = () => {
   const { currentMember, currentUser, events } = useNMO();
 
   const [certificates, setCertificates] = useState<DriveCertificateFile[]>([]);
-  const [statusFilter, setStatusFilter] = useState<'all' | 'approved' | 'pending' | 'rejected'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'approved' | 'pending' | 'rejected' | 'missing'>('all');
   const [isLoadingCerts, setIsLoadingCerts] = useState<boolean>(false);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [showCertModal, setShowCertModal] = useState<boolean>(false);
@@ -65,53 +65,99 @@ export const MemberCertificatesTab: React.FC = () => {
   const memberNo = currentMember?.membershipNumber || currentUser?.membershipNumber || '';
   const memberName = currentMember?.name || currentUser?.name || 'NMO Member';
 
-  // Attendance check helper: if certificate is linked to an event, member must have attended
-  const isMemberAttendedForEvent = (eventId?: string, eventTitle?: string): boolean => {
-    if (!eventId || eventId === 'general') {
-      if (eventTitle) {
-        const cleanTitle = eventTitle.trim().toLowerCase();
-        const matched = events.find((e) => e.title.trim().toLowerCase() === cleanTitle);
-        if (matched) {
-          const p = matched.participants?.find(
-            (part) => part.membershipNumber.trim().toUpperCase() === memberNo.trim().toUpperCase()
-          );
-          return p?.attendanceStatus === 'Attended';
-        }
+  const isCertMissing = (c: DriveCertificateFile): boolean => {
+    return c.approvalStatus === 'missing' || c.status === 'missing' || Boolean(c.isMissingFromDrive);
+  };
+
+  // Attendance check helper: certificates are displayed on user portal ONLY when the member is marked present in the admin panel
+  const isMemberAttendedForEvent = (
+    eventId?: string,
+    eventTitle?: string,
+    eventName?: string,
+    driveFolderId?: string,
+    driveFolderName?: string
+  ): boolean => {
+    // 1. Try to match event by concrete eventId
+    if (eventId && eventId !== 'general') {
+      const evt = events.find((e) => e.eventId === eventId || (e as any).id === eventId);
+      if (!evt) {
+        // If eventId was specified but cannot be confirmed in loaded events, do not display
+        return events.length === 0;
       }
-      return true;
+      const p = evt.participants?.find(
+        (part) => part.membershipNumber.trim().toUpperCase() === memberNo.trim().toUpperCase()
+      );
+      return p?.attendanceStatus === 'Attended';
     }
-    const evt = events.find((e) => e.eventId === eventId);
-    if (!evt) return true;
-    const p = evt.participants?.find(
-      (part) => part.membershipNumber.trim().toUpperCase() === memberNo.trim().toUpperCase()
-    );
-    return p?.attendanceStatus === 'Attended';
+
+    // 2. Try to match by driveFolderId
+    if (driveFolderId) {
+      const evt = events.find((e) => e.driveFolderId === driveFolderId || e.pendingDriveFolderId === driveFolderId);
+      if (evt) {
+        const p = evt.participants?.find(
+          (part) => part.membershipNumber.trim().toUpperCase() === memberNo.trim().toUpperCase()
+        );
+        return p?.attendanceStatus === 'Attended';
+      }
+    }
+
+    // 3. Try to match by eventTitle, eventName, or driveFolderName
+    const titleCandidates = [eventTitle, eventName, driveFolderName]
+      .filter(Boolean)
+      .map((t) => t!.trim().toLowerCase());
+
+    for (const titleCandidate of titleCandidates) {
+      if (!titleCandidate || titleCandidate === 'general' || titleCandidate === 'nmo certificate') continue;
+      const matched = events.find((e) => {
+        const et = e.title.trim().toLowerCase();
+        const ef = (e.driveFolderName || '').trim().toLowerCase();
+        return et === titleCandidate || (ef && ef === titleCandidate) || (titleCandidate.length > 5 && et.includes(titleCandidate));
+      });
+      if (matched) {
+        const p = matched.participants?.find(
+          (part) => part.membershipNumber.trim().toUpperCase() === memberNo.trim().toUpperCase()
+        );
+        return p?.attendanceStatus === 'Attended';
+      }
+    }
+
+    return true;
   };
 
   // Only display certificates where the member has attended the specific event (or general certificates)
   const attendeeAllowedCertificates = certificates.filter((c) => {
-    return isMemberAttendedForEvent(c.eventId, c.eventTitle || c.eventName);
+    return isMemberAttendedForEvent(
+      c.eventId,
+      c.eventTitle,
+      c.eventName,
+      c.driveFolderId,
+      c.driveFolderName
+    );
   });
 
+  const missingCerts = attendeeAllowedCertificates.filter((c) => isCertMissing(c));
   const approvedCerts = attendeeAllowedCertificates.filter(
-    (c) => c.approvalStatus === 'approved' || c.approvalStatus === 'not_required' || (!c.approvalStatus && c.uploadSource === 'admin')
+    (c) => !isCertMissing(c) && (c.approvalStatus === 'approved' || c.approvalStatus === 'not_required' || (!c.approvalStatus && c.uploadSource === 'admin'))
   );
   const pendingCerts = attendeeAllowedCertificates.filter(
-    (c) => c.approvalStatus === 'pending' || c.approvalStatus === 'pending_approval'
+    (c) => !isCertMissing(c) && (c.approvalStatus === 'pending' || c.approvalStatus === 'pending_approval')
   );
   const rejectedCerts = attendeeAllowedCertificates.filter(
-    (c) => c.approvalStatus === 'rejected'
+    (c) => !isCertMissing(c) && c.approvalStatus === 'rejected'
   );
 
   const displayedCertificates = attendeeAllowedCertificates.filter((c) => {
+    if (statusFilter === 'missing') {
+      return isCertMissing(c);
+    }
     if (statusFilter === 'approved') {
-      return c.approvalStatus === 'approved' || c.approvalStatus === 'not_required' || (!c.approvalStatus && c.uploadSource === 'admin');
+      return !isCertMissing(c) && (c.approvalStatus === 'approved' || c.approvalStatus === 'not_required' || (!c.approvalStatus && c.uploadSource === 'admin'));
     }
     if (statusFilter === 'pending') {
-      return c.approvalStatus === 'pending' || c.approvalStatus === 'pending_approval';
+      return !isCertMissing(c) && (c.approvalStatus === 'pending' || c.approvalStatus === 'pending_approval');
     }
     if (statusFilter === 'rejected') {
-      return c.approvalStatus === 'rejected';
+      return !isCertMissing(c) && c.approvalStatus === 'rejected';
     }
     return true;
   });
@@ -301,6 +347,13 @@ export const MemberCertificatesTab: React.FC = () => {
   };
 
   const handleDownload = async (cert: DriveCertificateFile) => {
+    if (!isMemberAttendedForEvent(cert.eventId, cert.eventTitle, cert.eventName, cert.driveFolderId, cert.driveFolderName)) {
+      setUploadFeedback({
+        message: 'Attendance verification required: Only participants with confirmed attendance ("Attended") in the admin panel can download certificates for this event.',
+        type: 'error'
+      });
+      return;
+    }
     setDownloadingId(cert.id);
     try {
       const proxyDownloadUrl = cert.proxyDownloadUrl
@@ -535,8 +588,8 @@ export const MemberCertificatesTab: React.FC = () => {
                   {events.map((evt) => {
                     const attended = isMemberAttendedForEvent(evt.eventId, evt.title);
                     return (
-                      <option key={evt.eventId} value={evt.eventId}>
-                        {evt.title} ({evt.city}) {evt.certificateUploadMode === 'admin' ? '🔒 [Admin-Issued Only]' : attended ? '✓ [Attendance Confirmed]' : '⚠️ [Attendance Not Confirmed]'}
+                      <option key={evt.eventId} value={evt.eventId} disabled={!attended || evt.certificateUploadMode === 'admin'}>
+                        {evt.title} ({evt.city}) {evt.certificateUploadMode === 'admin' ? '🔒 [Admin-Issued Only]' : attended ? '✓ [Attendance Confirmed - Eligible]' : '⛔ [Not Eligible - Attendance Not Confirmed]'}
                       </option>
                     );
                   })}
@@ -732,6 +785,20 @@ export const MemberCertificatesTab: React.FC = () => {
                 <AlertCircle className="w-3.5 h-3.5" />
                 <span>Rejected ({rejectedCerts.length})</span>
               </button>
+              {missingCerts.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setStatusFilter('missing')}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                    statusFilter === 'missing'
+                      ? 'bg-amber-600 text-white shadow-xs'
+                      : 'bg-amber-50 text-amber-800 hover:bg-amber-100 border border-amber-300'
+                  }`}
+                >
+                  <AlertCircle className="w-3.5 h-3.5 text-amber-600" />
+                  <span>Missing ({missingCerts.length})</span>
+                </button>
+              )}
             </div>
 
             {isLoadingCerts ? (
@@ -751,6 +818,8 @@ export const MemberCertificatesTab: React.FC = () => {
                     ? 'No Pending Submissions'
                     : statusFilter === 'rejected'
                     ? 'No Rejected Submissions'
+                    : statusFilter === 'missing'
+                    ? 'No Missing Certificates'
                     : 'No Certificates Issued Yet'}
                 </h5>
                 <p className="text-xs text-slate-500 max-w-sm mx-auto leading-relaxed">
@@ -760,6 +829,8 @@ export const MemberCertificatesTab: React.FC = () => {
                     ? 'You have no submissions currently waiting for administrator review.'
                     : statusFilter === 'rejected'
                     ? 'You have no rejected certificate submissions.'
+                    : statusFilter === 'missing'
+                    ? 'All your certificate files are safely available in Google Drive.'
                     : `Certificates in Google Drive are retrieved using your Membership ID (${memberNo}). Upload your certificate or wait for organizers to issue your certificate.`}
                 </p>
                 <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-100 text-[10px] text-slate-600 font-medium mt-1">
@@ -769,14 +840,11 @@ export const MemberCertificatesTab: React.FC = () => {
             ) : (
               <div className="space-y-3">
                 {displayedCertificates.map((cert) => {
-                  const isPending = cert.approvalStatus === 'pending' || cert.approvalStatus === 'pending_approval';
-                  const isRejected = cert.approvalStatus === 'rejected';
-                  const isApproved = cert.approvalStatus === 'approved';
-                  const isAdminIssued = cert.approvalStatus === 'not_required' || (!cert.approvalStatus && cert.uploadSource === 'admin');
-
-                  const previewLink = cert.proxyViewUrl
-                    ? (cert.proxyViewUrl.startsWith('http') ? cert.proxyViewUrl : apiUrl(cert.proxyViewUrl))
-                    : apiUrl(`/api/drive/file/${cert.id}?memberId=${encodeURIComponent(memberNo)}`);
+                  const isMissing = cert.approvalStatus === 'missing' || cert.status === 'missing' || Boolean(cert.isMissingFromDrive);
+                  const isPending = !isMissing && (cert.approvalStatus === 'pending' || cert.approvalStatus === 'pending_approval');
+                  const isRejected = !isMissing && cert.approvalStatus === 'rejected';
+                  const isApproved = !isMissing && cert.approvalStatus === 'approved';
+                  const isAdminIssued = !isMissing && (cert.approvalStatus === 'not_required' || (!cert.approvalStatus && cert.uploadSource === 'admin'));
 
                   return (
                     <div
@@ -788,6 +856,13 @@ export const MemberCertificatesTab: React.FC = () => {
                           <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-red-100 text-red-800 font-mono">
                             {cert.membershipNumber || memberNo}
                           </span>
+
+                          {isMissing && (
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300 flex items-center gap-1">
+                              <AlertCircle className="w-3 h-3 text-amber-700" />
+                              <span>Missing from Drive</span>
+                            </span>
+                          )}
 
                           {isPending && (
                             <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-300 flex items-center gap-1">
@@ -827,6 +902,13 @@ export const MemberCertificatesTab: React.FC = () => {
                           <span>{getCertificateEventName(cert)}</span>
                         </p>
 
+                        {isMissing && (
+                          <div className="p-2 bg-amber-50 border border-amber-200 rounded-lg text-amber-900 text-[11px] font-medium flex items-start gap-1.5 mt-1">
+                            <AlertCircle className="w-3.5 h-3.5 text-amber-600 shrink-0 mt-0.5" />
+                            <span>Certificate file is missing from Google Drive. Please re-upload your certificate to restore it.</span>
+                          </div>
+                        )}
+
                         {isPending && (
                           <p className="text-[10px] text-amber-800 bg-amber-50 px-2 py-1 rounded border border-amber-200 inline-block font-medium">
                             Submitted on {cert.createdTime ? new Date(cert.createdTime).toLocaleDateString() : 'recently'}. Awaiting admin review before official certification.
@@ -846,7 +928,7 @@ export const MemberCertificatesTab: React.FC = () => {
                       </div>
 
                       <div className="flex flex-wrap items-center gap-2 shrink-0">
-                        {/* Universal Preview button for all certificates (approved, pending, and rejected) */}
+                        {/* Universal Preview button */}
                         <button
                           type="button"
                           onClick={() => {
@@ -860,17 +942,35 @@ export const MemberCertificatesTab: React.FC = () => {
                           <span>Preview</span>
                         </button>
 
-                        {/* Download button for approved and official certificates */}
-                        {(isApproved || isAdminIssued) && (
+                        {/* If missing from Drive: Show prominent Re-Upload / Fix button */}
+                        {isMissing ? (
                           <button
                             type="button"
-                            onClick={() => handleDownload(cert)}
-                            disabled={downloadingId === cert.id}
-                            className="px-3.5 py-1.5 bg-red-700 hover:bg-red-800 disabled:opacity-50 text-white rounded-lg text-xs font-bold transition-all shadow-xs flex items-center gap-1.5 cursor-pointer"
+                            onClick={() => {
+                              setSelectedEventId(cert.eventId || '');
+                              setSelectedEventTitle(cert.eventTitle || cert.eventName || '');
+                              setCustomCertTitle(cert.name || '');
+                              window.scrollTo({ top: 0, behavior: 'smooth' });
+                            }}
+                            className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition-all shadow-xs flex items-center gap-1.5 cursor-pointer"
+                            title="Re-upload certificate to restore missing file"
                           >
-                            <Download className="w-3.5 h-3.5" />
-                            <span>{downloadingId === cert.id ? 'Downloading...' : 'Download'}</span>
+                            <Upload className="w-3.5 h-3.5" />
+                            <span>Re-Upload / Fix</span>
                           </button>
+                        ) : (
+                          /* Download button for approved and official certificates */
+                          (isApproved || isAdminIssued) && (
+                            <button
+                              type="button"
+                              onClick={() => handleDownload(cert)}
+                              disabled={downloadingId === cert.id}
+                              className="px-3.5 py-1.5 bg-red-700 hover:bg-red-800 disabled:opacity-50 text-white rounded-lg text-xs font-bold transition-all shadow-xs flex items-center gap-1.5 cursor-pointer"
+                            >
+                              <Download className="w-3.5 h-3.5" />
+                              <span>{downloadingId === cert.id ? 'Downloading...' : 'Download'}</span>
+                            </button>
+                          )
                         )}
 
                         {/* Modify / Replace button for user-uploaded certificates (pending, rejected, or user-sourced) */}

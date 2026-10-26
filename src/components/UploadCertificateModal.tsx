@@ -87,9 +87,21 @@ export const UploadCertificateModal: React.FC<UploadCertificateModalProps> = ({
   };
 
   // Check if member is confirmed attendee for an event
-  const isMemberAttendedForEvent = (evtId: string): boolean => {
-    if (!evtId || evtId === 'general') return true;
-    const evt = events.find((e) => e.eventId === evtId);
+  const isMemberAttendedForEvent = (evtId?: string, evtTitle?: string): boolean => {
+    if (!evtId || evtId === 'general') {
+      if (evtTitle) {
+        const cleanTitle = evtTitle.trim().toLowerCase();
+        const matched = events.find((e) => e.title.trim().toLowerCase() === cleanTitle);
+        if (matched) {
+          const p = matched.participants?.find(
+            (part) => part.membershipNumber.trim().toUpperCase() === memberNo.trim().toUpperCase()
+          );
+          return p?.attendanceStatus === 'Attended';
+        }
+      }
+      return true;
+    }
+    const evt = events.find((e) => e.eventId === evtId || (e as any).id === evtId);
     if (!evt) return false;
     const p = evt.participants?.find(
       (part) => part.membershipNumber.trim().toUpperCase() === memberNo.trim().toUpperCase()
@@ -304,10 +316,10 @@ export const UploadCertificateModal: React.FC<UploadCertificateModalProps> = ({
               >
                 <option value="">-- General Certificate / Independent CME --</option>
                 {events.map((evt) => {
-                  const attended = isMemberAttendedForEvent(evt.eventId);
+                  const attended = isMemberAttendedForEvent(evt.eventId, evt.title);
                   return (
-                    <option key={evt.eventId} value={evt.eventId}>
-                      {evt.title} ({evt.city}) {evt.certificateUploadMode === 'admin' ? '🔒 [Admin-Issued Only]' : attended ? '✓ [Attendance Confirmed]' : '⚠️ [Attendance Not Confirmed]'}
+                    <option key={evt.eventId} value={evt.eventId} disabled={!attended || evt.certificateUploadMode === 'admin'}>
+                      {evt.title} ({evt.city}) {evt.certificateUploadMode === 'admin' ? '🔒 [Admin-Issued Only]' : attended ? '✓ [Attendance Confirmed - Eligible]' : '⛔ [Not Eligible - Attendance Not Confirmed]'}
                     </option>
                   );
                 })}

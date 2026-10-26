@@ -1,9 +1,12 @@
 {
   "projectId": "nmo-india-demo",
-  "appId": "1:321117934169:web:35376991c49f4606179748",
+  "appId": "1:321117934169:web:6063fa008284640d179748",
   "apiKey": "AIzaSyD3fJNxR4kylm4csslEbReoFOROzMZNOks",
   "authDomain": "nmo-india-demo.firebaseapp.com",
+  "firestoreDatabaseId": "(default)",
   "storageBucket": "nmo-india-demo.firebasestorage.app",
   "messagingSenderId": "321117934169",
-  "measurementId": "G-ER2LW8Y18M"
+  "measurementId": "",
+  "oAuthClientId": "321117934169-s2mmapvndg95h43sglm93d15q0p9ddot.apps.googleusercontent.com",
+  "recaptchaSiteKey": ""
 }

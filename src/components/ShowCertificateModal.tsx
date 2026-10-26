@@ -5,6 +5,7 @@ import {
   downloadDriveCertificate,
   deleteUserUploadedCertificate,
   getDriveDirectImageUrl,
+  reportMissingCertificate,
   NMO_ROOT_DRIVE_FOLDER_NAME,
   DriveCertificateFile,
   getCertificateEventName
@@ -69,32 +70,63 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
   const displayName = memberName || selectedCert?.memberName || currentMember?.name || currentUser?.name || 'NMO Member';
 
   // Attendance check helper: if certificate or modal is linked to a specific event, member must have attended
-  const isMemberAttendedForEvent = (eventId?: string, eventTitle?: string): boolean => {
+  const isMemberAttendedForEvent = (
+    eventId?: string,
+    eventTitle?: string,
+    eventName?: string,
+    driveFolderId?: string,
+    driveFolderName?: string
+  ): boolean => {
     // Admins previewing certificates are not restricted
     const viewerRole = currentUser?.role || currentMember?.role;
     if (viewerRole && ['city_admin', 'prant_admin', 'state_admin', 'super_admin'].includes(viewerRole)) {
       return true;
     }
 
-    if (!eventId || eventId === 'general') {
-      if (eventTitle) {
-        const cleanTitle = eventTitle.trim().toLowerCase();
-        const matched = events?.find((e) => e.title.trim().toLowerCase() === cleanTitle);
-        if (matched) {
-          const p = matched.participants?.find(
-            (part) => part.membershipNumber.trim().toUpperCase() === targetMemberNo.trim().toUpperCase()
-          );
-          return p?.attendanceStatus === 'Attended';
-        }
+    // 1. Try to match event by concrete eventId
+    if (eventId && eventId !== 'general') {
+      const evt = events?.find((e) => e.eventId === eventId || (e as any).id === eventId);
+      if (!evt) {
+        return !events || events.length === 0;
       }
-      return true;
+      const p = evt.participants?.find(
+        (part) => part.membershipNumber.trim().toUpperCase() === targetMemberNo.trim().toUpperCase()
+      );
+      return p?.attendanceStatus === 'Attended';
     }
-    const evt = events?.find((e) => e.eventId === eventId);
-    if (!evt) return true;
-    const p = evt.participants?.find(
-      (part) => part.membershipNumber.trim().toUpperCase() === targetMemberNo.trim().toUpperCase()
-    );
-    return p?.attendanceStatus === 'Attended';
+
+    // 2. Try to match by driveFolderId
+    if (driveFolderId) {
+      const evt = events?.find((e) => e.driveFolderId === driveFolderId || e.pendingDriveFolderId === driveFolderId);
+      if (evt) {
+        const p = evt.participants?.find(
+          (part) => part.membershipNumber.trim().toUpperCase() === targetMemberNo.trim().toUpperCase()
+        );
+        return p?.attendanceStatus === 'Attended';
+      }
+    }
+
+    // 3. Try to match by eventTitle, eventName, or driveFolderName
+    const titleCandidates = [eventTitle, eventName, driveFolderName]
+      .filter(Boolean)
+      .map((t) => t!.trim().toLowerCase());
+
+    for (const titleCandidate of titleCandidates) {
+      if (!titleCandidate || titleCandidate === 'general' || titleCandidate === 'nmo certificate') continue;
+      const matched = events?.find((e) => {
+        const et = e.title.trim().toLowerCase();
+        const ef = (e.driveFolderName || '').trim().toLowerCase();
+        return et === titleCandidate || (ef && ef === titleCandidate) || (titleCandidate.length > 5 && et.includes(titleCandidate));
+      });
+      if (matched) {
+        const p = matched.participants?.find(
+          (part) => part.membershipNumber.trim().toUpperCase() === targetMemberNo.trim().toUpperCase()
+        );
+        return p?.attendanceStatus === 'Attended';
+      }
+    }
+
+    return true;
   };
 
   const [certificates, setCertificates] = useState<DriveCertificateFile[]>(initialCertificates || (selectedCert ? [selectedCert] : []));
@@ -142,11 +174,13 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
   useEffect(() => {
     if (isOpen) {
       if (initialCertificates && initialCertificates.length > 0) {
-        const allowed = initialCertificates.filter((c) => isMemberAttendedForEvent(c.eventId, c.eventTitle || c.eventName));
+        const allowed = initialCertificates.filter((c) =>
+          isMemberAttendedForEvent(c.eventId, c.eventTitle, c.eventName, c.driveFolderId, c.driveFolderName)
+        );
         setCertificates(allowed);
         autoSelectMatchingEvent(allowed);
       } else if (selectedCert) {
-        if (isMemberAttendedForEvent(selectedCert.eventId, selectedCert.eventTitle || selectedCert.eventName)) {
+        if (isMemberAttendedForEvent(selectedCert.eventId, selectedCert.eventTitle, selectedCert.eventName, selectedCert.driveFolderId, selectedCert.driveFolderName)) {
           setCertificates([selectedCert]);
           setSelectedIndex(0);
         } else {
@@ -171,7 +205,7 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
       // Filter certificates that belong to this member AND satisfy attendance confirmation rule
       const memberCerts = results
         .filter((c) => isCertificateMatchingCookie(c, targetMemberNo))
-        .filter((c) => isMemberAttendedForEvent(c.eventId, c.eventTitle || c.eventName));
+        .filter((c) => isMemberAttendedForEvent(c.eventId, c.eventTitle, c.eventName, c.driveFolderId, c.driveFolderName));
       setCertificates(memberCerts);
       autoSelectMatchingEvent(memberCerts);
     } catch (err) {
@@ -208,6 +242,10 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
 
   const handleDownload = async () => {
     if (!currentCert) return;
+    if (!isMemberAttendedForEvent(currentCert.eventId, currentCert.eventTitle, currentCert.eventName, currentCert.driveFolderId, currentCert.driveFolderName)) {
+      alert('Attendance verification required: Only participants with confirmed attendance ("Attended") by administrators can download certificates for this event.');
+      return;
+    }
     setIsDownloading(true);
     try {
       const cleanMem = encodeURIComponent(targetMemberNo);
@@ -471,171 +509,248 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
               )}
 
               {/* Certificate Image Frame */}
-              {currentCert && (
-                <div className="space-y-3">
-                  <div className="bg-slate-950 rounded-2xl p-2 sm:p-4 border-2 border-slate-200 shadow-inner flex flex-col items-center justify-center relative min-h-[320px] max-h-[500px] overflow-hidden">
-                    {/* Image Loading Spinner */}
-                    {!imageLoaded && !imageError && (
-                      <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-900/60 z-10 text-white text-xs gap-2">
-                        <div className="w-8 h-8 border-2 border-amber-400 border-t-transparent rounded-full animate-spin" />
-                        <span>Rendering Certificate Image...</span>
-                      </div>
-                    )}
+              {currentCert && (() => {
+                const isCurrentCertMissing = Boolean(
+                  currentCert.approvalStatus === 'missing' ||
+                  currentCert.status === 'missing' ||
+                  currentCert.isMissingFromDrive
+                );
 
-                    {/* Image / PDF Display */}
-                    {isPdf ? (
-                      <div className="w-full h-[460px] flex flex-col items-center justify-center">
-                        <iframe
-                          src={imageUrl}
-                          title={`PDF Certificate for ${targetMemberNo}`}
-                          className="w-full h-full rounded-xl border border-slate-700 bg-white"
-                          onLoad={() => setImageLoaded(true)}
-                        />
-                      </div>
-                    ) : imageError ? (
-                      <div className="w-full flex flex-col items-center justify-center p-2">
-                        <iframe
-                          src={`https://drive.google.com/file/d/${currentCert.id}/preview`}
-                          title={`Certificate for ${targetMemberNo}`}
-                          className="w-full h-[400px] rounded-xl border border-slate-700 bg-white"
-                          onLoad={() => setImageLoaded(true)}
-                        />
-                        <div className="mt-3 flex items-center justify-center gap-3">
-                          <a
-                            href={currentCert.webViewLink || `https://drive.google.com/file/d/${currentCert.id}/view`}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="inline-flex items-center gap-1.5 px-4 py-2 bg-white text-slate-900 rounded-xl text-xs font-bold hover:bg-slate-100 transition-colors shadow-xs"
-                          >
-                            <ExternalLink className="w-4 h-4" />
-                            <span>Open in Google Drive ↗</span>
-                          </a>
+                return (
+                  <div className="space-y-3">
+                    {isCurrentCertMissing ? (
+                      <div className="w-full py-14 px-6 flex flex-col items-center justify-center text-center space-y-4 bg-amber-50/80 rounded-2xl border border-amber-300 shadow-xs">
+                        <div className="w-16 h-16 rounded-3xl bg-amber-100 text-amber-700 flex items-center justify-center shadow-inner border border-amber-200">
+                          <AlertCircle className="w-8 h-8 text-amber-600" />
                         </div>
+                        <div className="max-w-md space-y-2">
+                          <div className="inline-block px-3 py-1 rounded-full text-[10px] font-bold bg-amber-200 text-amber-900 uppercase tracking-wider">
+                            Missing from Drive
+                          </div>
+                          <h4 className="text-lg font-black text-slate-900 tracking-tight">
+                            Certificate File Missing from Google Drive
+                          </h4>
+                          <p className="text-xs text-slate-600 leading-relaxed">
+                            This certificate was not found in the NMO Gujarat Google Drive repository. Database records for this certificate have been automatically updated to <strong>Missing</strong>.
+                          </p>
+                        </div>
+                        {onOpenUpload && (
+                          <div className="pt-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                onClose();
+                                onOpenUpload({
+                                  eventId: currentCert.eventId,
+                                  eventTitle: currentCert.eventTitle || currentCert.eventName
+                                });
+                              }}
+                              className="px-5 py-2.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold transition-all shadow-md inline-flex items-center gap-2 cursor-pointer"
+                            >
+                              <Upload className="w-4 h-4" />
+                              <span>Re-Upload Certificate File</span>
+                            </button>
+                          </div>
+                        )}
                       </div>
                     ) : (
-                      /* Main Certificate High-Res Image */
-                      <img
-                        src={imageUrl}
-                        alt={`NMO Certificate for ${targetMemberNo}`}
-                        onLoad={() => setImageLoaded(true)}
-                        onError={() => setImageError(true)}
-                        className={`max-h-[460px] w-auto object-contain rounded-xl shadow-2xl transition-opacity duration-300 ${
-                          imageLoaded ? 'opacity-100' : 'opacity-0'
-                        }`}
-                      />
-                    )}
-                  </div>
+                      <div className="bg-slate-950 rounded-2xl p-2 sm:p-4 border-2 border-slate-200 shadow-inner flex flex-col items-center justify-center relative min-h-[320px] max-h-[500px] overflow-hidden">
+                        {/* Image Loading Spinner */}
+                        {!imageLoaded && !imageError && (
+                          <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-900/60 z-10 text-white text-xs gap-2">
+                            <div className="w-8 h-8 border-2 border-amber-400 border-t-transparent rounded-full animate-spin" />
+                            <span>Rendering Certificate Image...</span>
+                          </div>
+                        )}
 
-                  {/* Certificate Metadata Bar */}
-                  <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="font-bold text-slate-900 text-sm">
-                          {getCertificateEventName(currentCert)}
-                        </span>
-                        <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-red-100 text-red-800">
-                          ID: {targetMemberNo}
-                        </span>
-                        {currentCert.approvalStatus === 'rejected' ? (
-                          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-red-100 text-red-800 border border-red-200">
-                            Rejected Submission
-                          </span>
-                        ) : (currentCert.approvalStatus === 'pending' || currentCert.approvalStatus === 'pending_approval') ? (
-                          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-200">
-                            Pending Verification
-                          </span>
+                        {/* Image / PDF Display */}
+                        {isPdf ? (
+                          <div className="w-full h-[460px] flex flex-col items-center justify-center">
+                            <iframe
+                              src={imageUrl}
+                              title={`PDF Certificate for ${targetMemberNo}`}
+                              className="w-full h-full rounded-xl border border-slate-700 bg-white"
+                              onLoad={() => setImageLoaded(true)}
+                            />
+                          </div>
+                        ) : imageError ? (
+                          <div className="w-full flex flex-col items-center justify-center p-2">
+                            <iframe
+                              src={`https://drive.google.com/file/d/${currentCert.id}/preview`}
+                              title={`Certificate for ${targetMemberNo}`}
+                              className="w-full h-[400px] rounded-xl border border-slate-700 bg-white"
+                              onLoad={() => setImageLoaded(true)}
+                            />
+                            <div className="mt-3 flex items-center justify-center gap-3">
+                              <a
+                                href={currentCert.webViewLink || `https://drive.google.com/file/d/${currentCert.id}/view`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="inline-flex items-center gap-1.5 px-4 py-2 bg-white text-slate-900 rounded-xl text-xs font-bold hover:bg-slate-100 transition-colors shadow-xs"
+                              >
+                                <ExternalLink className="w-4 h-4" />
+                                <span>Open in Google Drive ↗</span>
+                              </a>
+                            </div>
+                          </div>
                         ) : (
-                          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
-                            Verified & Approved
+                          /* Main Certificate High-Res Image */
+                          <img
+                            src={imageUrl}
+                            alt={`NMO Certificate for ${targetMemberNo}`}
+                            onLoad={() => setImageLoaded(true)}
+                            onError={() => {
+                              setImageError(true);
+                              if (currentCert?.id) {
+                                reportMissingCertificate(currentCert.id, {
+                                  membershipNumber: targetMemberNo,
+                                  eventId: currentCert.eventId,
+                                  reason: 'Certificate image load failed in preview'
+                                }).catch(() => {});
+                              }
+                            }}
+                            className={`max-h-[460px] w-auto object-contain rounded-xl shadow-2xl transition-opacity duration-300 ${
+                              imageLoaded ? 'opacity-100' : 'opacity-0'
+                            }`}
+                          />
+                        )}
+                      </div>
+                    )}
+
+                    {/* Certificate Metadata Bar */}
+                    <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-bold text-slate-900 text-sm">
+                            {getCertificateEventName(currentCert)}
                           </span>
+                          <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-red-100 text-red-800">
+                            ID: {targetMemberNo}
+                          </span>
+                          {isCurrentCertMissing ? (
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-300">
+                              Missing from Drive
+                            </span>
+                          ) : currentCert.approvalStatus === 'rejected' ? (
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-red-100 text-red-800 border border-red-200">
+                              Rejected Submission
+                            </span>
+                          ) : (currentCert.approvalStatus === 'pending' || currentCert.approvalStatus === 'pending_approval') ? (
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-200">
+                              Pending Verification
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
+                              Verified & Approved
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[11px] text-slate-500 flex flex-wrap items-center gap-3">
+                          <span className="font-mono text-slate-600">{currentFileName}</span>
+                          <span>·</span>
+                          <span>Format: {isPdf ? 'PDF' : 'JPG/PNG'}</span>
+                          <span>·</span>
+                          <span>{currentCert.createdTime ? new Date(currentCert.createdTime).toLocaleDateString() : 'Verified Record'}</span>
+                          {currentCert.size && (
+                            <>
+                              <span>·</span>
+                              <span>{currentCert.size}</span>
+                            </>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Action Buttons */}
+                      <div className="flex flex-wrap items-center gap-2 shrink-0">
+                        {imageUrl && !isCurrentCertMissing && (
+                          <a
+                            href={imageUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                            title="Open certificate preview in new tab"
+                          >
+                            <Eye className="w-3.5 h-3.5 text-blue-700" />
+                            <span>Preview</span>
+                          </a>
+                        )}
+
+                        {currentCert.webViewLink && !isCurrentCertMissing && (
+                          <a
+                            href={currentCert.webViewLink}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="px-3 py-2 bg-slate-200 hover:bg-slate-300 text-slate-800 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                            title="Open original file in Google Drive"
+                          >
+                            <ExternalLink className="w-3.5 h-3.5" />
+                            <span>Google Drive</span>
+                          </a>
+                        )}
+
+                        {/* Modify/Replace button for user-uploaded certificates */}
+                        {isUserUploaded && onOpenUpload && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              onClose();
+                              onOpenUpload({ eventId: currentCert.eventId, eventTitle: currentCert.eventTitle || currentCert.eventName });
+                            }}
+                            className="px-3 py-2 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
+                            title="Modify / Replace your uploaded certificate file"
+                          >
+                            <Edit3 className="w-3.5 h-3.5 text-amber-700" />
+                            <span>Modify / Replace</span>
+                          </button>
+                        )}
+
+                        {/* Delete button for user-uploaded certificates */}
+                        {isUserUploaded && (
+                          <button
+                            type="button"
+                            onClick={handleDeleteCurrentSubmission}
+                            disabled={isDeletingCurrent}
+                            className="px-3 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-300 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 shadow-xs"
+                            title="Delete this uploaded certificate submission"
+                          >
+                            <Trash2 className="w-3.5 h-3.5 text-rose-600" />
+                            <span>{isDeletingCurrent ? 'Deleting...' : 'Delete'}</span>
+                          </button>
+                        )}
+
+                        {isCurrentCertMissing ? (
+                          onOpenUpload && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                onClose();
+                                onOpenUpload({
+                                  eventId: currentCert.eventId,
+                                  eventTitle: currentCert.eventTitle || currentCert.eventName
+                                });
+                              }}
+                              className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold transition-all shadow-sm flex items-center gap-1.5 cursor-pointer"
+                            >
+                              <Upload className="w-3.5 h-3.5" />
+                              <span>Re-Upload File</span>
+                            </button>
+                          )
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={handleDownload}
+                            disabled={isDownloading}
+                            className="px-4 py-2 bg-red-700 hover:bg-red-800 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-all shadow-sm flex items-center gap-1.5 cursor-pointer"
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                            <span>{isDownloading ? 'Downloading...' : 'Download Image'}</span>
+                          </button>
                         )}
                       </div>
-                      <div className="text-[11px] text-slate-500 flex flex-wrap items-center gap-3">
-                        <span className="font-mono text-slate-600">{currentFileName}</span>
-                        <span>·</span>
-                        <span>Format: {isPdf ? 'PDF' : 'JPG/PNG'}</span>
-                        <span>·</span>
-                        <span>{currentCert.createdTime ? new Date(currentCert.createdTime).toLocaleDateString() : 'Verified Record'}</span>
-                        {currentCert.size && (
-                          <>
-                            <span>·</span>
-                            <span>{currentCert.size}</span>
-                          </>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Action Buttons */}
-                    <div className="flex flex-wrap items-center gap-2 shrink-0">
-                      {imageUrl && (
-                        <a
-                          href={imageUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
-                          title="Open certificate preview in new tab"
-                        >
-                          <Eye className="w-3.5 h-3.5 text-blue-700" />
-                          <span>Preview</span>
-                        </a>
-                      )}
-
-                      {currentCert.webViewLink && (
-                        <a
-                          href={currentCert.webViewLink}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="px-3 py-2 bg-slate-200 hover:bg-slate-300 text-slate-800 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
-                          title="Open original file in Google Drive"
-                        >
-                          <ExternalLink className="w-3.5 h-3.5" />
-                          <span>Google Drive</span>
-                        </a>
-                      )}
-
-                      {/* Modify/Replace button for user-uploaded certificates */}
-                      {isUserUploaded && onOpenUpload && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            onClose();
-                            onOpenUpload({ eventId: currentCert.eventId, eventTitle: currentCert.eventTitle || currentCert.eventName });
-                          }}
-                          className="px-3 py-2 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
-                          title="Modify / Replace your uploaded certificate file"
-                        >
-                          <Edit3 className="w-3.5 h-3.5 text-amber-700" />
-                          <span>Modify / Replace</span>
-                        </button>
-                      )}
-
-                      {/* Delete button for user-uploaded certificates */}
-                      {isUserUploaded && (
-                        <button
-                          type="button"
-                          onClick={handleDeleteCurrentSubmission}
-                          disabled={isDeletingCurrent}
-                          className="px-3 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-300 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 shadow-xs"
-                          title="Delete this uploaded certificate submission"
-                        >
-                          <Trash2 className="w-3.5 h-3.5 text-rose-600" />
-                          <span>{isDeletingCurrent ? 'Deleting...' : 'Delete'}</span>
-                        </button>
-                      )}
-
-                      <button
-                        type="button"
-                        onClick={handleDownload}
-                        disabled={isDownloading}
-                        className="px-4 py-2 bg-red-700 hover:bg-red-800 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-all shadow-sm flex items-center gap-1.5 cursor-pointer"
-                      >
-                        <Download className="w-3.5 h-3.5" />
-                        <span>{isDownloading ? 'Downloading...' : 'Download Image'}</span>
-                      </button>
                     </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
             </div>
           )}
 

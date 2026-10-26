@@ -835,7 +835,7 @@ export const AdminCertificatesManager: React.FC = () => {
 
       if (pendingSub) {
         statusType = 'pending';
-      } else if (primaryFile) {
+      } else if (primaryFile && !primaryFile.isMissingFromDrive && primaryFile.status !== 'missing' && primaryFile.approvalStatus !== 'missing') {
         if (primaryFile.uploadSource === 'user' && primaryFile.approvalStatus === 'approved') {
           statusType = 'user_approved';
         } else {

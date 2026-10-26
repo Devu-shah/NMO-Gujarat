@@ -22,11 +22,12 @@ export const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfi
 
 // Support both standard (default) Firestore and named database if provided
 const firestoreDbId = (firebaseConfig as any).firestoreDatabaseId;
+const isCustomNamedDb = firestoreDbId && firestoreDbId !== '(default)' && firestoreDbId !== 'default';
 
 // Initialize Firestore with experimentalAutoDetectLongPolling enabled to prevent WebChannel Listen stream drops
 function setupFirestore() {
   try {
-    return firestoreDbId
+    return isCustomNamedDb
       ? initializeFirestore(
           app,
           { experimentalAutoDetectLongPolling: true },
@@ -36,7 +37,7 @@ function setupFirestore() {
           experimentalAutoDetectLongPolling: true
         });
   } catch {
-    return firestoreDbId ? getFirestore(app, firestoreDbId) : getFirestore(app);
+    return isCustomNamedDb ? getFirestore(app, firestoreDbId) : getFirestore(app);
   }
 }
 
