@@ -203,7 +203,7 @@ export const UploadCertificateModal: React.FC<UploadCertificateModalProps> = ({
               <Upload className="w-5 h-5 text-amber-300" />
             </div>
             <div>
-              <h3 className="text-lg font-black tracking-tight">Upload Certificate to Google Drive</h3>
+              <h3 className="text-lg font-black tracking-tight">Upload Certificate to NMO Repository</h3>
               <p className="text-xs text-amber-200">
                 Official JPG / PNG format · Tagged to Membership ID
               </p>
@@ -385,7 +385,7 @@ export const UploadCertificateModal: React.FC<UploadCertificateModalProps> = ({
             <div className="p-3 bg-amber-50/80 border border-amber-200 rounded-xl text-[11px] text-amber-900 flex items-start gap-2">
               <Sparkles className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
               <p className="leading-relaxed">
-                <strong>Storage Policy:</strong> Max size 1 MB. The certificate will be saved using your Membership ID only (<code>{memberNo ? `${memberNo}.${selectedFile?.name.split('.').pop()?.toLowerCase() || 'jpg'}` : 'MEMBERSHIP_ID'}</code>) directly into Google Drive and submitted for admin review.
+                <strong>Storage Policy:</strong> Max size 1 MB. The certificate will be saved using your Membership ID only (<code>{memberNo ? `${memberNo}.${selectedFile?.name.split('.').pop()?.toLowerCase() || 'jpg'}` : 'MEMBERSHIP_ID'}</code>) directly into the official repository and submitted for admin review.
               </p>
             </div>
 
@@ -428,12 +428,12 @@ export const UploadCertificateModal: React.FC<UploadCertificateModalProps> = ({
                     ) : isUploading ? (
                       <>
                         <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                        <span>Uploading to Google Drive...</span>
+                        <span>Uploading to Repository...</span>
                       </>
                     ) : (
                       <>
                         <Upload className="w-4 h-4" />
-                        <span>Upload to Drive</span>
+                        <span>Upload to Repository</span>
                       </>
                     )}
                   </button>

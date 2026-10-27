@@ -27,7 +27,6 @@ service cloud.firestore {
      */
     function isSuperAdmin() {
       return isAuthenticated() && (
-        request.auth.token.email == 'devanshshah768@gmail.com' ||
         request.auth.token.email == 'superadmin@nmogujarat.org' ||
         request.auth.token.role == 'super_admin'
       );
@@ -78,8 +77,7 @@ service cloud.firestore {
         request.auth.token.role == 'super_admin' ||
         request.auth.token.role == 'state_admin' ||
         request.auth.token.role == 'prant_admin' ||
-        request.auth.token.role == 'city_admin' ||
-        request.auth.token.email == 'devanshshah768@gmail.com'
+        request.auth.token.role == 'city_admin'
       );
     }
 
@@ -95,29 +93,31 @@ service cloud.firestore {
 
     // =========================================================================
     // 1. BOOT TEST & CONNECTION CHECK
-    // =========================================================================
+    // Read: Public (non-blocking health test on boot)
+    // Write: State & Super Administrators
     match /test/{docId} {
-      allow read, write: if true;
+      allow read: if true;
+      allow write: if isStateAdmin();
     }
 
     // =========================================================================
     // 2. CITIES COLLECTION
     // =========================================================================
     // Read: Public (needed for event filtering, user portal, and registration dropdowns)
-    // Write: State & Super Administrators
+    // Write: Administrators
     match /Cities/{cityId} {
       allow read: if true;
-      allow write: if isStateAdmin() || isAuthenticated();
+      allow write: if isStateAdmin() || isAdmin();
     }
 
     // =========================================================================
     // 3. SETTINGS COLLECTION (Google Drive OAuth, Certificate Configuration)
     // =========================================================================
     // Read: Public & Members (to retrieve Google Drive CME link configurations)
-    // Write: State & Super Administrators
+    // Write: State & Super Administrators only
     match /Settings/{settingId} {
       allow read: if settingId != 'googleDriveAuth' || isStateAdmin();
-      allow write: if isStateAdmin() || isAuthenticated();
+      allow write: if isStateAdmin();
     }
 
     // =========================================================================
@@ -215,21 +215,48 @@ service cloud.firestore {
         request.resource.data.email != null &&
         resource.data.email.lower() == request.resource.data.email.lower()
       );
-      allow delete: if isStateAdmin() || isAdmin() || isAuthenticated();
+      allow delete: if isStateAdmin() || isAdmin();
     }
 
     // =========================================================================
-    // 7. INQUIRIES COLLECTION (Contact Us Form)
+    // 7. INQUIRIES & TICKETS COLLECTIONS (Support Desk & User Approval)
     // =========================================================================
-    // Create: Public (anyone can submit an inquiry through Contact Us)
-    // Read, Update, Delete: Administrators only
+    // Read: Public (enables ticket tracking modal by Reference ID), Admins view all
+    // Create: Public (submitting contact & support inquiry)
+    // Update:
+    //   - Administrators: full update for status, resolution, assignments
+    //   - Users: can approve resolution and record user feedback
+    // Delete: Administrators only
     match /inquiries/{inquiryId} {
+      allow read: if true;
       allow create: if true;
-      allow read, update, delete: if isStateAdmin() || isAdmin() || isAuthenticated();
+      allow update: if isStateAdmin() || isAdmin() || (
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['userApprovedResolution', 'userFeedback', 'status', 'userApprovedAt', 'updatedAt'])
+      );
+      allow delete: if isStateAdmin() || isAdmin();
+    }
+
+    match /Tickets/{ticketId} {
+      allow read: if true;
+      allow create: if true;
+      allow update: if isStateAdmin() || isAdmin() || (
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['userApprovedResolution', 'userFeedback', 'status', 'userApprovedAt', 'updatedAt'])
+      );
+      allow delete: if isStateAdmin() || isAdmin();
     }
 
     // =========================================================================
-    // 8. ANNOUNCEMENTS COLLECTION
+    // 8. MAIL COLLECTION (Firebase Trigger Email Extension)
+    // =========================================================================
+    // Create: Public & System (enables automated email triggers)
+    // Read, Update, Delete: Administrators only
+    match /mail/{mailId} {
+      allow create: if true;
+      allow read, update, delete: if isStateAdmin() || isAdmin();
+    }
+
+    // =========================================================================
+    // 9. ANNOUNCEMENTS COLLECTION
     // =========================================================================
     // Read: Public (marquee ticker and alert banner on home page)
     // Write: State & Prant Administrators
@@ -243,57 +270,46 @@ service cloud.firestore {
     }
 
     // =========================================================================
-    // 9. CERTIFICATES COLLECTION (Google Drive Linked Certificates)
+    // 10. CERTIFICATES COLLECTION (Google Drive Linked Certificates)
     // =========================================================================
-    // Read: Authenticated users can read their certificate metadata, public can verify
-    // Write: Administrators and authenticated members submitting certificate records
+    // Read: Public can verify, members can view their certificate records
+    // Create/Update: Administrators and authenticated members submitting certificate records
+    // Delete: Administrators only
     match /Certificates/{certId} {
       allow read: if true;
       allow create, update: if isStateAdmin() || isAdmin() || isAuthenticated() || (
         request.resource.data.membershipNumber != null
       );
-      allow delete: if isStateAdmin() || isAdmin() || isAuthenticated();
+      allow delete: if isStateAdmin() || isAdmin();
     }
     match /certificates/{certId} {
       allow read: if true;
       allow create, update: if isStateAdmin() || isAdmin() || isAuthenticated() || (
         request.resource.data.membershipNumber != null
       );
-      allow delete: if isStateAdmin() || isAdmin() || isAuthenticated();
+      allow delete: if isStateAdmin() || isAdmin();
     }
     match /CertificateTombstones/{tombstoneId} {
-      allow read, write: if isStateAdmin() || isAdmin() || isAuthenticated();
+      allow read, write: if isStateAdmin() || isAdmin();
     }
 
     // =========================================================================
-    // 10. AUDIT LOGS & IMPORT HISTORY
+    // 11. AUDIT LOGS & IMPORT HISTORY
     // =========================================================================
     // Read & Write: Strictly restricted to authenticated Administrators
     match /AuditLogs/{logId} {
-      allow read, write: if isStateAdmin() || isAuthenticated();
+      allow read, write: if isStateAdmin() || isAdmin();
     }
     match /ImportHistory/{historyId} {
-      allow read, write: if isStateAdmin() || isAuthenticated();
+      allow read, write: if isStateAdmin() || isAdmin();
     }
 
     // =========================================================================
-    // 11. BACKWARD COMPATIBILITY ALIASES
-    // =========================================================================
-    match /members/{memberId} {
-      allow read: if true;
-      allow write: if isStateAdmin() || isAuthenticated();
-    }
-    match /events/{eventId} {
-      allow read: if true;
-      allow write: if isStateAdmin() || isAuthenticated();
-    }
-
-    // =========================================================================
-    // 12. CATCH-ALL SAFETY FALLBACK
+    // 12. DEFAULT-DENY ZERO-TRUST CATCH-ALL
+    // Blocks all unmapped collections and orphaned write paths
     // =========================================================================
     match /{document=**} {
-      allow read: if true;
-      allow write: if isStateAdmin() || isAuthenticated();
+      allow read, write: if false;
     }
   }
 }

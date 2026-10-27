@@ -18,7 +18,8 @@ import {
   LayoutDashboard,
   CreditCard,
   Mail,
-  Home
+  Home,
+  Images
 } from 'lucide-react';
 
 interface NavbarProps {
@@ -202,6 +203,21 @@ export const Navbar: React.FC<NavbarProps> = ({
 
                   <button
                     type="button"
+                    onClick={() => handleSelectTab('gallery-archive')}
+                    className="w-full text-left px-4 py-2.5 text-xs font-semibold flex items-center gap-2.5 transition-colors cursor-pointer text-slate-700 hover:bg-slate-50 hover:text-red-700"
+                  >
+                    <Images className="w-4 h-4 text-red-600 shrink-0" />
+                    <div>
+                      <div className="font-bold flex items-center gap-1.5">
+                        <span>Full Gallery Archive</span>
+                        <span className="text-[9px] bg-red-100 text-red-800 px-1 py-0.2 rounded font-mono font-bold">All</span>
+                      </div>
+                      <div className="text-[10px] text-slate-400 font-normal">Complete Photographic Archive</div>
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
                     onClick={() => handleSelectTab('activities')}
                     className={`w-full text-left px-4 py-2.5 text-xs font-semibold flex items-center gap-2.5 transition-colors cursor-pointer ${
                       activeTab === 'activities' ? 'bg-red-50 text-red-700' : 'text-slate-700 hover:bg-slate-50 hover:text-red-700'
@@ -290,7 +306,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                       <Award className="w-4 h-4 text-emerald-600 shrink-0" />
                       <div>
                         <div className="font-bold">Certificates</div>
-                        <div className="text-[10px] text-slate-400 font-normal">Google Drive repository</div>
+                        <div className="text-[10px] text-slate-400 font-normal">Verified repository</div>
                       </div>
                     </button>
                   </div>
@@ -486,6 +502,19 @@ export const Navbar: React.FC<NavbarProps> = ({
                 </button>
                 <button
                   type="button"
+                  onClick={() => handleSelectTab('gallery-archive')}
+                  className="w-full text-left px-3 py-2 rounded-lg text-sm font-medium flex items-center justify-between cursor-pointer text-slate-700 hover:bg-slate-50"
+                >
+                  <span className="flex items-center gap-2.5">
+                    <Images className="w-4 h-4 text-red-600" />
+                    <span>Full Gallery Archive</span>
+                  </span>
+                  <span className="text-[10px] bg-red-100 text-red-800 px-1.5 py-0.5 rounded font-mono font-bold">
+                    All
+                  </span>
+                </button>
+                <button
+                  type="button"
                   onClick={() => handleSelectTab('activities')}
                   className={`w-full text-left px-3 py-2 rounded-lg text-sm font-medium flex items-center justify-between cursor-pointer ${
                     activeTab === 'activities' ? 'bg-red-50 text-red-700 font-bold' : 'text-slate-700 hover:bg-slate-50'
@@ -542,9 +571,9 @@ export const Navbar: React.FC<NavbarProps> = ({
                   >
                     <span className="flex items-center gap-2.5">
                       <Award className="w-4 h-4" />
-                      <span>Drive Certificates</span>
+                      <span>My Certificates</span>
                     </span>
-                    <span className="text-[10px] bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded font-bold">Drive Sync</span>
+                    <span className="text-[10px] bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded font-bold">Verified</span>
                   </button>
                 </div>
               )}

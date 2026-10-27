@@ -537,7 +537,7 @@ export const DriveIntegrationGuideModal: React.FC<DriveIntegrationGuideModalProp
                     <li>Go to <strong>Google Cloud Console &gt; APIs & Services &gt; OAuth consent screen</strong>.</li>
                     <li>Scroll down to the <strong>Test users</strong> section.</li>
                     <li>Click <strong>+ ADD USERS</strong>.</li>
-                    <li>Enter your Google email (e.g., <code>devanshshah768@gmail.com</code> or your admin email).</li>
+                    <li>Enter your Google email (e.g., <code>superadmin@nmogujarat.org</code> or authorized Google account).</li>
                     <li>Click <strong>SAVE</strong>.</li>
                   </ol>
                   <a
@@ -760,7 +760,7 @@ export const DriveIntegrationGuideModal: React.FC<DriveIntegrationGuideModalProp
                       type="email"
                       value={manualEmail}
                       onChange={(e) => setManualEmail(e.target.value)}
-                      placeholder="devanshshah768@gmail.com"
+                      placeholder="superadmin@nmogujarat.org"
                       className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-xs focus:outline-hidden focus:ring-2 focus:ring-red-500"
                     />
                   </div>

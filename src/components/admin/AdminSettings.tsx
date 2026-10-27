@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useNMO, isProtectedAdminUser } from '../../context/NMOContext';
 import { Settings, RefreshCw, CheckCircle2, ShieldAlert, Save, Trash2, AlertTriangle, ShieldCheck } from 'lucide-react';
 import { firebaseConfig } from '../../lib/firebase';
+import { AdminGalleryShowcaseManager } from './AdminGalleryShowcaseManager';
 
 export const AdminSettings: React.FC = () => {
   const { currentUser, users, clearNonAdminUsers } = useNMO();
@@ -198,6 +199,13 @@ export const AdminSettings: React.FC = () => {
               <span>Purge Non-Admin Users ({nonAdminCount})</span>
             </button>
           </div>
+        </div>
+      )}
+
+      {/* Super Admin Exclusive: Homepage Featured Gallery Curation */}
+      {currentUser?.role === 'super_admin' && (
+        <div className="pt-6 border-t border-slate-200">
+          <AdminGalleryShowcaseManager />
         </div>
       )}
 

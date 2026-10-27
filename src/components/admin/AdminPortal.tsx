@@ -18,16 +18,20 @@ import { AdminUsersManager } from './AdminUsersManager';
 import { AdminAdministratorsManager } from './AdminAdministratorsManager';
 import { AdminCertificatesManager } from './AdminCertificatesManager';
 import { AdminSettings } from './AdminSettings';
+import { AdminGalleryShowcaseManager } from './AdminGalleryShowcaseManager';
 import { AdminQRScannerModal } from './AdminQRScannerModal';
+import { AdminInquiriesManager } from './AdminInquiriesManager';
 import {
   LayoutDashboard,
   Database,
+  Inbox,
   FileSpreadsheet,
   RefreshCw,
   Download,
   Sparkles,
   History,
   ShieldCheck,
+  Images,
   Users,
   Shield,
   Calendar,
@@ -362,6 +366,24 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ onBackToSite, portalSc
               <span>Announcements</span>
             </button>
 
+            {/* Inquiries & Support Tickets (All Admins) */}
+            <button
+              onClick={() => setActiveSection('inquiries')}
+              className={`w-full flex items-center justify-between px-3 py-2 rounded-lg font-semibold transition-colors cursor-pointer ${
+                activeSection === 'inquiries'
+                  ? 'bg-red-700 text-white shadow-xs'
+                  : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+              }`}
+            >
+              <div className="flex items-center gap-2.5">
+                <Inbox className="w-4 h-4 text-amber-400" />
+                <span>Inquiries & Tickets</span>
+              </div>
+              <span className="text-[10px] font-bold bg-amber-400/20 text-amber-300 border border-amber-400/40 px-1.5 py-0.5 rounded">
+                Desk
+              </span>
+            </button>
+
             {/* 9. Email (Super Admin & State Admin) */}
             {(isSuperAdmin || role === 'state_admin') && (
               <button
@@ -402,6 +424,21 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ onBackToSite, portalSc
               >
                 <Activity className="w-4 h-4" />
                 <span>Activity Log</span>
+              </button>
+            )}
+
+            {/* Gallery Showcase Selector (Super Admin Only) */}
+            {isSuperAdmin && (
+              <button
+                onClick={() => setActiveSection('gallery-showcase')}
+                className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg font-semibold transition-colors cursor-pointer ${
+                  activeSection === 'gallery-showcase'
+                    ? 'bg-red-700 text-white shadow-xs'
+                    : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                }`}
+              >
+                <Images className="w-4 h-4 text-amber-400" />
+                <span>Gallery Showcase (Home)</span>
               </button>
             )}
 
@@ -475,11 +512,13 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ onBackToSite, portalSc
           <AdminRegistrationsManager initialEventId={selectedTargetEventId} />
         )}
         {activeSection === 'announcements' && <AdminAnnouncementsManager />}
+        {activeSection === 'inquiries' && <AdminInquiriesManager />}
         {activeSection === 'email' && <AdminEmailCenter />}
         {activeSection === 'reports' && <AdminAuditLogs />}
         {activeSection === 'activity-log' && <AdminAuditLogs />}
         {activeSection === 'import-history' && <AdminImportHistory />}
         {activeSection === 'data-validation' && <MemberDataImport initialMode="validate_only" />}
+        {activeSection === 'gallery-showcase' && isSuperAdmin && <AdminGalleryShowcaseManager />}
         {activeSection === 'settings' && <AdminSettings />}
       </main>
 

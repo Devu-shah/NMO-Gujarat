@@ -194,9 +194,11 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
 
   const loadMemberCertificates = async () => {
     if (!targetMemberNo) return;
-    setIsLoading(true);
-    setImageLoaded(false);
-    setImageError(false);
+    if (certificates.length === 0) {
+      setIsLoading(true);
+      setImageLoaded(false);
+      setImageError(false);
+    }
     try {
       // Save membership ID in persistent cookie and compare
       setMemberIdCookie(targetMemberNo);
@@ -206,8 +208,12 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
       const memberCerts = results
         .filter((c) => isCertificateMatchingCookie(c, targetMemberNo))
         .filter((c) => isMemberAttendedForEvent(c.eventId, c.eventTitle, c.eventName, c.driveFolderId, c.driveFolderName));
-      setCertificates(memberCerts);
-      autoSelectMatchingEvent(memberCerts);
+      if (memberCerts.length > 0) {
+        setCertificates(memberCerts);
+        autoSelectMatchingEvent(memberCerts);
+      } else if (certificates.length === 0) {
+        setCertificates([]);
+      }
     } catch (err) {
       console.warn('Error fetching member certificates for modal:', err);
     } finally {

@@ -123,6 +123,10 @@
     "/Certificates/{certId}": {
       "schema": { "type": "object" },
       "description": "Digital CME certificates linked to Google Drive"
+    },
+    "/mail/{mailId}": {
+      "schema": { "type": "object" },
+      "description": "Trigger Email extension collection for outgoing automated notifications"
     }
   }
 }

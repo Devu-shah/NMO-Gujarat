@@ -108,7 +108,7 @@ export const restoreDriveSessionFromBackend = async (): Promise<SavedDriveSessio
       if (data.connected && (data.status === 'active' || data.hasRefreshToken || data.accessToken)) {
         const session: SavedDriveSession = {
           accessToken: data.accessToken || 'server-managed',
-          accountEmail: data.accountEmail || 'devanshshah768@gmail.com',
+          accountEmail: data.accountEmail || 'superadmin@nmogujarat.org',
           accountName: data.accountName || 'NMO Administrator',
           accountPhoto: data.accountPhoto,
           savedAt: new Date().toISOString(),
@@ -272,7 +272,7 @@ export const checkDriveTokenHealth = async (
     if (res.ok) {
       const data = await res.json();
       if (data.connected && data.status === 'active') {
-        return { valid: true, email: data.accountEmail || 'devanshshah768@gmail.com' };
+        return { valid: true, email: data.accountEmail || 'superadmin@nmogujarat.org' };
       }
     }
     return { valid: false, error: 'Google Drive is disconnected or session expired' };

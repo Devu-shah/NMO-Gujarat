@@ -754,7 +754,7 @@ export const EventsSection: React.FC<EventsSectionProps> = ({ onOpenAuth }) => {
             {/* Footer */}
             <div className="pt-4 mt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
               <span>
-                Synced directly with Firestore <code className="font-mono text-slate-700 bg-slate-100 px-1 py-0.5 rounded">event_registrations</code>
+                Official NMO Gujarat Registration Registry
               </span>
               <button
                 type="button"

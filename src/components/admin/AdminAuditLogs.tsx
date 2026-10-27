@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
 import { useNMO } from '../../context/NMOContext';
-import { Shield, Clock, Search, Filter } from 'lucide-react';
+import { Shield, Clock, Search, Filter, Lock, Key } from 'lucide-react';
 
 export const AdminAuditLogs: React.FC = () => {
-  const { auditLogs } = useNMO();
+  const { auditLogs, currentUser } = useNMO();
+  const isSuperAdmin = currentUser?.role === 'super_admin';
   const [filterAction, setFilterAction] = useState<string>('All');
   const [search, setSearch] = useState<string>('');
 
@@ -15,7 +16,8 @@ export const AdminAuditLogs: React.FC = () => {
         log.action.toLowerCase().includes(q) ||
         log.performedBy.toLowerCase().includes(q) ||
         log.details.toLowerCase().includes(q) ||
-        log.targetId.toLowerCase().includes(q);
+        log.targetId.toLowerCase().includes(q) ||
+        (isSuperAdmin && (log.id || '').toLowerCase().includes(q));
       if (!match) return false;
     }
     return true;
@@ -25,9 +27,22 @@ export const AdminAuditLogs: React.FC = () => {
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h3 className="text-xl font-black text-slate-900">
-            Administrative Security Audit Trail
-          </h3>
+          <div className="flex items-center gap-2">
+            <h3 className="text-xl font-black text-slate-900">
+              Administrative Security Audit Trail
+            </h3>
+            {isSuperAdmin ? (
+              <span className="inline-flex items-center gap-1 text-[11px] font-bold text-purple-800 bg-purple-100 border border-purple-200 px-2 py-0.5 rounded-full">
+                <Key className="w-3 h-3 text-purple-700" />
+                <span>Super Admin Log IDs Visible</span>
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-500 bg-slate-100 border border-slate-200 px-2 py-0.5 rounded-full">
+                <Lock className="w-3 h-3 text-slate-400" />
+                <span>Log IDs Restricted to Super Admin</span>
+              </span>
+            )}
+          </div>
           <p className="text-xs text-slate-500 mt-1">
             Immutable chronological record of administrative actions, member updates, batch imports, and exports.
           </p>
@@ -56,6 +71,9 @@ export const AdminAuditLogs: React.FC = () => {
           <table className="w-full text-left text-xs">
             <thead className="bg-slate-50 text-slate-700 font-bold border-b border-slate-200">
               <tr>
+                {isSuperAdmin && (
+                  <th className="p-3.5 text-purple-900 bg-purple-50/50">Log ID</th>
+                )}
                 <th className="p-3.5">Timestamp</th>
                 <th className="p-3.5">Action</th>
                 <th className="p-3.5">Performed By</th>
@@ -66,13 +84,18 @@ export const AdminAuditLogs: React.FC = () => {
             <tbody className="divide-y divide-slate-100">
               {filteredLogs.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="p-8 text-center text-slate-400">
+                  <td colSpan={isSuperAdmin ? 6 : 5} className="p-8 text-center text-slate-400">
                     No audit records match the current filter.
                   </td>
                 </tr>
               ) : (
                 filteredLogs.map((log) => (
                   <tr key={log.id} className="hover:bg-slate-50">
+                    {isSuperAdmin && (
+                      <td className="p-3.5 whitespace-nowrap font-mono text-[11px] font-bold text-purple-800 bg-purple-50/30">
+                        {log.id}
+                      </td>
+                    )}
                     <td className="p-3.5 whitespace-nowrap text-slate-500 font-mono text-[11px]">
                       {new Date(log.timestamp).toLocaleString()}
                     </td>

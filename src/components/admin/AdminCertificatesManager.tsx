@@ -91,6 +91,7 @@ export const AdminCertificatesManager: React.FC = () => {
   } = useNMO();
 
   const [activeSubTab, setActiveSubTab] = useState<SubTab>('event_desk');
+  const isSuperAdmin = currentUser?.role === 'super_admin';
   const [showGuideModal, setShowGuideModal] = useState<boolean>(false);
   const [guideInitialTab, setGuideInitialTab] = useState<GuideTab>('invalid_secret');
   const [savedAccount, setSavedAccount] = useState<SavedDriveSession | null>(getSavedDriveAccount());
@@ -639,6 +640,13 @@ export const AdminCertificatesManager: React.FC = () => {
   };
 
   const handleConnect = async () => {
+    if (!isSuperAdmin) {
+      setFeedback({
+        message: 'Security Policy: Only Super Administrators have authority to authorize or change Google Drive credentials.',
+        type: 'error'
+      });
+      return;
+    }
     setIsConnecting(true);
     setFeedback(null);
     try {
@@ -680,6 +688,13 @@ export const AdminCertificatesManager: React.FC = () => {
   };
 
   const handleDisconnect = async () => {
+    if (!isSuperAdmin) {
+      setFeedback({
+        message: 'Security Policy: Only Super Administrators have authority to disconnect Google Drive credentials.',
+        type: 'error'
+      });
+      return;
+    }
     disconnectGoogleDrive();
     setIsConnected(false);
     setSavedAccount(null);
@@ -1326,82 +1341,91 @@ export const AdminCertificatesManager: React.FC = () => {
               <span>{isReconcilingFolders ? 'Reconciling...' : 'Reconcile Folders'}</span>
             </button>
 
-            <button
-              type="button"
-              onClick={handleMigrateFolders}
-              disabled={isMigratingFolders}
-              className="px-3.5 py-2 bg-purple-50 hover:bg-purple-100 text-purple-900 border border-purple-300 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs disabled:opacity-50"
-              title="Migrate legacy event folders sitting directly in Root 'NMO Gujarat' into 'NMO Gujarat -> Events'"
-            >
-              <FolderPlus className={`w-4 h-4 text-purple-700 ${isMigratingFolders ? 'animate-spin' : ''}`} />
-              <span>{isMigratingFolders ? 'Migrating...' : 'Migrate Legacy Folders'}</span>
-            </button>
+            {isSuperAdmin ? (
+              <>
+                <button
+                  type="button"
+                  onClick={handleMigrateFolders}
+                  disabled={isMigratingFolders}
+                  className="px-3.5 py-2 bg-purple-50 hover:bg-purple-100 text-purple-900 border border-purple-300 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs disabled:opacity-50"
+                  title="Migrate legacy event folders sitting directly in Root 'NMO Gujarat' into 'NMO Gujarat -> Events'"
+                >
+                  <FolderPlus className={`w-4 h-4 text-purple-700 ${isMigratingFolders ? 'animate-spin' : ''}`} />
+                  <span>{isMigratingFolders ? 'Migrating...' : 'Migrate Legacy Folders'}</span>
+                </button>
 
-            <button
-              type="button"
-              onClick={handleMigratePendingToEvents}
-              disabled={isMigratingPending}
-              className="px-3.5 py-2 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs disabled:opacity-50"
-              title="Migrate all certificates from 'pending/{event name}' into 'Events/{event name}'"
-            >
-              <ArrowRight className={`w-4 h-4 text-amber-700 ${isMigratingPending ? 'animate-pulse' : ''}`} />
-              <span>{isMigratingPending ? 'Migrating Pending...' : 'Migrate Pending → Events'}</span>
-            </button>
+                <button
+                  type="button"
+                  onClick={handleMigratePendingToEvents}
+                  disabled={isMigratingPending}
+                  className="px-3.5 py-2 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs disabled:opacity-50"
+                  title="Migrate all certificates from 'pending/{event name}' into 'Events/{event name}'"
+                >
+                  <ArrowRight className={`w-4 h-4 text-amber-700 ${isMigratingPending ? 'animate-pulse' : ''}`} />
+                  <span>{isMigratingPending ? 'Migrating Pending...' : 'Migrate Pending → Events'}</span>
+                </button>
 
-            <button
-              type="button"
-              onClick={() => {
-                setGuideInitialTab('manual_token');
-                setShowGuideModal(true);
-              }}
-              className="px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-300 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
-            >
-              <Key className="w-4 h-4 text-emerald-700" />
-              <span>Drive Tokens</span>
-            </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setGuideInitialTab('manual_token');
+                    setShowGuideModal(true);
+                  }}
+                  className="px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-300 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
+                >
+                  <Key className="w-4 h-4 text-emerald-700" />
+                  <span>Drive Tokens</span>
+                </button>
 
-            <button
-              type="button"
-              onClick={() => {
-                setGuideInitialTab('quick_guide');
-                setShowGuideModal(true);
-              }}
-              className="px-3.5 py-2 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
-            >
-              <HelpCircle className="w-4 h-4 text-amber-700" />
-              <span>Drive Setup</span>
-            </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setGuideInitialTab('quick_guide');
+                    setShowGuideModal(true);
+                  }}
+                  className="px-3.5 py-2 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
+                >
+                  <HelpCircle className="w-4 h-4 text-amber-700" />
+                  <span>Drive Setup</span>
+                </button>
 
-            <a
-              href={NMO_ROOT_DRIVE_URL}
-              target="_blank"
-              rel="noreferrer"
-              className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer border border-slate-200"
-            >
-              <FolderOpen className="w-4 h-4 text-amber-600" />
-              <span>Open Root Drive</span>
-              <ExternalLink className="w-3 h-3 text-slate-400" />
-            </a>
+                <a
+                  href={NMO_ROOT_DRIVE_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer border border-slate-200"
+                >
+                  <FolderOpen className="w-4 h-4 text-amber-600" />
+                  <span>Open Root Drive</span>
+                  <ExternalLink className="w-3 h-3 text-slate-400" />
+                </a>
 
-            {isConnected ? (
-              <button
-                type="button"
-                onClick={handleDisconnect}
-                className="px-3 py-2 bg-slate-100 hover:bg-red-50 text-slate-600 hover:text-red-700 rounded-xl text-xs font-semibold transition-colors cursor-pointer border border-slate-200"
-                title="Disconnect Google Drive"
-              >
-                Disconnect
-              </button>
+                {isConnected ? (
+                  <button
+                    type="button"
+                    onClick={handleDisconnect}
+                    className="px-3 py-2 bg-slate-100 hover:bg-red-50 text-slate-600 hover:text-red-700 rounded-xl text-xs font-semibold transition-colors cursor-pointer border border-slate-200"
+                    title="Disconnect Google Drive"
+                  >
+                    Disconnect
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handleConnect}
+                    disabled={isConnecting}
+                    className="flex items-center gap-2 px-4 py-2 bg-red-700 hover:bg-red-800 text-white font-semibold text-xs rounded-xl shadow-xs transition-all cursor-pointer"
+                  >
+                    <Sparkles className="w-4 h-4" />
+                    <span>{isConnecting ? 'Connecting...' : 'Authorize Drive'}</span>
+                  </button>
+                )}
+              </>
             ) : (
-              <button
-                type="button"
-                onClick={handleConnect}
-                disabled={isConnecting}
-                className="flex items-center gap-2 px-4 py-2 bg-red-700 hover:bg-red-800 text-white font-semibold text-xs rounded-xl shadow-xs transition-all cursor-pointer"
-              >
-                <Sparkles className="w-4 h-4" />
-                <span>{isConnecting ? 'Connecting...' : 'Authorize Drive'}</span>
-              </button>
+              <span className="px-3 py-1.5 bg-slate-100 text-slate-600 rounded-xl text-xs font-medium border border-slate-200 flex items-center gap-1.5">
+                <ShieldCheck className="w-3.5 h-3.5 text-slate-500" />
+                <span>Drive Credentials Managed by Super Admin</span>
+              </span>
             )}
           </div>
         </div>

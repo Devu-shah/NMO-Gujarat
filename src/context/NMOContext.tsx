@@ -10,7 +10,10 @@ import {
   NMOImportLog,
   NMOAuditLog
 } from '../types/nmo';
-import { auth, db } from '../lib/firebase';
+import { auth, db, TARGET_FIRESTORE_DATABASE, TARGET_FIREBASE_PROJECT_ID } from '../lib/firebase';
+
+// Explicitly export target database instance and project for runtime verification
+export { TARGET_FIRESTORE_DATABASE, TARGET_FIREBASE_PROJECT_ID };
 import {
   onAuthStateChanged,
   signInWithEmailAndPassword,
@@ -629,8 +632,8 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             if (data.authenticated && data.user) {
               const sessionAdmin: NMOUserRecord = {
                 membershipNumber: data.user.membershipNumber || 'NMO-ADMIN-001',
-                name: data.user.name || 'Dr. Devansh Shah',
-                email: data.user.email || 'devanshshah768@gmail.com',
+                name: data.user.name || 'Super Administrator',
+                email: data.user.email || 'superadmin@nmogujarat.org',
                 role: 'super_admin',
                 accountStatus: 'Active',
                 status: 'Active',
@@ -708,7 +711,7 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (isSuperAdminLogin) {
       const targetAdminEmail = cleanIdLower.includes('@')
         ? cleanIdLower
-        : (matched?.email?.trim().toLowerCase() || 'devanshshah768@gmail.com');
+        : (matched?.email?.trim().toLowerCase() || 'superadmin@nmogujarat.org');
 
       // Verify the password through Firebase Authentication first (no bypass, no mock fallback)
       const cred = await signInWithEmailAndPassword(auth, targetAdminEmail, cleanPass);
@@ -1025,7 +1028,7 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               : 'Verified NMO Member',
           email:
             role === 'super_admin'
-              ? 'devanshshah768@gmail.com'
+              ? 'superadmin@nmogujarat.org'
               : role === 'state_admin'
               ? 'secretary.gujarat@nmogujarat.org'
               : role === 'prant_admin'
@@ -1271,8 +1274,8 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const masterAdmin: NMOUserRecord = {
       membershipNumber: 'NMO-ADMIN-001',
-      name: currentUser?.name || 'Dr. Devansh Shah',
-      email: currentUser?.email || 'devanshshah768@gmail.com',
+      name: currentUser?.name || 'Super Administrator',
+      email: currentUser?.email || 'superadmin@nmogujarat.org',
       role: 'super_admin',
       accountStatus: 'Active',
       status: 'Active',

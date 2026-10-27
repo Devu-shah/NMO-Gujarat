@@ -31,12 +31,14 @@ import {
   XCircle,
   Award,
   Upload,
-  Eye
+  Eye,
+  LifeBuoy
 } from 'lucide-react';
 import { NmoLogo } from './NmoLogo';
 import { MemberCertificatesTab } from './MemberCertificatesTab';
 import { UploadCertificateModal } from './UploadCertificateModal';
 import { ShowCertificateModal } from './ShowCertificateModal';
+import { TicketTrackerModal } from './TicketTrackerModal';
 import { setMemberIdCookie } from '../lib/memberCookie';
 
 interface MemberDashboardProps {
@@ -86,6 +88,7 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
   // Certificate Modal States
   const [isUploadModalOpen, setIsUploadModalOpen] = useState<boolean>(false);
   const [isShowCertModalOpen, setIsShowCertModalOpen] = useState<boolean>(false);
+  const [isTicketTrackerOpen, setIsTicketTrackerOpen] = useState<boolean>(false);
   const [certModalEvent, setCertModalEvent] = useState<{ id?: string; title?: string }>({});
   const [rsvpSubmittingId, setRsvpSubmittingId] = useState<string | null>(null);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
@@ -302,7 +305,7 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
                 setIsUploadModalOpen(true);
               }}
               className="px-3 py-2 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-xs cursor-pointer"
-              title="Upload your certificate (JPG/PNG) to Google Drive"
+              title="Upload your certificate (JPG/PNG) to NMO Repository"
             >
               <Award className="w-4 h-4 text-emerald-200" />
               <span>Upload Certificate (JPG/PNG)</span>
@@ -314,7 +317,7 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
                 setIsShowCertModalOpen(true);
               }}
               className="px-3 py-2 bg-blue-700 hover:bg-blue-800 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-xs cursor-pointer"
-              title="Show my certificates from Google Drive"
+              title="Show my verified certificates"
             >
               <CheckCircle2 className="w-4 h-4 text-blue-200" />
               <span>Show Certificates</span>
@@ -326,6 +329,15 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
             >
               <CreditCard className="w-4 h-4" />
               <span>My ID Card</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsTicketTrackerOpen(true)}
+              className="px-3.5 py-2 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold rounded-lg text-xs flex items-center gap-1.5 transition-colors shadow-xs cursor-pointer"
+              title="Track inquiries, support tickets, and approve administrative solutions"
+            >
+              <LifeBuoy className="w-4 h-4 text-slate-950" />
+              <span>Support Tickets</span>
             </button>
             <button
               type="button"
@@ -346,7 +358,7 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
             { id: 'profile', label: 'My Profile', icon: UserCircle },
             { id: 'events', label: 'Events & Registration', icon: Calendar },
             { id: 'history', label: `My History (${myRegistrations.length})`, icon: History },
-            { id: 'certificates', label: 'Drive Certificates', icon: Award },
+            { id: 'certificates', label: 'My Certificates', icon: Award },
             { id: 'alerts', label: `Alerts (${memberAlerts.length})`, icon: Bell }
           ].map((tab) => {
             const Icon = tab.icon;
@@ -430,8 +442,8 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
                 </div>
                 <div>
                   <h4 className="font-bold text-sm tracking-tight text-white flex items-center gap-2">
-                    <span>Google Drive Certificate Management</span>
-                    <span className="text-[10px] bg-amber-400 text-slate-950 font-extrabold px-2 py-0.5 rounded-full">Drive Verified</span>
+                    <span>Official Certificate Repository</span>
+                    <span className="text-[10px] bg-amber-400 text-slate-950 font-extrabold px-2 py-0.5 rounded-full">Verified Record</span>
                   </h4>
                   <p className="text-xs text-slate-300 mt-0.5">
                     Upload your participation certificates (JPG/PNG only) or retrieve your official certificates issued to Membership ID: <strong className="font-mono text-amber-300">{currentMember.membershipNumber}</strong>.
@@ -1147,7 +1159,7 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
                                     setIsUploadModalOpen(true);
                                   }}
                                   className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded text-xs font-semibold inline-flex items-center gap-1 transition-colors cursor-pointer"
-                                  title="Upload certificate (JPG/PNG) to Google Drive for this event"
+                                  title="Upload certificate (JPG/PNG) for this event"
                                 >
                                   <Upload className="w-3 h-3 text-emerald-600" />
                                   <span>Upload Cert</span>
@@ -1159,7 +1171,7 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
                                     setIsShowCertModalOpen(true);
                                   }}
                                   className="px-2.5 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded text-xs font-semibold inline-flex items-center gap-1 transition-colors cursor-pointer"
-                                  title="Show my certificates from Google Drive"
+                                  title="Show verified certificates"
                                 >
                                   <Award className="w-3 h-3 text-blue-600" />
                                   <span>Show Cert</span>
@@ -1469,7 +1481,7 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
             {/* Footer */}
             <div className="pt-4 mt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
               <span>
-                Synced directly with Firestore <code className="font-mono text-slate-700 bg-slate-100 px-1 py-0.5 rounded">event_registrations</code>
+                Official NMO Gujarat Registration Registry
               </span>
               <button
                 type="button"
@@ -1512,6 +1524,12 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
           }
           setIsUploadModalOpen(true);
         }}
+      />
+
+      {/* Ticket Tracker Modal (User Review and Resolution Approval) */}
+      <TicketTrackerModal
+        isOpen={isTicketTrackerOpen}
+        onClose={() => setIsTicketTrackerOpen(false)}
       />
     </div>
   );

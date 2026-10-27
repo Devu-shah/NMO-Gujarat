@@ -13,6 +13,7 @@ import { AnnouncementsTicker } from './components/AnnouncementsTicker';
 import { EventsSection } from './components/EventsSection';
 import { AboutSection } from './components/AboutSection';
 import { GallerySection } from './components/GallerySection';
+import { DedicatedGalleryPage } from './components/DedicatedGalleryPage';
 import { ActivitiesSection } from './components/ActivitiesSection';
 import { ContactUsPage } from './components/ContactUsPage';
 import { Footer } from './components/Footer';
@@ -143,6 +144,7 @@ function MainLayout() {
   // Determine active tab for common Navbar (Must be called before any early return)
   const currentActiveNavTab = useMemo(() => {
     if (currentRoute === '/contact') return 'contact';
+    if (currentRoute === '/gallery' || currentRoute === '/gallery-archive') return 'gallery';
     if (currentRoute === '/login') return 'login';
     if (currentRoute.startsWith('/admin')) return 'admin-portal';
     if (currentRoute.startsWith('/dashboard')) {
@@ -170,6 +172,9 @@ function MainLayout() {
     } else if (tab === 'contact') {
       setActiveTab('contact');
       navigate('/contact');
+    } else if (tab === 'gallery-archive') {
+      setActiveTab('gallery');
+      navigate('/gallery');
     } else if (tab === 'login') {
       navigate('/login');
     } else if (tab === 'admin-portal') {
@@ -324,6 +329,37 @@ function MainLayout() {
     );
   }
 
+  // --- ROUTE 8.5: DEDICATED FULL GALLERY ARCHIVE (/gallery or /gallery-archive) ---
+  if (currentRoute === '/gallery' || currentRoute === '/gallery-archive') {
+    return (
+      <div className="min-h-screen bg-slate-50 flex flex-col font-sans">
+        <Navbar
+          activeTab="gallery"
+          setActiveTab={handleNavigate}
+          onOpenAuth={() => navigate('/login')}
+          onOpenVerify={() => setIsVerifyOpen(true)}
+        />
+        <main className="flex-1">
+          <DedicatedGalleryPage
+            onBackToHome={() => {
+              setActiveTab('home');
+              navigate('/');
+            }}
+          />
+        </main>
+        <Footer
+          onNavigate={handleNavigate}
+          onOpenVerify={() => setIsVerifyOpen(true)}
+          onOpenAuth={() => navigate('/login')}
+        />
+        <PublicVerifyModal
+          isOpen={isVerifyOpen}
+          onClose={() => setIsVerifyOpen(false)}
+        />
+      </div>
+    );
+  }
+
   // --- ROUTE 9: MAIN PUBLIC WEBSITE (/) ---
   return (
     <div className="min-h-screen flex flex-col bg-white text-slate-900 selection:bg-red-700 selection:text-white">
@@ -378,8 +414,13 @@ function MainLayout() {
         {/* Core Activities */}
         <ActivitiesSection />
 
-        {/* Media & Seva Gallery */}
-        <GallerySection />
+        {/* Media & Seva Gallery (6 Featured on Home; Full archive link) */}
+        <GallerySection
+          onOpenFullGallery={() => {
+            setActiveTab('gallery');
+            navigate('/gallery');
+          }}
+        />
       </main>
 
       {/* Main Public Website Footer */}

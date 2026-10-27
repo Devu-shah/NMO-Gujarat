@@ -20,24 +20,19 @@ try {
 // Initialize Firebase App instance safely
 export const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 
-// Support both standard (default) Firestore and named database if provided
-const firestoreDbId = (firebaseConfig as any).firestoreDatabaseId;
-const isCustomNamedDb = firestoreDbId && firestoreDbId !== '(default)' && firestoreDbId !== 'default';
+// Explicit target: Always specifically connect to the '(default)' database project
+export const TARGET_FIRESTORE_DATABASE = '(default)';
+export const TARGET_FIREBASE_PROJECT_ID = 'nmo-india-demo';
 
-// Initialize Firestore with experimentalAutoDetectLongPolling enabled to prevent WebChannel Listen stream drops
+// Initialize Firestore targeting '(default)' with experimentalAutoDetectLongPolling enabled
 function setupFirestore() {
   try {
-    return isCustomNamedDb
-      ? initializeFirestore(
-          app,
-          { experimentalAutoDetectLongPolling: true },
-          firestoreDbId
-        )
-      : initializeFirestore(app, {
-          experimentalAutoDetectLongPolling: true
-        });
+    // Explicitly target (default) database instance
+    return initializeFirestore(app, {
+      experimentalAutoDetectLongPolling: true
+    });
   } catch {
-    return isCustomNamedDb ? getFirestore(app, firestoreDbId) : getFirestore(app);
+    return getFirestore(app);
   }
 }
 

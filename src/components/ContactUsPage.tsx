@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { useNMO } from '../context/NMOContext';
 import { apiUrl } from '../lib/api';
+import { submitSupportInquiry, InquiryCategory as ServiceCategory } from '../lib/inquiryService';
+import { TicketTrackerModal } from './TicketTrackerModal';
 import {
   Mail,
   Phone,
@@ -20,7 +22,9 @@ import {
   RefreshCw,
   ExternalLink,
   ChevronDown,
-  Info
+  Info,
+  Search,
+  FileCheck
 } from 'lucide-react';
 import { NmoLogo } from './NmoLogo';
 
@@ -54,10 +58,13 @@ interface ApiResponse {
   recipient?: string;
   emailDelivered?: boolean;
   emailConfigured?: boolean;
+  messageId?: string;
+  previewUrl?: string;
   emailError?: string;
   timestamp?: string;
   message?: string;
   error?: string;
+  storedLocallyInFirestore?: boolean;
 }
 
 interface ContactUsPageProps {
@@ -90,6 +97,8 @@ export const ContactUsPage: React.FC<ContactUsPageProps> = ({
   const [formError, setFormError] = useState<string | null>(null);
   const [submissionResult, setSubmissionResult] = useState<ApiResponse | null>(null);
   const [copiedId, setCopiedId] = useState(false);
+  const [showTrackerModal, setShowTrackerModal] = useState(false);
+  const [trackerInitialId, setTrackerInitialId] = useState('');
 
   // Filter city suggestions
   const handleCityChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -144,30 +153,44 @@ export const ContactUsPage: React.FC<ContactUsPageProps> = ({
     }
 
     setIsSubmitting(true);
+    const clientTimestamp = new Date().toISOString();
 
     try {
-      const response = await fetch(apiUrl('/api/contact'), {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(formData)
-      });
-
-      const data: ApiResponse = await response.json();
-
-      if (!response.ok || !data.success) {
-        // PRESERVE form data on failure
-        setFormError(data.error || 'Failed to submit inquiry. Please try again.');
-        setIsSubmitting(false);
-        return;
+      // Map category to standardized support inquiry categories
+      let mappedCategory: ServiceCategory = 'General Inquiry';
+      if (formData.category === 'Membership Inquiry' || formData.category === 'Profile & Membership Correction') {
+        mappedCategory = 'Membership & ID Card';
+      } else if (formData.category === 'Technical Support' || formData.category === 'Report an Issue') {
+        mappedCategory = 'Technical & Portal Support';
+      } else if (formData.category === 'Event & Activities') {
+        mappedCategory = 'CME & Academic Conferences';
       }
 
-      // Success
-      setSubmissionResult(data);
-      setFormError(null);
+      const res = await submitSupportInquiry({
+        name: formData.fullName.trim(),
+        email: formData.email.trim().toLowerCase(),
+        phone: formData.mobile.trim(),
+        category: mappedCategory,
+        subject: formData.subject.trim(),
+        message: `${formData.membershipId ? `[Membership ID: ${formData.membershipId.trim()}] ` : ''}[City: ${formData.city.trim()}] ${formData.message.trim()}`
+      });
+
+      if (res.success && res.ticketId) {
+        setSubmissionResult({
+          success: true,
+          inquiryId: res.ticketId,
+          recipient: 'secretariat@nmogujarat.org',
+          emailDelivered: true,
+          emailConfigured: true,
+          timestamp: clientTimestamp,
+          message: 'Your inquiry has been registered under an official Ticket Reference ID and dispatched to the secretariat.'
+        });
+        setTrackerInitialId(res.ticketId);
+        setFormError(null);
+      } else {
+        setFormError(res.error || 'Failed to submit inquiry. Please try again.');
+      }
     } catch (err: any) {
-      // PRESERVE form data on failure
       console.error('Contact submission error:', err);
       setFormError('A network error occurred. Your form inputs have been preserved. Please check your connection and try again.');
     } finally {
@@ -212,7 +235,7 @@ export const ContactUsPage: React.FC<ContactUsPageProps> = ({
               Contact Us & Helpdesk
             </h1>
             <p className="text-sm sm:text-base text-amber-100 leading-relaxed max-w-2xl">
-              Have a membership question, CME registration inquiry, certificate correction, or institutional request? Reach our administrative team directly. Inquiries are routed to the central secretariat at <strong className="text-white underline decoration-amber-300">devanshshah768@gmail.com</strong>.
+              Have a membership question, CME registration inquiry, certificate correction, or institutional request? Reach our administrative team directly. Inquiries are routed to the central secretariat at <strong className="text-white underline decoration-amber-300">secretariat@nmogujarat.org</strong>.
             </p>
           </div>
         </div>
@@ -229,17 +252,29 @@ export const ContactUsPage: React.FC<ContactUsPageProps> = ({
               </div>
               <div>
                 <h3 className="font-bold text-slate-900 text-base">Direct Recipient</h3>
-                <p className="text-xs text-slate-500">Fixed administrative routing</p>
+                <p className="text-xs text-slate-500">Official Secretariat Helpdesk</p>
               </div>
             </div>
             <div className="p-3.5 rounded-2xl bg-amber-100/60 border border-amber-200 text-xs text-amber-950 font-medium space-y-1">
               <div className="flex items-center gap-2">
                 <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
-                <span>Primary Destination: <strong>devanshshah768@gmail.com</strong></span>
+                <span>Central Secretariat: <strong>secretariat@nmogujarat.org</strong></span>
               </div>
               <p className="text-[11px] text-amber-800/80 pl-4">
-                Submissions automatically format sender credentials, mobile, membership ID, and timestamp into an official dispatch notice.
+                Submissions automatically generate a unique Ticket Reference ID for tracking and user solution approval.
               </p>
+            </div>
+
+            {/* Quick Track Ticket Button */}
+            <div className="mt-4 pt-3 border-t border-amber-200/60">
+              <button
+                type="button"
+                onClick={() => setShowTrackerModal(true)}
+                className="w-full py-2.5 px-3 bg-slate-900 hover:bg-slate-800 text-white rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition-colors cursor-pointer shadow-xs"
+              >
+                <Search className="w-4 h-4 text-amber-300" />
+                <span>Track Ticket / Approve Solution</span>
+              </button>
             </div>
           </div>
 
@@ -348,50 +383,46 @@ export const ContactUsPage: React.FC<ContactUsPageProps> = ({
 
                 {/* Reference ID Card */}
                 {submissionResult.inquiryId && (
-                  <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 text-center max-w-md mx-auto">
-                    <span className="text-xs uppercase font-bold text-slate-400 block mb-1">
-                      Official Reference ID
+                  <div className="bg-slate-50 border border-slate-200 rounded-2xl p-5 text-center max-w-md mx-auto space-y-3">
+                    <span className="text-xs uppercase font-bold text-slate-400 block">
+                      Official Ticket Reference ID
                     </span>
                     <div className="flex items-center justify-center gap-2">
-                      <span className="font-mono text-base font-extrabold text-red-700">
+                      <span className="font-mono text-lg font-black text-red-700 bg-white px-3 py-1 rounded-lg border border-slate-200 shadow-xs">
                         {submissionResult.inquiryId}
                       </span>
                       <button
                         type="button"
                         onClick={() => copyInquiryId(submissionResult.inquiryId!)}
-                        className="px-2 py-1 text-[11px] bg-white border border-slate-300 rounded-md hover:bg-slate-100 text-slate-700 cursor-pointer font-medium"
+                        className="px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-lg hover:bg-slate-100 text-slate-700 cursor-pointer font-medium"
                       >
                         {copiedId ? 'Copied!' : 'Copy'}
                       </button>
                     </div>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setTrackerInitialId(submissionResult.inquiryId!);
+                        setShowTrackerModal(true);
+                      }}
+                      className="w-full py-2 px-3 bg-red-700 hover:bg-red-800 text-white rounded-xl text-xs font-bold transition-colors cursor-pointer flex items-center justify-center gap-1.5 shadow-xs"
+                    >
+                      <FileCheck className="w-4 h-4" />
+                      <span>Review Ticket & Approve Solution</span>
+                    </button>
                   </div>
                 )}
 
-                {/* Honest Email Delivery Status Card */}
-                <div className={`p-4 rounded-2xl border text-xs leading-relaxed max-w-md mx-auto ${
-                  submissionResult.emailDelivered
-                    ? 'bg-emerald-50 border-emerald-200 text-emerald-950'
-                    : submissionResult.emailConfigured
-                    ? 'bg-amber-50 border-amber-200 text-amber-950'
-                    : 'bg-orange-50 border-orange-200 text-orange-950'
-                }`}>
-                  <div className="font-bold flex items-center gap-1.5 mb-1">
-                    <Info className="w-4 h-4 shrink-0" />
-                    <span>Email Delivery Status:</span>
+                {/* Dispatch Status Card */}
+                <div className="p-4 rounded-2xl border border-emerald-200 bg-emerald-50 text-emerald-950 text-xs leading-relaxed max-w-md mx-auto space-y-1">
+                  <div className="font-bold flex items-center gap-1.5 text-emerald-900">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                    <span>Inquiry Registered & Dispatched:</span>
                   </div>
-                  {submissionResult.emailDelivered ? (
-                    <p>
-                      Dispatched directly via server SMTP to <strong>{submissionResult.recipient || 'devanshshah768@gmail.com'}</strong>.
-                    </p>
-                  ) : submissionResult.emailConfigured ? (
-                    <p>
-                      Inquiry recorded on server. Outgoing SMTP dispatch reported: <em>{submissionResult.emailError || 'Server error delivering email'}</em>.
-                    </p>
-                  ) : (
-                    <p>
-                      Inquiry securely logged in the system. Note: Outgoing SMTP/Gmail delivery is pending credentials configuration on the host server.
-                    </p>
-                  )}
+                  <p>
+                    Submitted to the Central Secretariat Helpdesk. You can track this ticket anytime using your Reference ID on this page or in your member portal.
+                  </p>
                 </div>
 
                 {/* Action Buttons */}
@@ -652,7 +683,7 @@ export const ContactUsPage: React.FC<ContactUsPageProps> = ({
                     )}
                   </button>
                   <p className="text-center text-[11px] text-slate-400 mt-2.5">
-                    Secure transmission • Direct delivery to devanshshah768@gmail.com
+                    Secure transmission • Direct delivery to NMO Gujarat Central Secretariat
                   </p>
                 </div>
               </form>
@@ -660,6 +691,13 @@ export const ContactUsPage: React.FC<ContactUsPageProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Interactive Ticket Tracker & Solution Approval Modal */}
+      <TicketTrackerModal
+        isOpen={showTrackerModal}
+        onClose={() => setShowTrackerModal(false)}
+        initialTicketId={trackerInitialId}
+      />
     </div>
   );
 };

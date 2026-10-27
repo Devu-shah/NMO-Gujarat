@@ -174,7 +174,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onSuccessRedirect, onNavig
             {isLoading ? (
               <div className="flex items-center gap-2">
                 <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                <span>Authenticating with Firebase...</span>
+                <span>Authenticating with Security Gateway...</span>
               </div>
             ) : isForgotMode ? (
               <span>Send Reset Instructions</span>
@@ -206,7 +206,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onSuccessRedirect, onNavig
         {/* Security and Routing Guarantee */}
         <div className="mt-6 pt-5 border-t border-slate-100 text-center">
           <p className="text-[11px] text-slate-500 leading-relaxed">
-            Your permissions are determined directly by your verified <strong>Users</strong> profile in Cloud Firestore. Role selection is strictly server-governed.
+            Your permissions are determined directly by your verified <strong>Users</strong> profile in the NMO Central Directory. Role selection is strictly server-governed.
           </p>
         </div>
       </div>

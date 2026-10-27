@@ -14,6 +14,7 @@ import { getAuth as getAdminAuth } from 'firebase-admin/auth';
 import type { DecodedIdToken } from 'firebase-admin/auth';
 import { getFirestore as getAdminFirestoreSdk } from 'firebase-admin/firestore';
 import type { Firestore as AdminFirestore } from 'firebase-admin/firestore';
+import { sendContactInquiryEmail, getEmailServiceStatus } from './src/server/emailService';
 
 dotenv.config();
 
@@ -678,71 +679,74 @@ Recipient:        ${RECIPIENT_EMAIL}
 </html>
 `.trim();
 
-      // 7. Check for Configured Email Transport (SMTP / Gmail)
-      const hasGmailConfig = Boolean(process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD);
-      const hasSmtpConfig = Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
+      // 7. Dispatch Email via Centralized Nodemailer Service
+      const emailResult = await sendContactInquiryEmail({
+        inquiryId,
+        fullName: fullName.trim(),
+        mobile: cleanMobile,
+        email: cleanEmail,
+        city: city.trim(),
+        membershipId: membershipId ? membershipId.trim() : undefined,
+        category,
+        subject: subject.trim(),
+        message: message.trim(),
+        clientIp
+      });
 
-      let emailDelivered = false;
-      let emailError: string | null = null;
-
-      if (hasGmailConfig || hasSmtpConfig) {
+      // 8. Dual Firestore Persistence (Inquiries Log + Firebase Trigger Email Collection)
+      const adminDb = getAdminFirestore();
+      if (adminDb) {
         try {
-          let transporter: any;
-
-          if (hasGmailConfig) {
-            transporter = nodemailer.createTransport({
-              service: 'gmail',
-              auth: {
-                user: process.env.GMAIL_USER,
-                pass: process.env.GMAIL_APP_PASSWORD
-              }
-            });
-          } else {
-            transporter = nodemailer.createTransport({
-              host: process.env.SMTP_HOST,
-              port: Number(process.env.SMTP_PORT) || 587,
-              secure: process.env.SMTP_SECURE === 'true' || Number(process.env.SMTP_PORT) === 465,
-              auth: {
-                user: process.env.SMTP_USER,
-                pass: process.env.SMTP_PASS
-              }
-            });
-          }
-
-          const fromAddress = process.env.GMAIL_USER || process.env.SMTP_FROM || process.env.SMTP_USER || 'no-reply@nmogujarat.org';
-
-          await transporter.sendMail({
-            from: `"NMO Gujarat Portal" <${fromAddress}>`,
-            to: RECIPIENT_EMAIL,
-            replyTo: cleanEmail,
-            subject: emailSubject,
-            text: textBody,
-            html: htmlBody
+          // A. Save to inquiries collection for secretariat recordkeeping
+          await adminDb.collection('inquiries').doc(inquiryId).set({
+            inquiryId,
+            fullName: fullName.trim(),
+            mobile: cleanMobile,
+            email: cleanEmail,
+            city: city.trim(),
+            membershipId: membershipId ? membershipId.trim() : null,
+            category,
+            subject: subject.trim(),
+            message: message.trim(),
+            clientIp,
+            recipient: RECIPIENT_EMAIL,
+            emailDelivered: emailResult.delivered,
+            emailMessageId: emailResult.messageId || null,
+            emailError: emailResult.error || null,
+            status: 'Pending',
+            createdAt: serverTimestamp
           });
 
-          emailDelivered = true;
-          console.log(`[Contact API] Email successfully dispatched to ${RECIPIENT_EMAIL} for inquiry ${inquiryId}`);
-        } catch (mailErr: any) {
-          console.error('[Contact API] Failed to send email via transporter:', mailErr);
-          emailError = mailErr.message || 'SMTP delivery failed';
+          // B. Add to mail collection for Firebase Trigger Email Extension (if installed)
+          await adminDb.collection('mail').doc(inquiryId).set({
+            to: [RECIPIENT_EMAIL],
+            replyTo: cleanEmail,
+            message: {
+              subject: emailSubject,
+              text: textBody,
+              html: htmlBody
+            },
+            inquiryId,
+            createdAt: serverTimestamp
+          });
+          console.log(`[Contact API] Inquiry ${inquiryId} logged to Firestore 'inquiries' and 'mail' collections.`);
+        } catch (dbErr: any) {
+          console.warn('[Contact API] Firestore inquiry persistence notice:', dbErr.message || dbErr);
         }
-      } else {
-        console.warn(`[Contact API] No SMTP/Gmail credentials configured in environment. Inquiry ${inquiryId} logged.`);
       }
 
-      // 8. Return response
+      // 9. Return response with comprehensive status
       return res.status(200).json({
         success: true,
         inquiryId,
         recipient: RECIPIENT_EMAIL,
-        emailDelivered,
-        emailConfigured: hasGmailConfig || hasSmtpConfig,
-        emailError: emailError || undefined,
+        emailDelivered: emailResult.delivered,
+        messageId: emailResult.messageId || undefined,
+        previewUrl: emailResult.previewUrl || undefined,
+        emailError: emailResult.error || undefined,
         timestamp: serverTimestamp,
-        message: emailDelivered
+        message: emailResult.delivered
           ? 'Your inquiry has been successfully sent to the NMO Gujarat administration.'
-          : hasGmailConfig || hasSmtpConfig
-          ? 'Your inquiry was recorded. Notice: Email delivery failed due to SMTP server error.'
           : 'Your inquiry has been securely recorded. Notice: Outgoing email delivery is queued pending SMTP/Gmail configuration.'
       });
     } catch (err: any) {
@@ -750,6 +754,22 @@ Recipient:        ${RECIPIENT_EMAIL}
       return res.status(500).json({
         success: false,
         error: 'An internal error occurred while processing your inquiry. Please try again.'
+      });
+    }
+  });
+
+  // Diagnostic endpoint for Email Service configuration status
+  app.get('/api/contact/status', async (_req, res) => {
+    try {
+      const status = await getEmailServiceStatus();
+      return res.status(200).json({
+        success: true,
+        emailService: status
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        success: false,
+        error: err.message || 'Failed to determine email service status'
       });
     }
   });
@@ -3211,6 +3231,266 @@ Recipient:        ${RECIPIENT_EMAIL}
     } catch (err: any) {
       console.error('[Drive Subfolders] Error listing subfolders:', err);
       return res.status(500).json({ error: err.message || 'Error listing subfolders', folders: [] });
+    }
+  });
+
+  // =========================================================================
+  // Dynamic Gallery System: Google Drive root/gallery/{event name}
+  // - Finds event folders in Drive folder root/gallery/
+  // - Fetches all photos per event
+  // - Supports Super Admin featured selection (max 6 on homepage)
+  // =========================================================================
+  let cachedGalleryEvents: any[] | null = null;
+  let cachedGalleryTimestamp = 0;
+  const GALLERY_CACHE_TTL = 3 * 60 * 1000; // 3 minutes
+
+  app.get('/api/gallery/events', async (req, res) => {
+    try {
+      const force = req.query.force === 'true';
+      const now = Date.now();
+
+      if (!force && cachedGalleryEvents && now - cachedGalleryTimestamp < GALLERY_CACHE_TTL) {
+        return res.json({
+          success: true,
+          fromCache: true,
+          count: cachedGalleryEvents.length,
+          events: cachedGalleryEvents
+        });
+      }
+
+      const token = await getValidServerDriveToken();
+      let driveEvents: any[] = [];
+      let galleryFolderId: string | null = null;
+
+      if (token) {
+        try {
+          // 1. Locate root/gallery folder under NMO Root folder
+          const findGalleryQ = `'${ROOT_DRIVE_FOLDER_ID}' in parents and mimeType = 'application/vnd.google-apps.folder' and (name = 'gallery' or name = 'Gallery') and trashed = false`;
+          const galleryFindResp = await fetch(
+            `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(findGalleryQ)}&fields=files(id,name)&pageSize=5`,
+            { headers: { Authorization: `Bearer ${token}` } }
+          );
+
+          if (galleryFindResp.ok) {
+            const data = await galleryFindResp.json();
+            if (data.files && data.files.length > 0) {
+              galleryFolderId = data.files[0].id;
+            }
+          }
+
+          // If not found directly under root, search for any folder named gallery/Gallery
+          if (!galleryFolderId) {
+            const fallbackQ = `mimeType = 'application/vnd.google-apps.folder' and (name = 'gallery' or name = 'Gallery') and trashed = false`;
+            const fbResp = await fetch(
+              `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(fallbackQ)}&fields=files(id,name)&pageSize=5`,
+              { headers: { Authorization: `Bearer ${token}` } }
+            );
+            if (fbResp.ok) {
+              const fbData = await fbResp.json();
+              if (fbData.files && fbData.files.length > 0) {
+                galleryFolderId = fbData.files[0].id;
+              }
+            }
+          }
+
+          // 2. If gallery folder exists, list all event subfolders
+          if (galleryFolderId) {
+            const eventFoldersQ = `'${galleryFolderId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+            const eventFoldersResp = await fetch(
+              `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(eventFoldersQ)}&fields=files(id,name,createdTime)&pageSize=100&orderBy=createdTime desc`,
+              { headers: { Authorization: `Bearer ${token}` } }
+            );
+
+            if (eventFoldersResp.ok) {
+              const eventFoldersData = await eventFoldersResp.json();
+              const subfolders = eventFoldersData.files || [];
+
+              // For each subfolder, retrieve images
+              for (const folder of subfolders) {
+                const photosQ = `'${folder.id}' in parents and mimeType contains 'image/' and trashed = false`;
+                const photosResp = await fetch(
+                  `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(photosQ)}&fields=files(id,name,mimeType,size,createdTime,webViewLink,thumbnailLink)&pageSize=100&orderBy=createdTime asc`,
+                  { headers: { Authorization: `Bearer ${token}` } }
+                );
+
+                let photos: any[] = [];
+                if (photosResp.ok) {
+                  const photosData = await photosResp.json();
+                  photos = (photosData.files || []).map((img: any) => ({
+                    id: img.id,
+                    name: img.name,
+                    mimeType: img.mimeType,
+                    size: img.size ? `${(Number(img.size) / (1024 * 1024)).toFixed(2)} MB` : undefined,
+                    createdTime: img.createdTime,
+                    proxyUrl: `/api/drive/file/${img.id}`,
+                    webViewLink: img.webViewLink || `https://drive.google.com/file/d/${img.id}/view`,
+                    thumbnailLink: img.thumbnailLink
+                  }));
+                }
+
+                driveEvents.push({
+                  id: folder.id,
+                  eventName: folder.name,
+                  photoCount: photos.length,
+                  createdTime: folder.createdTime,
+                  coverPhoto: photos[0] || null,
+                  photos
+                });
+              }
+            }
+          }
+        } catch (driveErr) {
+          console.warn('[Gallery] Error querying Google Drive gallery folders:', driveErr);
+        }
+      }
+
+      // 3. Retrieve Super Admin Featured Configuration from Firestore Settings/galleryConfig
+      let featuredFolderIds: string[] = [];
+      const adminDb = getAdminFirestore();
+      if (adminDb) {
+        try {
+          const configDoc = await adminDb.collection('Settings').doc('galleryConfig').get();
+          if (configDoc.exists) {
+            const data = configDoc.data();
+            if (Array.isArray(data?.featuredEventFolderIds)) {
+              featuredFolderIds = data.featuredEventFolderIds;
+            }
+          }
+        } catch (fsErr) {
+          console.warn('[Gallery] Error reading galleryConfig from Firestore:', fsErr);
+        }
+      }
+
+      let finalEvents = driveEvents;
+
+      // Mark featured and sort: featured events first (in chosen order), then others by createdTime desc
+      if (featuredFolderIds.length > 0) {
+        const featuredSet = new Set(featuredFolderIds);
+        finalEvents = finalEvents.map((evt) => ({
+          ...evt,
+          isFeatured: featuredSet.has(evt.id)
+        }));
+
+        finalEvents.sort((a, b) => {
+          const aIdx = featuredFolderIds.indexOf(a.id);
+          const bIdx = featuredFolderIds.indexOf(b.id);
+          if (aIdx !== -1 && bIdx !== -1) return aIdx - bIdx;
+          if (aIdx !== -1) return -1;
+          if (bIdx !== -1) return 1;
+          return (b.createdTime || '').localeCompare(a.createdTime || '');
+        });
+      } else {
+        // Default: first 6 are marked as featured for the homepage
+        finalEvents = finalEvents.map((evt, idx) => ({
+          ...evt,
+          isFeatured: idx < 6
+        }));
+      }
+
+      cachedGalleryEvents = finalEvents;
+      cachedGalleryTimestamp = now;
+
+      return res.json({
+        success: true,
+        count: finalEvents.length,
+        galleryFolderId,
+        events: finalEvents
+      });
+    } catch (err: any) {
+      console.error('[Gallery] Unexpected error listing gallery events:', err);
+      return res.status(500).json({ error: err.message || 'Failed to list gallery events', events: [] });
+    }
+  });
+
+  // GET /api/gallery/event/:folderId/photos
+  app.get('/api/gallery/event/:folderId/photos', async (req, res) => {
+    try {
+      const folderId = req.params.folderId;
+      if (!folderId) return res.status(400).json({ error: 'Folder ID is required' });
+
+      const token = await getValidServerDriveToken();
+      if (!token) {
+        return res.status(503).json({ error: 'Google Drive is disconnected.', photos: [] });
+      }
+
+      const photosQ = `'${folderId}' in parents and mimeType contains 'image/' and trashed = false`;
+      const photosResp = await fetch(
+        `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(photosQ)}&fields=files(id,name,mimeType,size,createdTime,webViewLink,thumbnailLink)&pageSize=100&orderBy=createdTime asc`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+
+      if (!photosResp.ok) {
+        return res.status(photosResp.status).json({ error: 'Failed to fetch photos', photos: [] });
+      }
+
+      const data = await photosResp.json();
+      const photos = (data.files || []).map((img: any) => ({
+        id: img.id,
+        name: img.name,
+        mimeType: img.mimeType,
+        size: img.size ? `${(Number(img.size) / (1024 * 1024)).toFixed(2)} MB` : undefined,
+        createdTime: img.createdTime,
+        proxyUrl: `/api/drive/file/${img.id}`,
+        webViewLink: img.webViewLink || `https://drive.google.com/file/d/${img.id}/view`,
+        thumbnailLink: img.thumbnailLink
+      }));
+
+      return res.json({ success: true, folderId, count: photos.length, photos });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Error fetching photos', photos: [] });
+    }
+  });
+
+  // POST /api/gallery/featured (SUPER ADMIN ONLY)
+  app.post('/api/gallery/featured', async (req, res) => {
+    try {
+      const adminRole = req.headers['x-admin-role'] || '';
+      if (adminRole !== 'super_admin') {
+        return res.status(403).json({ error: 'Forbidden: Super Admin access required.' });
+      }
+
+      const { featuredFolderIds } = req.body;
+      if (!Array.isArray(featuredFolderIds)) {
+        return res.status(400).json({ error: 'featuredFolderIds array is required.' });
+      }
+
+      const cleanIds = featuredFolderIds.slice(0, 6);
+      const adminDb = getAdminFirestore();
+      if (adminDb) {
+        await adminDb.collection('Settings').doc('galleryConfig').set({
+          featuredEventFolderIds: cleanIds,
+          updatedAt: new Date().toISOString(),
+          updatedBy: 'super_admin'
+        }, { merge: true });
+      }
+
+      // Invalidate cache
+      cachedGalleryEvents = null;
+      cachedGalleryTimestamp = 0;
+
+      return res.json({
+        success: true,
+        message: `Successfully configured ${cleanIds.length} featured events for Homepage.`,
+        featuredFolderIds: cleanIds
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Failed to update featured gallery config' });
+    }
+  });
+
+  // GET /api/gallery/config
+  app.get('/api/gallery/config', async (_req, res) => {
+    try {
+      const adminDb = getAdminFirestore();
+      if (adminDb) {
+        const docSnap = await adminDb.collection('Settings').doc('galleryConfig').get();
+        if (docSnap.exists) {
+          return res.json({ success: true, config: docSnap.data() });
+        }
+      }
+      return res.json({ success: true, config: { featuredEventFolderIds: [] } });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Failed to read gallery config' });
     }
   });
 

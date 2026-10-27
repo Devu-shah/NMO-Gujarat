@@ -40,9 +40,19 @@ import { apiUrl } from '../lib/api';
 export const MemberCertificatesTab: React.FC = () => {
   const { currentMember, currentUser, events } = useNMO();
 
-  const [certificates, setCertificates] = useState<DriveCertificateFile[]>([]);
+  const [certificates, setCertificates] = useState<DriveCertificateFile[]>(() => {
+    try {
+      const savedMem = currentMember?.membershipNumber || currentUser?.membershipNumber || localStorage.getItem('nmo_user_membership_number') || '';
+      if (savedMem) {
+        const cached = sessionStorage.getItem(`nmo_member_certs_${savedMem.trim().toUpperCase()}`);
+        if (cached) return JSON.parse(cached);
+      }
+    } catch {}
+    return [];
+  });
   const [statusFilter, setStatusFilter] = useState<'all' | 'approved' | 'pending' | 'rejected' | 'missing'>('all');
   const [isLoadingCerts, setIsLoadingCerts] = useState<boolean>(false);
+  const [isBackgroundSyncing, setIsBackgroundSyncing] = useState<boolean>(false);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [showCertModal, setShowCertModal] = useState<boolean>(false);
   const [selectedPreviewCert, setSelectedPreviewCert] = useState<DriveCertificateFile | null>(null);
@@ -165,12 +175,20 @@ export const MemberCertificatesTab: React.FC = () => {
   // Count certificates hidden due to unconfirmed attendance
   const unconfirmedAttendanceCertsCount = certificates.length - attendeeAllowedCertificates.length;
 
-  // Load certificates on mount or when memberNo changes with real-time Firestore sync
+  // Load certificates on mount or when memberNo changes with debounced real-time Firestore sync
   useEffect(() => {
     if (!memberNo) return;
-    loadCertificates();
+    loadCertificates(false);
 
-    // Listen to real-time changes in Certificates so admin approvals/rejections reflect instantly
+    let debounceTimer: any = null;
+    const triggerDebouncedSync = () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        loadCertificates(true);
+      }, 5000);
+    };
+
+    // Listen to real-time changes in Certificates so admin approvals/rejections reflect without tearing down UI
     let unsubscribe1: (() => void) | undefined;
     let unsubscribe2: (() => void) | undefined;
 
@@ -179,7 +197,7 @@ export const MemberCertificatesTab: React.FC = () => {
       unsubscribe1 = onSnapshot(
         q1,
         () => {
-          loadCertificates();
+          triggerDebouncedSync();
         },
         (err) => {
           console.warn('Real-time sync Certificates listener notice:', err?.message || err);
@@ -190,7 +208,7 @@ export const MemberCertificatesTab: React.FC = () => {
       unsubscribe2 = onSnapshot(
         q2,
         () => {
-          loadCertificates();
+          triggerDebouncedSync();
         },
         (err) => {
           console.warn('Real-time sync certificates listener notice:', err?.message || err);
@@ -201,24 +219,57 @@ export const MemberCertificatesTab: React.FC = () => {
     }
 
     return () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
       if (unsubscribe1) unsubscribe1();
       if (unsubscribe2) unsubscribe2();
     };
   }, [memberNo]);
 
-  const loadCertificates = async () => {
+  const loadCertificates = async (isBackground: boolean = false, forceEmpty: boolean = false) => {
     if (!memberNo) return;
-    setIsLoadingCerts(true);
-    setUploadFeedback(null);
+    const cleanMem = memberNo.trim().toUpperCase();
+
+    // Only display blocking loader if there are no existing cards rendered
+    if (!isBackground && certificates.length === 0) {
+      setIsLoadingCerts(true);
+    } else {
+      setIsBackgroundSyncing(true);
+    }
+
     try {
-      setMemberIdCookie(memberNo);
-      const found = await fetchCertificatesByMembershipNumber(memberNo);
-      const strictlyFiltered = found.filter((c) => isCertificateMatchingCookie(c, memberNo));
-      setCertificates(strictlyFiltered);
+      setMemberIdCookie(cleanMem);
+      const found = await fetchCertificatesByMembershipNumber(cleanMem);
+      const strictlyFiltered = found.filter((c) => isCertificateMatchingCookie(c, cleanMem));
+
+      if (strictlyFiltered.length > 0 || forceEmpty) {
+        setCertificates((prev) => {
+          if (prev.length === strictlyFiltered.length) {
+            const hasChanged = strictlyFiltered.some((newItem, idx) => {
+              const oldItem = prev[idx];
+              return (
+                !oldItem ||
+                newItem.id !== oldItem.id ||
+                newItem.approvalStatus !== oldItem.approvalStatus ||
+                newItem.status !== oldItem.status ||
+                newItem.thumbnailLink !== oldItem.thumbnailLink ||
+                newItem.driveFolderId !== oldItem.driveFolderId
+              );
+            });
+            if (!hasChanged) return prev; // Persistent reference preserved
+          }
+          try {
+            sessionStorage.setItem(`nmo_member_certs_${cleanMem}`, JSON.stringify(strictlyFiltered));
+          } catch {}
+          return strictlyFiltered;
+        });
+      } else if (strictlyFiltered.length === 0 && certificates.length === 0) {
+        setCertificates([]);
+      }
     } catch (err: any) {
       console.warn('Error loading member certificates:', err);
     } finally {
       setIsLoadingCerts(false);
+      setIsBackgroundSyncing(false);
     }
   };
 
@@ -470,14 +521,14 @@ export const MemberCertificatesTab: React.FC = () => {
             <div>
               <div className="flex items-center gap-2">
                 <h3 className="text-xl font-black text-slate-900">
-                  Google Drive Certificate Portal
+                  Official Certificate Portal
                 </h3>
                 <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-200">
-                  {NMO_ROOT_DRIVE_FOLDER_NAME} Repository
+                  Verified NMO Digital Archive
                 </span>
               </div>
               <p className="text-xs text-slate-500 mt-1 max-w-xl leading-relaxed">
-                Certificates assigned to your Membership ID (<strong>{memberNo}</strong>) are automatically fetched from the organization's central Google Drive folder. You can also upload your verified event attendance or paper presentation certificates below.
+                Certificates assigned to your Membership ID (<strong>{memberNo}</strong>) are automatically synchronized from the organization's verified digital repository. You can also upload your verified event attendance or paper presentation certificates below.
               </p>
             </div>
           </div>
@@ -495,7 +546,7 @@ export const MemberCertificatesTab: React.FC = () => {
 
             <button
               type="button"
-              onClick={loadCertificates}
+              onClick={() => loadCertificates(false)}
               disabled={isLoadingCerts}
               className="px-3.5 py-2 bg-red-50 hover:bg-red-100 text-red-700 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer border border-red-200"
             >
@@ -538,11 +589,11 @@ export const MemberCertificatesTab: React.FC = () => {
             <div className="flex items-center gap-2.5 mb-4 pb-3 border-b border-slate-100">
               <Upload className="w-5 h-5 text-red-700" />
               <h4 className="font-bold text-slate-900 text-sm sm:text-base">
-                Upload Certificate to Google Drive
+                Upload Certificate to NMO Repository
               </h4>
             </div>
             <p className="text-xs text-slate-500 mb-4 leading-relaxed">
-              Upload your event certificate, paper presentation, or workshop completion document. It will be stored directly in the central <strong>{NMO_ROOT_DRIVE_FOLDER_NAME}</strong> Google Drive and tagged with your Membership ID: <strong className="text-slate-800">{memberNo}</strong>.
+              Upload your event certificate, paper presentation, or workshop completion document. It will be stored securely in the central NMO repository and tagged with your Membership ID: <strong className="text-slate-800">{memberNo}</strong>.
             </p>
 
             <form onSubmit={handleUpload} className="space-y-4 text-xs">
@@ -608,7 +659,7 @@ export const MemberCertificatesTab: React.FC = () => {
                   </p>
                   <div className="p-2.5 bg-white/80 rounded-xl border border-purple-200 text-[11px] text-purple-900 font-medium flex items-center gap-2">
                     <Clock className="w-3.5 h-3.5 text-purple-600 shrink-0" />
-                    <span>Please wait for the administrator to issue and upload your certificate to Google Drive.</span>
+                    <span>Please wait for the administrator to issue and publish your certificate to the repository.</span>
                   </div>
                 </div>
               )}
@@ -688,12 +739,12 @@ export const MemberCertificatesTab: React.FC = () => {
                       ) : isUploading ? (
                         <>
                           <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                          <span>Uploading to Google Drive...</span>
+                          <span>Uploading to Official Repository...</span>
                         </>
                       ) : (
                         <>
                           <Upload className="w-4 h-4" />
-                          <span>Upload Certificate to Drive</span>
+                          <span>Upload Certificate to Repository</span>
                         </>
                       )}
                     </button>
@@ -709,7 +760,7 @@ export const MemberCertificatesTab: React.FC = () => {
               <span>Automated Membership Tagging</span>
             </div>
             <p className="leading-relaxed">
-              Files uploaded here are saved into the master NMO Gujarat Drive under your Membership ID so they are permanently accessible on your profile.
+              Files uploaded here are saved into the master NMO Gujarat repository under your Membership ID so they are permanently accessible on your profile.
             </p>
           </div>
         </div>
@@ -801,10 +852,17 @@ export const MemberCertificatesTab: React.FC = () => {
               )}
             </div>
 
-            {isLoadingCerts ? (
+            {isBackgroundSyncing && displayedCertificates.length > 0 && (
+              <div className="flex items-center gap-1.5 px-3 py-1.5 mb-2 bg-slate-50 border border-slate-200 rounded-lg text-[11px] text-slate-500 font-medium animate-pulse">
+                <RefreshCw className="w-3 h-3 text-red-700 animate-spin" />
+                <span>Checking verified repository for recent certificate updates...</span>
+              </div>
+            )}
+
+            {isLoadingCerts && displayedCertificates.length === 0 ? (
               <div className="py-16 text-center text-slate-400">
                 <div className="w-7 h-7 border-2 border-red-700 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-                <p className="text-xs">Searching NMO Gujarat Google Drive for your certificates...</p>
+                <p className="text-xs">Searching verified repository for your certificates...</p>
               </div>
             ) : displayedCertificates.length === 0 ? (
               <div className="py-12 text-center text-slate-400 space-y-3">
@@ -830,8 +888,8 @@ export const MemberCertificatesTab: React.FC = () => {
                     : statusFilter === 'rejected'
                     ? 'You have no rejected certificate submissions.'
                     : statusFilter === 'missing'
-                    ? 'All your certificate files are safely available in Google Drive.'
-                    : `Certificates in Google Drive are retrieved using your Membership ID (${memberNo}). Upload your certificate or wait for organizers to issue your certificate.`}
+                    ? 'All your certificate files are safely available in the verified repository.'
+                    : `Certificates are retrieved using your Membership ID (${memberNo}). Upload your certificate or wait for organizers to issue your certificate.`}
                 </p>
                 <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-100 text-[10px] text-slate-600 font-medium mt-1">
                   <span>🔒 Privacy Protected: Only your own certificates are displayed</span>
@@ -860,7 +918,7 @@ export const MemberCertificatesTab: React.FC = () => {
                           {isMissing && (
                             <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300 flex items-center gap-1">
                               <AlertCircle className="w-3 h-3 text-amber-700" />
-                              <span>Missing from Drive</span>
+                              <span>Awaiting Ingestion</span>
                             </span>
                           )}
 
@@ -905,7 +963,7 @@ export const MemberCertificatesTab: React.FC = () => {
                         {isMissing && (
                           <div className="p-2 bg-amber-50 border border-amber-200 rounded-lg text-amber-900 text-[11px] font-medium flex items-start gap-1.5 mt-1">
                             <AlertCircle className="w-3.5 h-3.5 text-amber-600 shrink-0 mt-0.5" />
-                            <span>Certificate file is missing from Google Drive. Please re-upload your certificate to restore it.</span>
+                            <span>Certificate file requires re-uploading to the verified repository. Please re-upload your certificate to restore it.</span>
                           </div>
                         )}
 
@@ -923,7 +981,7 @@ export const MemberCertificatesTab: React.FC = () => {
                         )}
 
                         <p className="text-[10px] text-slate-400">
-                          {cert.createdTime ? `Recorded: ${new Date(cert.createdTime).toLocaleDateString()}` : 'Google Drive Verified'} · {cert.size || 'Certificate'}
+                          {cert.createdTime ? `Recorded: ${new Date(cert.createdTime).toLocaleDateString()}` : 'Repository Verified'} · {cert.size || 'Certificate'}
                         </p>
                       </div>
 
@@ -1103,7 +1161,7 @@ export const MemberCertificatesTab: React.FC = () => {
                   </span>
                 </p>
                 <p className="text-[10px] text-slate-400 mt-0.5">
-                  Select a new file to replace it in Google Drive, or leave empty to keep the existing file.
+                  Select a new file to replace it in the repository, or leave empty to keep the existing file.
                 </p>
               </div>
 
