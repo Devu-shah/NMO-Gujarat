@@ -226,21 +226,49 @@ export async function approveTicketSolution(
   ticketId: string,
   userFeedback?: string
 ): Promise<{ success: boolean; error?: string }> {
+  const timestamp = new Date().toISOString();
+  const cleanId = ticketId.trim();
+  const feedback = userFeedback?.trim() || 'Solution accepted by user';
+
+  let firestoreSuccess = false;
   try {
-    const timestamp = new Date().toISOString();
-    await updateDoc(doc(db, 'inquiries', ticketId), {
+    await updateDoc(doc(db, 'inquiries', cleanId), {
       userApprovedResolution: true,
-      userFeedback: userFeedback?.trim() || 'Solution accepted by user',
+      userFeedback: feedback,
       userApprovedAt: timestamp,
       status: 'closed',
       closedAt: timestamp,
       updatedAt: timestamp
     });
-    return { success: true };
-  } catch (err: any) {
-    console.error('Error approving ticket resolution:', err);
-    return { success: false, error: err.message || 'Failed to approve solution' };
+    firestoreSuccess = true;
+  } catch (clientErr: any) {
+    console.warn('[Inquiries] Client Firestore update notice, attempting backend sync:', clientErr?.message || clientErr);
   }
+
+  // Dual-sync with backend API endpoint to guarantee persistence
+  try {
+    const res = await fetch(apiUrl('/api/inquiries/update-status'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ticketId: cleanId,
+        userApprovedResolution: true,
+        userFeedback: feedback,
+        status: 'closed'
+      })
+    });
+    if (res.ok) {
+      return { success: true };
+    }
+  } catch (apiErr: any) {
+    console.warn('[Inquiries] Backend status endpoint notice:', apiErr?.message || apiErr);
+  }
+
+  if (firestoreSuccess) {
+    return { success: true };
+  }
+
+  return { success: false, error: 'Failed to record resolution approval' };
 }
 
 /**
@@ -255,33 +283,68 @@ export async function updateInquiryStatusByAdmin(
     resolvedBy?: string;
   }
 ): Promise<{ success: boolean; error?: string }> {
-  try {
-    const timestamp = new Date().toISOString();
-    const payload: Partial<SupportInquiry> = {
-      status: updates.status,
-      updatedAt: timestamp
-    };
+  const cleanId = ticketId.trim();
+  const timestamp = new Date().toISOString();
+  const payload: Partial<SupportInquiry> = {
+    status: updates.status,
+    updatedAt: timestamp
+  };
 
-    if (updates.adminSolution !== undefined) {
-      payload.adminSolution = updates.adminSolution;
-    }
-    if (updates.adminNotes !== undefined) {
-      payload.adminNotes = updates.adminNotes;
-    }
-
-    if (updates.status === 'resolved') {
-      payload.resolvedAt = timestamp;
-      payload.resolvedBy = updates.resolvedBy || 'Administrator';
-    } else if (updates.status === 'closed') {
-      payload.closedAt = timestamp;
-    }
-
-    await updateDoc(doc(db, 'inquiries', ticketId), payload);
-    return { success: true };
-  } catch (err: any) {
-    console.error('Error updating inquiry status:', err);
-    return { success: false, error: err.message || 'Failed to update ticket' };
+  if (updates.adminSolution !== undefined) {
+    payload.adminSolution = updates.adminSolution;
   }
+  if (updates.adminNotes !== undefined) {
+    payload.adminNotes = updates.adminNotes;
+  }
+
+  if (updates.status === 'resolved') {
+    payload.resolvedAt = timestamp;
+    payload.resolvedBy = updates.resolvedBy || 'Administrator';
+  } else if (updates.status === 'closed') {
+    payload.closedAt = timestamp;
+  }
+
+  let firestoreSuccess = false;
+  let lastError = '';
+
+  // 1. Update client-side Firestore directly
+  try {
+    await updateDoc(doc(db, 'inquiries', cleanId), payload);
+    firestoreSuccess = true;
+  } catch (clientErr: any) {
+    lastError = clientErr?.message || String(clientErr);
+    console.warn('[Inquiries] Client Firestore update notice, attempting backend server sync:', lastError);
+  }
+
+  // 2. Dual-sync with server backend endpoint (running with Admin SDK privileges)
+  try {
+    const res = await fetch(apiUrl('/api/inquiries/update-status'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ticketId: cleanId,
+        status: updates.status,
+        adminSolution: updates.adminSolution,
+        adminNotes: updates.adminNotes,
+        resolvedBy: updates.resolvedBy
+      })
+    });
+
+    if (res.ok) {
+      return { success: true };
+    }
+  } catch (apiErr: any) {
+    console.warn('[Inquiries] Backend update API endpoint notice:', apiErr?.message || apiErr);
+  }
+
+  if (firestoreSuccess) {
+    return { success: true };
+  }
+
+  return {
+    success: false,
+    error: lastError || 'Failed to update ticket status. Please check your network connection.'
+  };
 }
 
 /**

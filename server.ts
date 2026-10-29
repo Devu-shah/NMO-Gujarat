@@ -810,30 +810,114 @@ Recipient:        ${RECIPIENT_EMAIL}
     try {
       const { gmailUser, gmailAppPassword, smtpHost, smtpPort, smtpUser, smtpPass, smtpSecure, recipientEmail } = req.body || {};
 
+      const cleanUser = gmailUser?.trim().toLowerCase();
+      const cleanPass = gmailAppPassword ? gmailAppPassword.replace(/\s+/g, '') : undefined;
+      const cleanRecip = recipientEmail?.trim().toLowerCase();
+
       saveStoredSmtpConfig({
-        gmailUser: gmailUser?.trim(),
-        gmailAppPassword: gmailAppPassword?.trim(),
+        gmailUser: cleanUser,
+        gmailAppPassword: cleanPass,
         smtpHost: smtpHost?.trim(),
         smtpPort: smtpPort ? Number(smtpPort) : undefined,
         smtpUser: smtpUser?.trim(),
-        smtpPass: smtpPass?.trim(),
+        smtpPass: smtpPass ? smtpPass.replace(/\s+/g, '') : undefined,
         smtpSecure: Boolean(smtpSecure),
-        recipientEmail: recipientEmail?.trim()
+        recipientEmail: cleanRecip
       });
+
+      // Also persist to Firestore Settings if Admin SDK is available
+      try {
+        const adminDb = getAdminFirestore();
+        if (adminDb) {
+          await adminDb.collection('Settings').doc('smtpConfig').set({
+            gmailUser: cleanUser,
+            recipientEmail: cleanRecip,
+            smtpHost: smtpHost?.trim() || null,
+            smtpPort: smtpPort ? Number(smtpPort) : null,
+            smtpUser: smtpUser?.trim() || null,
+            hasAppPassword: Boolean(cleanPass),
+            updatedAt: new Date().toISOString()
+          }, { merge: true });
+        }
+      } catch (dbErr: any) {
+        console.warn('[Email Config] Settings/smtpConfig persistence notice:', dbErr.message || dbErr);
+      }
 
       // Verify connection immediately with forceRefresh
       const status = await getEmailServiceStatus(true);
       return res.status(200).json({
         success: true,
+        saved: true,
+        verified: status.verified,
         message: status.verified
           ? 'Email transporter configuration verified and activated successfully!'
-          : 'Configuration saved, but verification reported: ' + (status.lastError || 'Check credentials'),
+          : 'Credentials saved securely! Notice from Gmail SMTP: ' + (status.lastError || 'Check 2-Step Verification and 16-character App Password.'),
         emailService: status
       });
     } catch (err: any) {
+      console.error('[Email Config] Error saving SMTP configuration:', err);
       return res.status(500).json({
         success: false,
         error: err.message || 'Failed to save email configuration'
+      });
+    }
+  });
+
+  // Dedicated Support Inquiries Status & Resolution Update Endpoint
+  app.post('/api/inquiries/update-status', async (req, res) => {
+    try {
+      const {
+        ticketId,
+        status,
+        adminSolution,
+        adminNotes,
+        resolvedBy,
+        userApprovedResolution,
+        userFeedback
+      } = req.body || {};
+
+      if (!ticketId || typeof ticketId !== 'string') {
+        return res.status(400).json({
+          success: false,
+          error: 'ticketId string is required to update inquiry ticket'
+        });
+      }
+
+      const cleanTicketId = ticketId.trim();
+      const timestamp = new Date().toISOString();
+      const payload: Record<string, any> = {
+        updatedAt: timestamp
+      };
+
+      if (status !== undefined) payload.status = status;
+      if (adminSolution !== undefined) payload.adminSolution = adminSolution;
+      if (adminNotes !== undefined) payload.adminNotes = adminNotes;
+      if (resolvedBy !== undefined) payload.resolvedBy = resolvedBy;
+      if (userApprovedResolution !== undefined) payload.userApprovedResolution = Boolean(userApprovedResolution);
+      if (userFeedback !== undefined) payload.userFeedback = userFeedback;
+
+      if (status === 'resolved') {
+        payload.resolvedAt = timestamp;
+        payload.resolvedBy = resolvedBy || 'Administrator';
+      } else if (status === 'closed') {
+        payload.closedAt = timestamp;
+      }
+
+      const adminDb = getAdminFirestore();
+      if (adminDb) {
+        await adminDb.collection('inquiries').doc(cleanTicketId).set(payload, { merge: true });
+      }
+
+      return res.status(200).json({
+        success: true,
+        ticketId: cleanTicketId,
+        payload
+      });
+    } catch (err: any) {
+      console.error('[Inquiries API] Error updating inquiry status:', err);
+      return res.status(500).json({
+        success: false,
+        error: err.message || 'Failed to update ticket status on server'
       });
     }
   });

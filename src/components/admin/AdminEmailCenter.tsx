@@ -47,7 +47,7 @@ export const AdminEmailCenter: React.FC = () => {
   const [configAppPassword, setConfigAppPassword] = useState<string>('');
   const [recipientEmail, setRecipientEmail] = useState<string>('secretariat@nmogujarat.org');
   const [isSavingConfig, setIsSavingConfig] = useState<boolean>(false);
-  const [configFeedback, setConfigFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [configFeedback, setConfigFeedback] = useState<{ type: 'success' | 'warning' | 'error'; message: string } | null>(null);
 
   // Test Email State
   const [testRecipient, setTestRecipient] = useState<string>(currentUser?.email || 'secretariat@nmogujarat.org');
@@ -122,18 +122,19 @@ export const AdminEmailCenter: React.FC = () => {
 
       const data = await res.json();
       if (res.ok && data.success) {
+        const isVerified = Boolean(data.emailService?.verified);
         setConfigFeedback({
-          type: data.emailService?.verified ? 'success' : 'error',
-          message: data.message || 'Configuration saved successfully!'
+          type: isVerified ? 'success' : 'warning',
+          message: data.message || (isVerified ? 'Configuration verified and saved!' : 'Configuration saved securely to server!')
         });
         setEmailStatus(data.emailService);
-        if (data.emailService?.verified) {
+        if (isVerified) {
           setTimeout(() => setShowSetupModal(false), 2000);
         }
       } else {
         setConfigFeedback({
           type: 'error',
-          message: data.error || 'Failed to verify Nodemailer credentials with Gmail SMTP.'
+          message: data.error || 'Failed to save Nodemailer credentials.'
         });
       }
     } catch (err: any) {
@@ -514,11 +515,11 @@ export const AdminEmailCenter: React.FC = () => {
                   required
                   value={configAppPassword}
                   onChange={(e) => setConfigAppPassword(e.target.value)}
-                  placeholder="wkya dxsf jugs ztee"
+                  placeholder="xxxx xxxx xxxx xxxx"
                   className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs font-mono"
                 />
                 <span className="text-[10px] text-slate-400 mt-1 block">
-                  16-character password generated from Google Account App Passwords.
+                  16-character Google App Password (grouped spaces are automatically removed).
                 </span>
               </div>
             </div>
@@ -540,17 +541,21 @@ export const AdminEmailCenter: React.FC = () => {
             </div>
 
             {configFeedback && (
-              <div className={`p-3 rounded-xl border text-xs flex items-center gap-2 ${
+              <div className={`p-3 rounded-xl border text-xs flex items-start gap-2.5 ${
                 configFeedback.type === 'success'
                   ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                  : configFeedback.type === 'warning'
+                  ? 'bg-amber-50 border-amber-200 text-amber-900'
                   : 'bg-red-50 border-red-200 text-red-900'
               }`}>
                 {configFeedback.type === 'success' ? (
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                ) : configFeedback.type === 'warning' ? (
+                  <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
                 ) : (
-                  <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+                  <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
                 )}
-                <span>{configFeedback.message}</span>
+                <span className="leading-relaxed">{configFeedback.message}</span>
               </div>
             )}
 

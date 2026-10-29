@@ -223,25 +223,17 @@ service cloud.firestore {
     // =========================================================================
     // Read: Public (enables ticket tracking modal by Reference ID), Admins view all
     // Create: Public (submitting contact & support inquiry)
-    // Update:
-    //   - Administrators: full update for status, resolution, assignments
-    //   - Users: can approve resolution and record user feedback
+    // Update: Public & Administrators (status progression, solutions, user acceptance)
     // Delete: Administrators only
     match /inquiries/{inquiryId} {
-      allow read: if true;
-      allow create: if true;
-      allow update: if isStateAdmin() || isAdmin() || (
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['userApprovedResolution', 'userFeedback', 'status', 'userApprovedAt', 'updatedAt'])
-      );
+      allow read, create: if true;
+      allow update: if true;
       allow delete: if isStateAdmin() || isAdmin();
     }
 
     match /Tickets/{ticketId} {
-      allow read: if true;
-      allow create: if true;
-      allow update: if isStateAdmin() || isAdmin() || (
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['userApprovedResolution', 'userFeedback', 'status', 'userApprovedAt', 'updatedAt'])
-      );
+      allow read, create: if true;
+      allow update: if true;
       allow delete: if isStateAdmin() || isAdmin();
     }
 

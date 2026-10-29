@@ -69,11 +69,75 @@ export function saveStoredSmtpConfig(config: StoredSmtpConfig): void {
     if (!fs.existsSync(SECURE_CREDENTIALS_DIR)) {
       fs.mkdirSync(SECURE_CREDENTIALS_DIR, { recursive: true, mode: 0o700 });
     }
-    const payload = {
+
+    // Strip whitespaces from Google App Password and SMTP password
+    const cleanGmailPass = config.gmailAppPassword ? config.gmailAppPassword.replace(/\s+/g, '') : undefined;
+    const cleanSmtpPass = config.smtpPass ? config.smtpPass.replace(/\s+/g, '') : undefined;
+    const cleanGmailUser = config.gmailUser ? config.gmailUser.trim().toLowerCase() : undefined;
+    const cleanRecipient = config.recipientEmail ? config.recipientEmail.trim().toLowerCase() : undefined;
+
+    const payload: StoredSmtpConfig = {
       ...config,
+      gmailUser: cleanGmailUser,
+      gmailAppPassword: cleanGmailPass,
+      smtpPass: cleanSmtpPass,
+      recipientEmail: cleanRecipient,
       updatedAt: new Date().toISOString()
     };
     fs.writeFileSync(SECURE_SMTP_FILE, JSON.stringify(payload, null, 2), { mode: 0o600 });
+
+    // CRITICAL: Synchronize in-memory process.env so runtime immediately uses new credentials
+    if (cleanGmailUser) {
+      process.env.GMAIL_USER = cleanGmailUser;
+    }
+    if (cleanGmailPass) {
+      process.env.GMAIL_APP_PASSWORD = cleanGmailPass;
+    }
+    if (cleanRecipient) {
+      process.env.VITE_SUPER_ADMIN_EMAIL = cleanRecipient;
+    }
+    if (config.smtpHost) {
+      process.env.SMTP_HOST = config.smtpHost;
+    }
+    if (config.smtpUser) {
+      process.env.SMTP_USER = config.smtpUser;
+    }
+    if (cleanSmtpPass) {
+      process.env.SMTP_PASS = cleanSmtpPass;
+    }
+    if (config.smtpPort) {
+      process.env.SMTP_PORT = String(config.smtpPort);
+    }
+
+    // Update .env file if present for durable persistence across restarts
+    try {
+      const envPath = path.resolve(process.cwd(), '.env');
+      if (fs.existsSync(envPath)) {
+        let envContent = fs.readFileSync(envPath, 'utf8');
+        if (cleanGmailUser) {
+          if (envContent.includes('GMAIL_USER=')) {
+            envContent = envContent.replace(/GMAIL_USER=.*/g, `GMAIL_USER="${cleanGmailUser}"`);
+          } else {
+            envContent += `\nGMAIL_USER="${cleanGmailUser}"`;
+          }
+        }
+        if (cleanGmailPass) {
+          if (envContent.includes('GMAIL_APP_PASSWORD=')) {
+            envContent = envContent.replace(/GMAIL_APP_PASSWORD=.*/g, `GMAIL_APP_PASSWORD="${cleanGmailPass}"`);
+          } else {
+            envContent += `\nGMAIL_APP_PASSWORD="${cleanGmailPass}"`;
+          }
+        }
+        fs.writeFileSync(envPath, envContent, 'utf8');
+      }
+    } catch (envErr) {
+      console.warn('[Email Service] Notice updating .env file:', envErr);
+    }
+
+    // Invalidate cached transporter to force re-instantiation
+    cachedTransporter = null;
+    lastVerifyStatus = false;
+    lastVerifyError = null;
   } catch (err: any) {
     console.error('[Email Service] Failed to save stored SMTP config:', err?.message || err);
     throw err;
@@ -105,14 +169,14 @@ export async function getTransporter(forceRefresh: boolean = false): Promise<Tra
 
   const stored = loadStoredSmtpConfig();
 
-  // Resolve Gmail configuration from process.env or securely stored config
-  const gmailUser = (process.env.GMAIL_USER || stored?.gmailUser || process.env.SMTP_USER || stored?.smtpUser)?.trim();
-  const rawGmailPass = (process.env.GMAIL_APP_PASSWORD || stored?.gmailAppPassword || process.env.SMTP_PASS || stored?.smtpPass)?.trim();
+  // Resolve Gmail configuration: PREFER stored user-configured settings over default process.env
+  const gmailUser = (stored?.gmailUser || process.env.GMAIL_USER || stored?.smtpUser || process.env.SMTP_USER)?.trim();
+  const rawGmailPass = (stored?.gmailAppPassword || process.env.GMAIL_APP_PASSWORD || stored?.smtpPass || process.env.SMTP_PASS)?.trim();
   // Strip all whitespaces (Google displays 16-character App Passwords grouped in 4-letter chunks like 'xxxx xxxx xxxx xxxx')
   const gmailPass = rawGmailPass ? rawGmailPass.replace(/\s+/g, '') : '';
 
   // Option 1: Gmail Service with App Password
-  if (gmailUser && gmailPass && (process.env.GMAIL_USER || stored?.gmailUser || !process.env.SMTP_HOST || process.env.SMTP_HOST?.includes('gmail'))) {
+  if (gmailUser && gmailPass && (stored?.gmailUser || process.env.GMAIL_USER || !process.env.SMTP_HOST || process.env.SMTP_HOST?.includes('gmail'))) {
     try {
       const transporter = nodemailer.createTransport({
         service: 'gmail',
@@ -243,9 +307,9 @@ export async function getEmailServiceStatus(forceRefresh: boolean = false): Prom
   }
 
   const stored = loadStoredSmtpConfig();
-  const gmailUser = (process.env.GMAIL_USER || stored?.gmailUser)?.trim();
-  const gmailPass = (process.env.GMAIL_APP_PASSWORD || stored?.gmailAppPassword)?.trim();
-  const smtpHost = (process.env.SMTP_HOST || stored?.smtpHost)?.trim();
+  const gmailUser = (stored?.gmailUser || process.env.GMAIL_USER)?.trim();
+  const gmailPass = (stored?.gmailAppPassword || process.env.GMAIL_APP_PASSWORD)?.trim();
+  const smtpHost = (stored?.smtpHost || process.env.SMTP_HOST)?.trim();
 
   let provider: EmailServiceStatus['provider'] = 'unconfigured';
   if (gmailUser && gmailPass) {
