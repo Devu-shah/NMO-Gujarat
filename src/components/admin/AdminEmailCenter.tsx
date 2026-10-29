@@ -187,22 +187,37 @@ export const AdminEmailCenter: React.FC = () => {
     }
   };
 
-  // Compute recipient count
-  const recipientCount = React.useMemo(() => {
+  const [broadcastError, setBroadcastError] = useState<string | null>(null);
+
+  // Compute resolved recipient email list supporting single or multiple recipients
+  const resolvedRecipientEmails = React.useMemo(() => {
     if (targetType === 'all') {
-      return isPrantAdmin ? members.filter((m) => m.prant === assignedPrant).length : members.length;
+      const targetMembers = isPrantAdmin
+        ? members.filter((m) => m.prant === assignedPrant)
+        : members;
+      return Array.from(new Set(targetMembers.map((m) => m.email?.trim()).filter(Boolean) as string[]));
     }
     if (targetType === 'prant') {
-      return members.filter((m) => m.prant === selectedPrant).length;
+      return Array.from(new Set(members.filter((m) => m.prant === selectedPrant).map((m) => m.email?.trim()).filter(Boolean) as string[]));
     }
     if (targetType === 'event') {
-      return eventRegistrations.filter((r) => r.eventId === selectedEventId).length;
+      return Array.from(new Set(eventRegistrations.filter((r) => r.eventId === selectedEventId).map((r) => r.email?.trim()).filter(Boolean) as string[]));
     }
     if (targetType === 'individual') {
-      return individualEmail.trim() ? 1 : 0;
+      // Split by comma, semicolon, space, or newline to support multiple custom recipients
+      return Array.from(
+        new Set(
+          individualEmail
+            .split(/[,;\n\s]+/)
+            .map((e) => e.trim())
+            .filter((e) => e.length > 0 && e.includes('@'))
+        )
+      );
     }
-    return 0;
+    return [];
   }, [targetType, selectedPrant, selectedEventId, individualEmail, members, eventRegistrations, isPrantAdmin, assignedPrant]);
+
+  const recipientCount = resolvedRecipientEmails.length;
 
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -211,28 +226,56 @@ export const AdminEmailCenter: React.FC = () => {
       return;
     }
 
-    setIsSending(true);
+    if (resolvedRecipientEmails.length === 0) {
+      setBroadcastError('No valid recipient email addresses found for the selected audience.');
+      return;
+    }
 
-    // Simulate secure dispatch through server-side proxy
-    setTimeout(async () => {
+    setIsSending(true);
+    setBroadcastError(null);
+    setSentReport(null);
+
+    try {
       let targetDesc = '';
       if (targetType === 'all') targetDesc = 'All Verified Members';
       else if (targetType === 'prant') targetDesc = `${selectedPrant} Prant Members`;
       else if (targetType === 'event') targetDesc = `Participants of ${events.find((e) => e.eventId === selectedEventId)?.title || selectedEventId}`;
-      else targetDesc = `Individual: ${individualEmail}`;
+      else targetDesc = `${resolvedRecipientEmails.length} Custom Recipient(s)`;
 
-      await logAudit(
-        'EMAIL_DISPATCH',
-        'COMMUNICATION',
-        `EMAIL-${Date.now()}`,
-        `Dispatched broadcast email "${subject}" to ${recipientCount} recipients (${targetDesc})`
-      );
+      const res = await fetch(apiUrl('/api/email/broadcast'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          recipients: resolvedRecipientEmails,
+          subject: subject.trim(),
+          message: message.trim(),
+          targetDescription: targetDesc
+        })
+      });
 
-      setSentReport({ count: recipientCount, target: targetDesc });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        await logAudit(
+          'EMAIL_DISPATCH',
+          'COMMUNICATION',
+          `EMAIL-${Date.now()}`,
+          `Dispatched broadcast email "${subject}" to ${data.count || resolvedRecipientEmails.length} recipients (${targetDesc})`
+        );
+
+        setSentReport({ count: data.count || resolvedRecipientEmails.length, target: targetDesc });
+        setSubject('');
+        setMessage('');
+        if (targetType === 'individual') {
+          setIndividualEmail('');
+        }
+      } else {
+        setBroadcastError(data.error || 'Failed to dispatch email broadcast. Please verify Nodemailer configuration.');
+      }
+    } catch (err: any) {
+      setBroadcastError(err.message || 'Error occurred while contacting email broadcast service.');
+    } finally {
       setIsSending(false);
-      setSubject('');
-      setMessage('');
-    }, 1200);
+    }
   };
 
   return (
@@ -594,7 +637,7 @@ export const AdminEmailCenter: React.FC = () => {
                   : 'border-slate-200 text-slate-600 hover:border-slate-300'
               }`}
             >
-              Individual Member
+              Custom Emails
             </button>
           </div>
         </div>
@@ -637,18 +680,28 @@ export const AdminEmailCenter: React.FC = () => {
         )}
 
         {targetType === 'individual' && (
-          <div className="text-xs">
-            <label className="block text-slate-700 font-semibold mb-1">
-              Recipient Email Address
-            </label>
-            <input
-              type="email"
+          <div className="text-xs space-y-1.5">
+            <div className="flex items-center justify-between">
+              <label className="block text-slate-700 font-semibold">
+                Recipient Email Address(es) *
+              </label>
+              {recipientCount > 0 && (
+                <span className="text-[11px] font-bold text-red-700 bg-red-50 border border-red-200 px-2 py-0.5 rounded-full">
+                  {recipientCount} recipient{recipientCount !== 1 ? 's' : ''} detected
+                </span>
+              )}
+            </div>
+            <textarea
+              rows={3}
               required
               value={individualEmail}
               onChange={(e) => setIndividualEmail(e.target.value)}
-              placeholder="doctor@nmogujarat.org"
-              className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm"
+              placeholder="doctor1@example.com, doctor2@example.com, doctor3@example.com"
+              className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs font-mono"
             />
+            <p className="text-[11px] text-slate-500">
+              Enter one or multiple email addresses separated by commas, semicolons, spaces, or lines. Nodemailer will dispatch to all recipients using BCC to maintain complete privacy.
+            </p>
           </div>
         )}
 
@@ -683,10 +736,17 @@ export const AdminEmailCenter: React.FC = () => {
           </div>
         </div>
 
+        {broadcastError && (
+          <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-800 flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+            <span>{broadcastError}</span>
+          </div>
+        )}
+
         {/* Dispatch Bar */}
         <div className="pt-4 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
           <div className="text-slate-500">
-            Estimated Recipients: <strong className="text-slate-900">{recipientCount} verified addresses</strong>
+            Target Recipients: <strong className="text-slate-900">{recipientCount} verified address{recipientCount !== 1 ? 'es' : ''}</strong>
           </div>
 
           <button
@@ -695,7 +755,7 @@ export const AdminEmailCenter: React.FC = () => {
             className="px-6 py-2.5 bg-red-700 hover:bg-red-800 disabled:opacity-50 text-white font-bold rounded-lg shadow-xs flex items-center justify-center gap-2 transition-colors cursor-pointer"
           >
             <Send className="w-4 h-4" />
-            <span>{isSending ? 'Sending Broadcast...' : 'Dispatch Broadcast Email'}</span>
+            <span>{isSending ? 'Sending to All Recipients...' : `Dispatch to ${recipientCount || 0} Recipient${recipientCount !== 1 ? 's' : ''}`}</span>
           </button>
         </div>
       </form>

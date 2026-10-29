@@ -18,6 +18,7 @@ import {
   sendContactInquiryEmail,
   getEmailServiceStatus,
   sendTestEmail,
+  sendBroadcastEmail,
   saveStoredSmtpConfig,
   loadStoredSmtpConfig
 } from './src/server/emailService';
@@ -273,6 +274,13 @@ const ALLOWED_CATEGORIES = [
   'Profile & Membership Correction',
   'Feedback & Suggestions',
   'Report an Issue',
+  'Membership & ID Card',
+  'Certificate Verification',
+  'CME & Academic Conferences',
+  'Health Camps & Seva',
+  'Financial & Donations',
+  'Technical & Portal Support',
+  'General Inquiry',
   'Other'
 ];
 
@@ -457,8 +465,8 @@ async function startServer() {
     });
   });
 
-  // Contact Us API Endpoint
-  app.post('/api/contact', async (req, res) => {
+  // Contact Us & Public Support Inquiry API Endpoints
+  app.post(['/api/contact', '/api/contact/send', '/api/contact/submit'], async (req, res) => {
     try {
       const clientIp =
         (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ||
@@ -474,12 +482,12 @@ async function startServer() {
         });
       }
 
-      // 2. IP Rate Limiting (max 5 submissions per 10 minutes)
+      // 2. IP Rate Limiting (max 10 submissions per 10 minutes)
       const now = Date.now();
       const ipRecord = ipRateLimits.get(clientIp);
       if (ipRecord) {
         if (now - ipRecord.firstTimestamp < 10 * 60 * 1000) {
-          if (ipRecord.count >= 5) {
+          if (ipRecord.count >= 10) {
             return res.status(429).json({
               success: false,
               error: 'Rate limit exceeded: Too many inquiries from this connection. Please try again after 10 minutes.'
@@ -493,56 +501,61 @@ async function startServer() {
         ipRateLimits.set(clientIp, { count: 1, firstTimestamp: now });
       }
 
-      // 3. Extract and sanitize input fields
-      const {
-        fullName,
-        mobile,
-        membershipId,
-        email,
-        city,
-        category,
-        subject,
-        message
-      } = req.body;
+      // 3. Extract and sanitize input fields (supporting both web contact form & support ticket modal)
+      const rawFullName = req.body.fullName || req.body.name || '';
+      const fullName = typeof rawFullName === 'string' ? rawFullName.trim() : '';
+
+      const rawMobile = req.body.mobile || req.body.phone || '9999999999';
+      const cleanMobile = typeof rawMobile === 'string' ? rawMobile.trim().replace(/[\s\-]/g, '') : '9999999999';
+
+      const membershipId = req.body.membershipId;
+      const rawEmail = req.body.email;
+      const cleanEmail = typeof rawEmail === 'string' ? rawEmail.trim().toLowerCase() : '';
+
+      const rawCity = req.body.city || 'Gujarat';
+      const city = typeof rawCity === 'string' ? rawCity.trim() : 'Gujarat';
+
+      const rawCategory = req.body.category || 'General Inquiry';
+      const category = typeof rawCategory === 'string' && rawCategory.trim() ? rawCategory.trim() : 'General Inquiry';
+
+      const rawSubject = req.body.subject || 'Support Inquiry';
+      const subject = typeof rawSubject === 'string' ? rawSubject.trim() : 'Support Inquiry';
+
+      const rawMessage = req.body.message || '';
+      const message = typeof rawMessage === 'string' ? rawMessage.trim() : '';
 
       // 4. Server-Side Validation
       const errors: string[] = [];
 
-      if (!fullName || typeof fullName !== 'string' || fullName.trim().length < 2) {
+      if (!fullName || fullName.length < 2) {
         errors.push('Full Name is required and must be at least 2 characters.');
-      } else if (fullName.trim().length > 100) {
+      } else if (fullName.length > 100) {
         errors.push('Full Name cannot exceed 100 characters.');
       }
 
-      const cleanMobile = typeof mobile === 'string' ? mobile.trim().replace(/[\s\-]/g, '') : '';
       const mobileRegex = /^[+]?[0-9]{10,15}$/;
       if (!cleanMobile || !mobileRegex.test(cleanMobile)) {
         errors.push('A valid 10-15 digit mobile number is required.');
       }
 
-      const cleanEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
       const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
       if (!cleanEmail || !emailRegex.test(cleanEmail)) {
         errors.push('A valid email address is required.');
       }
 
-      if (!city || typeof city !== 'string' || city.trim().length < 2) {
+      if (!city || city.length < 2) {
         errors.push('City is required.');
       }
 
-      if (!category || !ALLOWED_CATEGORIES.includes(category)) {
-        errors.push(`Category must be one of: ${ALLOWED_CATEGORIES.join(', ')}.`);
-      }
-
-      if (!subject || typeof subject !== 'string' || subject.trim().length < 3) {
-        errors.push('Subject is required and must be at least 3 characters.');
-      } else if (subject.trim().length > 200) {
+      if (!subject || subject.length < 2) {
+        errors.push('Subject is required and must be at least 2 characters.');
+      } else if (subject.length > 200) {
         errors.push('Subject cannot exceed 200 characters.');
       }
 
-      if (!message || typeof message !== 'string' || message.trim().length < 10) {
-        errors.push('Message is required and must be at least 10 characters.');
-      } else if (message.trim().length > 5000) {
+      if (!message || message.length < 5) {
+        errors.push('Message is required and must be at least 5 characters.');
+      } else if (message.length > 5000) {
         errors.push('Message cannot exceed 5000 characters.');
       }
 
@@ -554,7 +567,7 @@ async function startServer() {
       }
 
       // 5. Duplicate Submission Prevention
-      const dedupeKey = `${cleanEmail}_${cleanMobile}_${subject.trim().toLowerCase()}_${message.trim().slice(0, 40).toLowerCase()}`;
+      const dedupeKey = `${cleanEmail}_${cleanMobile}_${subject.toLowerCase()}_${message.slice(0, 40).toLowerCase()}`;
       const lastSent = recentSubmissions.get(dedupeKey);
       if (lastSent && now - lastSent < 3 * 60 * 1000) {
         return res.status(429).json({
@@ -571,7 +584,11 @@ async function startServer() {
         dateStyle: 'full',
         timeStyle: 'medium'
       });
-      const inquiryId = `INQ-${Date.now().toString(36).toUpperCase()}-${Math.floor(1000 + Math.random() * 9000)}`;
+      const inquiryId = (typeof req.body.ticketId === 'string' && req.body.ticketId.trim())
+        ? req.body.ticketId.trim()
+        : (typeof req.body.inquiryId === 'string' && req.body.inquiryId.trim())
+        ? req.body.inquiryId.trim()
+        : `INQ-${Date.now().toString(36).toUpperCase()}-${Math.floor(1000 + Math.random() * 9000)}`;
 
       // Strict email format: "<Category> : <Subject>"
       const emailSubject = `${category} : ${subject.trim()}`;
@@ -705,9 +722,13 @@ Recipient:        ${RECIPIENT_EMAIL}
         try {
           // A. Save to inquiries collection for secretariat recordkeeping
           await adminDb.collection('inquiries').doc(inquiryId).set({
+            id: inquiryId,
             inquiryId,
+            ticketId: inquiryId,
             fullName: fullName.trim(),
+            name: fullName.trim(),
             mobile: cleanMobile,
+            phone: cleanMobile,
             email: cleanEmail,
             city: city.trim(),
             membershipId: membershipId ? membershipId.trim() : null,
@@ -719,8 +740,11 @@ Recipient:        ${RECIPIENT_EMAIL}
             emailDelivered: emailResult.delivered,
             emailMessageId: emailResult.messageId || null,
             emailError: emailResult.error || null,
-            status: 'Pending',
-            createdAt: serverTimestamp
+            status: 'open',
+            userApprovedResolution: false,
+            createdAt: serverTimestamp,
+            updatedAt: serverTimestamp,
+            source: 'web_portal'
           });
 
           // B. Add to mail collection for Firebase Trigger Email Extension (if installed)
@@ -844,6 +868,54 @@ Recipient:        ${RECIPIENT_EMAIL}
       return res.status(500).json({
         success: false,
         error: err.message || 'Error occurred while dispatching test email'
+      });
+    }
+  });
+
+  // Send Bulk Broadcast Email to Multiple Recipients (Super Admin & Authorized Admins)
+  app.post('/api/email/broadcast', async (req, res) => {
+    try {
+      const { recipients, subject, message, targetDescription } = req.body || {};
+
+      if (!subject || !message) {
+        return res.status(400).json({
+          success: false,
+          error: 'Email subject and message body are required.'
+        });
+      }
+
+      if (!Array.isArray(recipients) || recipients.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'Please provide an array of recipient email addresses.'
+        });
+      }
+
+      const broadcastResult = await sendBroadcastEmail({
+        recipients,
+        subject: String(subject).trim(),
+        message: String(message).trim(),
+        targetDescription: targetDescription || 'Broadcast Communication'
+      });
+
+      if (broadcastResult.success) {
+        return res.status(200).json({
+          success: true,
+          count: broadcastResult.count,
+          messageId: broadcastResult.messageId,
+          message: `Successfully dispatched email to ${broadcastResult.count} recipient(s)!`
+        });
+      } else {
+        return res.status(400).json({
+          success: false,
+          error: broadcastResult.error || 'Failed to dispatch broadcast email'
+        });
+      }
+    } catch (err: any) {
+      console.error('[Broadcast API] Unexpected error dispatching broadcast:', err);
+      return res.status(500).json({
+        success: false,
+        error: err.message || 'Internal server error while dispatching broadcast'
       });
     }
   });

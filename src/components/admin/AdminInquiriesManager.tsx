@@ -42,6 +42,25 @@ const CATEGORIES: ('All' | InquiryCategory)[] = [
   'General Inquiry'
 ];
 
+function formatTicketStatus(status?: string): string {
+  if (!status) return 'OPEN';
+  return String(status).replace(/_/g, ' ').toUpperCase();
+}
+
+function getStatusBadgeConfig(status?: string): { bg: string; text: string; dot: string } {
+  const s = String(status || 'open').toLowerCase();
+  if (s === 'in_progress') {
+    return { bg: 'bg-blue-100', text: 'text-blue-800', dot: 'bg-blue-500' };
+  }
+  if (s === 'resolved') {
+    return { bg: 'bg-emerald-100', text: 'text-emerald-800', dot: 'bg-emerald-500' };
+  }
+  if (s === 'closed') {
+    return { bg: 'bg-slate-100', text: 'text-slate-700', dot: 'bg-slate-400' };
+  }
+  return { bg: 'bg-amber-100', text: 'text-amber-800', dot: 'bg-amber-500' };
+}
+
 export const AdminInquiriesManager: React.FC = () => {
   const { currentUser } = useNMO();
   const [inquiries, setInquiries] = useState<SupportInquiry[]>([]);
@@ -120,15 +139,16 @@ export const AdminInquiriesManager: React.FC = () => {
   // Filter inquiries
   const filteredInquiries = inquiries.filter((item) => {
     if (categoryFilter !== 'All' && item.category !== categoryFilter) return false;
-    if (statusFilter !== 'all' && item.status !== statusFilter) return false;
+    const itemStatus = (item.status || 'open').toLowerCase();
+    if (statusFilter !== 'all' && itemStatus !== statusFilter) return false;
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
       const match =
-        item.ticketId?.toLowerCase().includes(q) ||
-        item.name.toLowerCase().includes(q) ||
-        item.email.toLowerCase().includes(q) ||
-        item.subject.toLowerCase().includes(q) ||
-        item.message.toLowerCase().includes(q);
+        (item.ticketId || '')?.toLowerCase().includes(q) ||
+        (item.name || '')?.toLowerCase().includes(q) ||
+        (item.email || '')?.toLowerCase().includes(q) ||
+        (item.subject || '')?.toLowerCase().includes(q) ||
+        (item.message || '')?.toLowerCase().includes(q);
       if (!match) return false;
     }
     return true;
@@ -136,11 +156,11 @@ export const AdminInquiriesManager: React.FC = () => {
 
   // Aggregate stats
   const totalCount = inquiries.length;
-  const openCount = inquiries.filter((i) => i.status === 'open').length;
+  const openCount = inquiries.filter((i) => (i.status || 'open') === 'open').length;
   const inProgressCount = inquiries.filter((i) => i.status === 'in_progress').length;
   const resolvedCount = inquiries.filter((i) => i.status === 'resolved').length;
   const closedCount = inquiries.filter((i) => i.status === 'closed').length;
-  const userApprovedCount = inquiries.filter((i) => i.userApprovedResolution).length;
+  const userApprovedCount = inquiries.filter((i) => Boolean(i.userApprovedResolution)).length;
 
   return (
     <div className="space-y-6 max-w-7xl">
@@ -357,30 +377,17 @@ export const AdminInquiriesManager: React.FC = () => {
 
                       {/* Status */}
                       <td className="p-3.5 whitespace-nowrap">
-                        <span
-                          className={`px-2.5 py-1 rounded-full text-[10px] font-bold inline-flex items-center gap-1 ${
-                            ticket.status === 'open'
-                              ? 'bg-amber-100 text-amber-800'
-                              : ticket.status === 'in_progress'
-                              ? 'bg-blue-100 text-blue-800'
-                              : ticket.status === 'resolved'
-                              ? 'bg-emerald-100 text-emerald-800'
-                              : 'bg-slate-100 text-slate-700'
-                          }`}
-                        >
-                          <span
-                            className={`w-1.5 h-1.5 rounded-full ${
-                              ticket.status === 'open'
-                                ? 'bg-amber-500'
-                                : ticket.status === 'in_progress'
-                                ? 'bg-blue-500'
-                                : ticket.status === 'resolved'
-                                ? 'bg-emerald-500'
-                                : 'bg-slate-400'
-                            }`}
-                          />
-                          <span>{ticket.status.replace('_', ' ').toUpperCase()}</span>
-                        </span>
+                        {(() => {
+                          const badge = getStatusBadgeConfig(ticket.status);
+                          return (
+                            <span
+                              className={`px-2.5 py-1 rounded-full text-[10px] font-bold inline-flex items-center gap-1 ${badge.bg} ${badge.text}`}
+                            >
+                              <span className={`w-1.5 h-1.5 rounded-full ${badge.dot}`} />
+                              <span>{formatTicketStatus(ticket.status)}</span>
+                            </span>
+                          );
+                        })()}
                       </td>
 
                       {/* User Approved */}

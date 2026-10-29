@@ -362,7 +362,7 @@ function MainLayout() {
 
   // --- ROUTE 9: MAIN PUBLIC WEBSITE (/) ---
   return (
-    <div className="min-h-screen flex flex-col bg-white text-slate-900 selection:bg-red-700 selection:text-white">
+    <div className="min-h-screen flex flex-col bg-white text-slate-900 selection:bg-red-700 selection:text-white overflow-x-hidden w-full max-w-full">
       {/* Route Protection Notice (if redirected) */}
       {unauthorizedMessage && (
         <div className="bg-amber-100 border-b border-amber-300 text-amber-950 px-4 py-2.5 text-xs flex items-center justify-between sticky top-0 z-50">

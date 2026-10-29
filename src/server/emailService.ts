@@ -80,7 +80,7 @@ export function saveStoredSmtpConfig(config: StoredSmtpConfig): void {
   }
 }
 
-export const PRIMARY_RECIPIENT_EMAIL = process.env.VITE_SUPER_ADMIN_EMAIL || process.env.SMTP_USER || 'secretariat@nmogujarat.org';
+export const PRIMARY_RECIPIENT_EMAIL = process.env.VITE_SUPER_ADMIN_EMAIL || process.env.GMAIL_USER || process.env.SMTP_USER || 'devanshshah768@gmail.com';
 
 let cachedTransporter: Transporter | null = null;
 let lastVerifyStatus = false;
@@ -154,7 +154,12 @@ export async function getTransporter(forceRefresh: boolean = false): Promise<Tra
       } catch (fallbackErr: any) {
         console.error('[Email Service] Gmail fallback verification failed:', fallbackErr.message || fallbackErr);
         lastVerifyStatus = false;
-        lastVerifyError = fallbackErr.message || err.message || 'Gmail authentication failed. Please verify email and Google App Password.';
+        const rawErr = fallbackErr?.message || err?.message || 'Authentication failed';
+        if (rawErr.includes('535') || rawErr.includes('BadCredentials')) {
+          lastVerifyError = `Gmail authentication rejected (535 Bad Credentials). Please ensure 2-Step Verification is active on ${gmailUser} and generate a fresh 16-character App Password at https://myaccount.google.com/apppasswords`;
+        } else {
+          lastVerifyError = rawErr;
+        }
       }
     }
   }
@@ -199,8 +204,9 @@ export async function getTransporter(forceRefresh: boolean = false): Promise<Tra
     }
   }
 
-  // Option 3: Fallback in non-production environments to Ethereal Email for instant debugging & previews
-  if (process.env.NODE_ENV !== 'production' && !cachedTransporter) {
+  // Option 3: Fallback in non-production environments to Ethereal Email ONLY if NO credentials provided
+  const hasUserConfig = Boolean((gmailUser && gmailPass) || (smtpHost && smtpUser && smtpPass));
+  if (!hasUserConfig && process.env.NODE_ENV !== 'production' && !cachedTransporter) {
     try {
       if (!etherealAccount) {
         etherealAccount = await nodemailer.createTestAccount();
@@ -358,12 +364,16 @@ export async function sendContactInquiryEmail(
     };
   }
 
+  const stored = loadStoredSmtpConfig();
   const emailSubject = `${data.category} : ${data.subject.trim()}`;
   const fromAddress =
+    activeSenderAddress ||
     process.env.GMAIL_USER ||
+    stored?.gmailUser ||
     process.env.SMTP_FROM ||
     process.env.SMTP_USER ||
-    (etherealAccount ? etherealAccount.user : 'no-reply@nmogujarat.org');
+    stored?.smtpUser ||
+    (etherealAccount ? etherealAccount.user : 'secretariat@nmogujarat.org');
 
   const textBody = `
 ==================================================
@@ -472,9 +482,17 @@ Recipient:        ${PRIMARY_RECIPIENT_EMAIL}
 </html>
 `.trim();
 
+  const rawRecipient = stored?.recipientEmail || PRIMARY_RECIPIENT_EMAIL;
+  // Support multiple comma- or semicolon-separated recipient emails (e.g. secretariat@nmogujarat.org, devanshshah768@gmail.com)
+  const recipientsList = rawRecipient
+    .split(/[,;]/)
+    .map((e: string) => e.trim())
+    .filter((e: string) => e.length > 0 && e.includes('@'));
+  const finalTo = recipientsList.length > 0 ? recipientsList : [PRIMARY_RECIPIENT_EMAIL];
+
   const mailOptions: SendMailOptions = {
     from: `"NMO Gujarat Portal" <${fromAddress}>`,
-    to: PRIMARY_RECIPIENT_EMAIL,
+    to: finalTo,
     replyTo: data.email.trim(),
     subject: emailSubject,
     text: textBody,
@@ -490,7 +508,7 @@ Recipient:        ${PRIMARY_RECIPIENT_EMAIL}
     const isTest = Boolean(etherealAccount && transporter === cachedTransporter);
     const previewUrl = isTest ? nodemailer.getTestMessageUrl(info) : false;
 
-    console.log(`[Email Service] Email sent successfully. Message ID: ${info.messageId}`);
+    console.log(`[Email Service] Email sent successfully to [${finalTo.join(', ')}]. Message ID: ${info.messageId}`);
     if (previewUrl) {
       console.log(`[Email Service] Ethereal preview URL: ${previewUrl}`);
     }
@@ -501,7 +519,7 @@ Recipient:        ${PRIMARY_RECIPIENT_EMAIL}
       messageId: info.messageId,
       isTestAccount: isTest,
       previewUrl,
-      recipient: PRIMARY_RECIPIENT_EMAIL,
+      recipient: finalTo.join(', '),
       timestamp
     };
   } catch (sendErr: any) {
@@ -509,9 +527,146 @@ Recipient:        ${PRIMARY_RECIPIENT_EMAIL}
     return {
       success: false,
       delivered: false,
-      recipient: PRIMARY_RECIPIENT_EMAIL,
+      recipient: finalTo.join(', '),
       timestamp,
       error: sendErr.message || 'SMTP delivery failed'
     };
   }
+}
+
+export interface BroadcastEmailPayload {
+  recipients: string[];
+  subject: string;
+  message: string;
+  targetDescription?: string;
+  senderName?: string;
+}
+
+/**
+ * Dispatches circulars or announcements to multiple recipients simultaneously.
+ * Adheres strictly to Nodemailer standards:
+ * - Employs BCC (Blind Carbon Copy) to preserve recipient privacy
+ * - Chunks into batches of 50 to avoid SMTP connection timeouts or provider rate limits
+ */
+export async function sendBroadcastEmail(
+  payload: BroadcastEmailPayload
+): Promise<{ success: boolean; count: number; messageId?: string; error?: string }> {
+  const transporter = await getTransporter();
+  if (!transporter) {
+    return {
+      success: false,
+      count: 0,
+      error: 'Email transporter is not configured or unverified. Please configure SMTP/Gmail settings.'
+    };
+  }
+
+  // Deduplicate and filter valid emails
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const validRecipients = Array.from(
+    new Set(
+      (payload.recipients || [])
+        .map((e) => (typeof e === 'string' ? e.trim().toLowerCase() : ''))
+        .filter((e) => emailRegex.test(e))
+    )
+  );
+
+  if (validRecipients.length === 0) {
+    return {
+      success: false,
+      count: 0,
+      error: 'No valid recipient email addresses were provided.'
+    };
+  }
+
+  const stored = loadStoredSmtpConfig();
+  const fromAddress =
+    activeSenderAddress ||
+    process.env.GMAIL_USER ||
+    stored?.gmailUser ||
+    process.env.SMTP_FROM ||
+    process.env.SMTP_USER ||
+    stored?.smtpUser ||
+    'secretariat@nmogujarat.org';
+
+  const localTimeString = new Date().toLocaleString('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    dateStyle: 'full',
+    timeStyle: 'medium'
+  });
+
+  const htmlBody = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1e293b; line-height: 1.6; margin: 0; padding: 0; background-color: #f8fafc; }
+    .container { max-width: 620px; margin: 20px auto; background: #ffffff; border-radius: 16px; overflow: hidden; border: 1px solid #e2e8f0; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05); }
+    .header { background: linear-gradient(135deg, #b91c1c 0%, #991b1b 50%, #1e3a8a 100%); color: #ffffff; padding: 24px 28px; text-align: left; }
+    .header h1 { margin: 0; font-size: 20px; font-weight: 800; letter-spacing: -0.5px; }
+    .header p { margin: 4px 0 0 0; font-size: 12px; color: #fde047; font-style: italic; }
+    .badge { display: inline-block; background-color: rgba(255, 255, 255, 0.2); padding: 4px 10px; border-radius: 9999px; font-size: 11px; font-weight: bold; margin-top: 10px; }
+    .content { padding: 28px; }
+    .subject-title { font-size: 18px; font-weight: 800; color: #0f172a; margin-bottom: 16px; line-height: 1.4; border-bottom: 2px solid #fee2e2; padding-bottom: 12px; }
+    .message-box { background-color: #ffffff; border-radius: 8px; padding: 12px 0; font-size: 14px; color: #334155; white-space: pre-wrap; line-height: 1.8; }
+    .footer { background-color: #f8fafc; padding: 18px 28px; font-size: 11px; color: #94a3b8; text-align: center; border-top: 1px solid #f1f5f9; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>National Medicos Organisation Gujarat</h1>
+      <p>॥ प्राणिनाम् आर्तिनाशनम् ॥ • Official State Circular</p>
+      <div class="badge">${payload.targetDescription || 'Official Communication'}</div>
+    </div>
+    <div class="content">
+      <div class="subject-title">${payload.subject.trim()}</div>
+      <div class="message-box">${payload.message.trim().replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
+    </div>
+    <div class="footer">
+      Sent by <strong>NMO Gujarat State Secretariat</strong> on ${localTimeString} IST.<br/>
+      Official Website: <a href="https://nmogujarat.org" style="color: #b91c1c; text-decoration: none;">nmogujarat.org</a>
+    </div>
+  </div>
+</body>
+</html>
+  `.trim();
+
+  // For privacy and deliverability, send to groups using BCC in chunks of 50
+  const CHUNK_SIZE = 50;
+  let sentCount = 0;
+  let lastMessageId = '';
+
+  for (let i = 0; i < validRecipients.length; i += CHUNK_SIZE) {
+    const chunk = validRecipients.slice(i, i + CHUNK_SIZE);
+    try {
+      const info = await transporter.sendMail({
+        from: `"NMO Gujarat Secretariat" <${fromAddress}>`,
+        to: fromAddress, // Main recipient is Secretariat so member emails are never exposed
+        bcc: chunk,      // BCC guarantees zero recipient visibility to others
+        subject: payload.subject.trim(),
+        text: `${payload.subject}\n\n${payload.message}\n\n---\nNational Medicos Organisation Gujarat\nhttps://nmogujarat.org`,
+        html: htmlBody,
+        replyTo: fromAddress
+      });
+      sentCount += chunk.length;
+      lastMessageId = info.messageId;
+      console.log(`[Email Service] Broadcast batch ${Math.floor(i / CHUNK_SIZE) + 1} sent to ${chunk.length} recipients. ID: ${info.messageId}`);
+    } catch (chunkErr: any) {
+      console.error(`[Email Service] Broadcast chunk failed:`, chunkErr.message || chunkErr);
+      if (sentCount === 0) {
+        return {
+          success: false,
+          count: 0,
+          error: chunkErr.message || 'SMTP failed to dispatch broadcast.'
+        };
+      }
+    }
+  }
+
+  return {
+    success: true,
+    count: sentCount,
+    messageId: lastMessageId
+  };
 }

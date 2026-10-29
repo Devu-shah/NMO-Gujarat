@@ -118,16 +118,19 @@ export async function submitSupportInquiry(data: {
 
     // 3. Dispatch to backend Nodemailer email service
     try {
-      await fetch(apiUrl('/api/contact/send'), {
+      await fetch(apiUrl('/api/contact'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          name: data.name,
-          email: data.email,
-          phone: data.phone,
+          fullName: data.name.trim(),
+          name: data.name.trim(),
+          email: data.email.trim(),
+          mobile: data.phone?.trim() || '9999999999',
+          phone: data.phone?.trim() || '',
+          city: 'Gujarat',
           category: data.category,
-          subject: `[${ticketId}] ${data.subject}`,
-          message: data.message,
+          subject: data.subject.trim(),
+          message: data.message.trim(),
           ticketId
         })
       });
@@ -146,6 +149,49 @@ export async function submitSupportInquiry(data: {
   }
 }
 
+export function normalizeInquiryDoc(data: any, docId: string): SupportInquiry {
+  const rawStatus = typeof data?.status === 'string' ? data.status.trim().toLowerCase() : '';
+  const status: TicketStatus =
+    rawStatus === 'resolved'
+      ? 'resolved'
+      : rawStatus === 'in_progress'
+      ? 'in_progress'
+      : rawStatus === 'closed'
+      ? 'closed'
+      : 'open';
+
+  const ticketId = data?.ticketId || data?.inquiryId || docId;
+  const name = (data?.name || data?.fullName || 'Anonymous Inquirer').trim();
+  const email = (data?.email || '').trim().toLowerCase();
+  const phone = (data?.phone || data?.mobile || '').trim();
+  const category = (data?.category || 'General Inquiry') as InquiryCategory;
+  const subject = (data?.subject || 'Support Inquiry').trim();
+  const message = (data?.message || '').trim();
+
+  return {
+    id: docId,
+    ticketId,
+    name,
+    email,
+    phone,
+    category,
+    subject,
+    message,
+    status,
+    adminSolution: data?.adminSolution || '',
+    adminNotes: data?.adminNotes || '',
+    userApprovedResolution: Boolean(data?.userApprovedResolution),
+    userFeedback: data?.userFeedback || '',
+    userApprovedAt: data?.userApprovedAt,
+    createdAt: data?.createdAt || new Date().toISOString(),
+    updatedAt: data?.updatedAt || data?.createdAt || new Date().toISOString(),
+    resolvedAt: data?.resolvedAt,
+    resolvedBy: data?.resolvedBy,
+    closedAt: data?.closedAt,
+    source: data?.source || 'portal'
+  };
+}
+
 /**
  * Fetch a single ticket by Reference ID or Email
  */
@@ -157,14 +203,15 @@ export async function getInquiryByTicketId(ticketId: string): Promise<SupportInq
     // 1. Direct document lookup by ID
     const snap = await getDoc(doc(db, 'inquiries', cleanId));
     if (snap.exists()) {
-      return snap.data() as SupportInquiry;
+      return normalizeInquiryDoc(snap.data(), snap.id);
     }
 
     // 2. Query by ticketId field (case-tolerant uppercase search)
     const q = query(collection(db, 'inquiries'), where('ticketId', '==', cleanId.toUpperCase()), limit(1));
     const querySnap = await getDocs(q);
     if (!querySnap.empty) {
-      return querySnap.docs[0].data() as SupportInquiry;
+      const matchDoc = querySnap.docs[0];
+      return normalizeInquiryDoc(matchDoc.data(), matchDoc.id);
     }
   } catch (err) {
     console.warn('Error fetching inquiry by ticketId:', err);
@@ -246,7 +293,8 @@ export async function fetchAllInquiries(): Promise<SupportInquiry[]> {
     const snap = await getDocs(q);
     const results: SupportInquiry[] = [];
     snap.forEach((d) => {
-      results.push(d.data() as SupportInquiry);
+      const normalized = normalizeInquiryDoc(d.data(), d.id);
+      results.push(normalized);
     });
 
     // Sort by createdAt descending
