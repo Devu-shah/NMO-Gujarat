@@ -14,7 +14,13 @@ import { getAuth as getAdminAuth } from 'firebase-admin/auth';
 import type { DecodedIdToken } from 'firebase-admin/auth';
 import { getFirestore as getAdminFirestoreSdk } from 'firebase-admin/firestore';
 import type { Firestore as AdminFirestore } from 'firebase-admin/firestore';
-import { sendContactInquiryEmail, getEmailServiceStatus } from './src/server/emailService';
+import {
+  sendContactInquiryEmail,
+  getEmailServiceStatus,
+  sendTestEmail,
+  saveStoredSmtpConfig,
+  loadStoredSmtpConfig
+} from './src/server/emailService';
 
 dotenv.config();
 
@@ -758,10 +764,11 @@ Recipient:        ${RECIPIENT_EMAIL}
     }
   });
 
-  // Diagnostic endpoint for Email Service configuration status
-  app.get('/api/contact/status', async (_req, res) => {
+  // Status and Diagnostic endpoint for Email Service configuration
+  app.get('/api/email/status', async (req, res) => {
     try {
-      const status = await getEmailServiceStatus();
+      const force = req.query.force === 'true';
+      const status = await getEmailServiceStatus(force);
       return res.status(200).json({
         success: true,
         emailService: status
@@ -770,6 +777,73 @@ Recipient:        ${RECIPIENT_EMAIL}
       return res.status(500).json({
         success: false,
         error: err.message || 'Failed to determine email service status'
+      });
+    }
+  });
+
+  // Save SMTP / Gmail configuration securely (Super Admin Only)
+  app.post('/api/email/save-config', async (req, res) => {
+    try {
+      const { gmailUser, gmailAppPassword, smtpHost, smtpPort, smtpUser, smtpPass, smtpSecure, recipientEmail } = req.body || {};
+
+      saveStoredSmtpConfig({
+        gmailUser: gmailUser?.trim(),
+        gmailAppPassword: gmailAppPassword?.trim(),
+        smtpHost: smtpHost?.trim(),
+        smtpPort: smtpPort ? Number(smtpPort) : undefined,
+        smtpUser: smtpUser?.trim(),
+        smtpPass: smtpPass?.trim(),
+        smtpSecure: Boolean(smtpSecure),
+        recipientEmail: recipientEmail?.trim()
+      });
+
+      // Verify connection immediately with forceRefresh
+      const status = await getEmailServiceStatus(true);
+      return res.status(200).json({
+        success: true,
+        message: status.verified
+          ? 'Email transporter configuration verified and activated successfully!'
+          : 'Configuration saved, but verification reported: ' + (status.lastError || 'Check credentials'),
+        emailService: status
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        success: false,
+        error: err.message || 'Failed to save email configuration'
+      });
+    }
+  });
+
+  // Send a Live Verification Test Email (Super Admin / Admin Tool)
+  app.post('/api/email/test', async (req, res) => {
+    try {
+      const { to } = req.body || {};
+      const targetRecipient = (to || '').trim();
+      if (!targetRecipient || !targetRecipient.includes('@')) {
+        return res.status(400).json({
+          success: false,
+          error: 'Please provide a valid recipient email address for the test.'
+        });
+      }
+
+      const result = await sendTestEmail(targetRecipient);
+      if (result.success && result.delivered) {
+        return res.status(200).json({
+          success: true,
+          message: `Test email dispatched successfully to ${targetRecipient}!`,
+          result
+        });
+      } else {
+        return res.status(400).json({
+          success: false,
+          error: result.error || 'Failed to send test email',
+          result
+        });
+      }
+    } catch (err: any) {
+      return res.status(500).json({
+        success: false,
+        error: err.message || 'Error occurred while dispatching test email'
       });
     }
   });

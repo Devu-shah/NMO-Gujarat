@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 import nodemailer from 'nodemailer';
 import type { Transporter, SendMailOptions } from 'nodemailer';
 
@@ -29,8 +31,53 @@ export interface EmailServiceStatus {
   configured: boolean;
   provider: 'gmail' | 'smtp' | 'ethereal_test' | 'unconfigured';
   recipient: string;
+  senderAddress?: string;
   verified: boolean;
   lastError?: string;
+}
+
+export interface StoredSmtpConfig {
+  gmailUser?: string;
+  gmailAppPassword?: string;
+  smtpHost?: string;
+  smtpPort?: number;
+  smtpUser?: string;
+  smtpPass?: string;
+  smtpSecure?: boolean;
+  fromName?: string;
+  recipientEmail?: string;
+  updatedAt?: string;
+}
+
+const SECURE_CREDENTIALS_DIR = path.resolve(process.cwd(), '.credentials');
+const SECURE_SMTP_FILE = path.join(SECURE_CREDENTIALS_DIR, 'smtp_config_secure.json');
+
+export function loadStoredSmtpConfig(): StoredSmtpConfig | null {
+  try {
+    if (fs.existsSync(SECURE_SMTP_FILE)) {
+      const raw = fs.readFileSync(SECURE_SMTP_FILE, 'utf8');
+      return JSON.parse(raw);
+    }
+  } catch (err: any) {
+    console.warn('[Email Service] Notice loading stored SMTP config:', err?.message || err);
+  }
+  return null;
+}
+
+export function saveStoredSmtpConfig(config: StoredSmtpConfig): void {
+  try {
+    if (!fs.existsSync(SECURE_CREDENTIALS_DIR)) {
+      fs.mkdirSync(SECURE_CREDENTIALS_DIR, { recursive: true, mode: 0o700 });
+    }
+    const payload = {
+      ...config,
+      updatedAt: new Date().toISOString()
+    };
+    fs.writeFileSync(SECURE_SMTP_FILE, JSON.stringify(payload, null, 2), { mode: 0o600 });
+  } catch (err: any) {
+    console.error('[Email Service] Failed to save stored SMTP config:', err?.message || err);
+    throw err;
+  }
 }
 
 export const PRIMARY_RECIPIENT_EMAIL = process.env.VITE_SUPER_ADMIN_EMAIL || process.env.SMTP_USER || 'secretariat@nmogujarat.org';
@@ -38,25 +85,34 @@ export const PRIMARY_RECIPIENT_EMAIL = process.env.VITE_SUPER_ADMIN_EMAIL || pro
 let cachedTransporter: Transporter | null = null;
 let lastVerifyStatus = false;
 let lastVerifyError: string | null = null;
+let activeSenderAddress: string | null = null;
 let etherealAccount: any = null;
 
 /**
  * Initializes and verifies the Nodemailer transporter based on environment configuration.
  * Adheres strictly to Nodemailer documentation (https://nodemailer.com/):
- * - Priority 1: Gmail service with Google App Password
+ * - Priority 1: Gmail service with Google App Password (whitespaces automatically stripped)
  * - Priority 2: Custom SMTP server with pooled connections
  * - Priority 3 (fallback in dev/staging): Ethereal test account for real preview URLs
  */
-export async function getTransporter(): Promise<Transporter | null> {
-  if (cachedTransporter) {
+export async function getTransporter(forceRefresh: boolean = false): Promise<Transporter | null> {
+  if (cachedTransporter && !forceRefresh) {
     return cachedTransporter;
   }
+  if (forceRefresh) {
+    cachedTransporter = null;
+  }
 
-  const gmailUser = process.env.GMAIL_USER?.trim();
-  const gmailPass = process.env.GMAIL_APP_PASSWORD?.trim();
+  const stored = loadStoredSmtpConfig();
+
+  // Resolve Gmail configuration from process.env or securely stored config
+  const gmailUser = (process.env.GMAIL_USER || stored?.gmailUser || process.env.SMTP_USER || stored?.smtpUser)?.trim();
+  const rawGmailPass = (process.env.GMAIL_APP_PASSWORD || stored?.gmailAppPassword || process.env.SMTP_PASS || stored?.smtpPass)?.trim();
+  // Strip all whitespaces (Google displays 16-character App Passwords grouped in 4-letter chunks like 'xxxx xxxx xxxx xxxx')
+  const gmailPass = rawGmailPass ? rawGmailPass.replace(/\s+/g, '') : '';
 
   // Option 1: Gmail Service with App Password
-  if (gmailUser && gmailPass) {
+  if (gmailUser && gmailPass && (process.env.GMAIL_USER || stored?.gmailUser || !process.env.SMTP_HOST || process.env.SMTP_HOST?.includes('gmail'))) {
     try {
       const transporter = nodemailer.createTransport({
         service: 'gmail',
@@ -74,20 +130,42 @@ export async function getTransporter(): Promise<Transporter | null> {
       cachedTransporter = transporter;
       lastVerifyStatus = true;
       lastVerifyError = null;
+      activeSenderAddress = gmailUser;
       return cachedTransporter;
     } catch (err: any) {
-      console.error('[Email Service] Gmail transporter verification failed:', err.message || err);
-      lastVerifyStatus = false;
-      lastVerifyError = err.message || 'Gmail verification failed';
+      console.warn('[Email Service] Gmail service verification notice, trying direct smtp.gmail.com:465 fallback...', err.message || err);
+      try {
+        const directTransporter = nodemailer.createTransport({
+          host: 'smtp.gmail.com',
+          port: 465,
+          secure: true,
+          auth: {
+            user: gmailUser,
+            pass: gmailPass
+          }
+        });
+        await directTransporter.verify();
+        console.log(`[Email Service] Direct smtp.gmail.com:465 transporter verified successfully for: ${gmailUser}`);
+        cachedTransporter = directTransporter;
+        lastVerifyStatus = true;
+        lastVerifyError = null;
+        activeSenderAddress = gmailUser;
+        return cachedTransporter;
+      } catch (fallbackErr: any) {
+        console.error('[Email Service] Gmail fallback verification failed:', fallbackErr.message || fallbackErr);
+        lastVerifyStatus = false;
+        lastVerifyError = fallbackErr.message || err.message || 'Gmail authentication failed. Please verify email and Google App Password.';
+      }
     }
   }
 
   // Option 2: Generic SMTP Server (SendGrid, Brevo, AWS SES, Mailgun, etc.)
-  const smtpHost = process.env.SMTP_HOST?.trim();
-  const smtpUser = process.env.SMTP_USER?.trim();
-  const smtpPass = process.env.SMTP_PASS?.trim();
-  const smtpPort = Number(process.env.SMTP_PORT) || 587;
-  const smtpSecure = process.env.SMTP_SECURE === 'true' || smtpPort === 465;
+  const smtpHost = (process.env.SMTP_HOST || stored?.smtpHost)?.trim();
+  const smtpUser = (process.env.SMTP_USER || stored?.smtpUser)?.trim();
+  const rawSmtpPass = (process.env.SMTP_PASS || stored?.smtpPass)?.trim();
+  const smtpPass = rawSmtpPass ? rawSmtpPass.replace(/\s+/g, '') : '';
+  const smtpPort = Number(process.env.SMTP_PORT || stored?.smtpPort) || 587;
+  const smtpSecure = (process.env.SMTP_SECURE === 'true' || stored?.smtpSecure === true) || smtpPort === 465;
 
   if (smtpHost && smtpUser && smtpPass) {
     try {
@@ -112,6 +190,7 @@ export async function getTransporter(): Promise<Transporter | null> {
       cachedTransporter = transporter;
       lastVerifyStatus = true;
       lastVerifyError = null;
+      activeSenderAddress = smtpUser;
       return cachedTransporter;
     } catch (err: any) {
       console.error('[Email Service] SMTP transporter verification failed:', err.message || err);
@@ -139,6 +218,7 @@ export async function getTransporter(): Promise<Transporter | null> {
       cachedTransporter = testTransporter;
       lastVerifyStatus = true;
       lastVerifyError = null;
+      activeSenderAddress = etherealAccount.user;
       return cachedTransporter;
     } catch (etherealErr: any) {
       console.warn('[Email Service] Could not generate Ethereal test account:', etherealErr.message);
@@ -151,15 +231,20 @@ export async function getTransporter(): Promise<Transporter | null> {
 /**
  * Returns diagnostic metadata regarding current email dispatch capability.
  */
-export async function getEmailServiceStatus(): Promise<EmailServiceStatus> {
-  const gmailUser = process.env.GMAIL_USER?.trim();
-  const gmailPass = process.env.GMAIL_APP_PASSWORD?.trim();
-  const smtpHost = process.env.SMTP_HOST?.trim();
+export async function getEmailServiceStatus(forceRefresh: boolean = false): Promise<EmailServiceStatus> {
+  if (forceRefresh || (!cachedTransporter && !lastVerifyError)) {
+    await getTransporter(forceRefresh);
+  }
+
+  const stored = loadStoredSmtpConfig();
+  const gmailUser = (process.env.GMAIL_USER || stored?.gmailUser)?.trim();
+  const gmailPass = (process.env.GMAIL_APP_PASSWORD || stored?.gmailAppPassword)?.trim();
+  const smtpHost = (process.env.SMTP_HOST || stored?.smtpHost)?.trim();
 
   let provider: EmailServiceStatus['provider'] = 'unconfigured';
   if (gmailUser && gmailPass) {
     provider = 'gmail';
-  } else if (smtpHost) {
+  } else if (smtpHost && smtpHost !== 'smtp.ethereal.email') {
     provider = 'smtp';
   } else if (etherealAccount) {
     provider = 'ethereal_test';
@@ -168,10 +253,83 @@ export async function getEmailServiceStatus(): Promise<EmailServiceStatus> {
   return {
     configured: provider !== 'unconfigured',
     provider,
-    recipient: PRIMARY_RECIPIENT_EMAIL,
+    recipient: stored?.recipientEmail || PRIMARY_RECIPIENT_EMAIL,
+    senderAddress: activeSenderAddress || gmailUser || (smtpHost ? `${smtpHost}` : undefined),
     verified: lastVerifyStatus,
     lastError: lastVerifyError || undefined
   };
+}
+
+/**
+ * Dispatches a real test email through the active Nodemailer transporter.
+ */
+export async function sendTestEmail(recipientEmail: string): Promise<SendEmailResult> {
+  const timestamp = new Date().toISOString();
+  const transporter = await getTransporter(true);
+
+  if (!transporter) {
+    return {
+      success: false,
+      delivered: false,
+      recipient: recipientEmail,
+      timestamp,
+      error: lastVerifyError || 'No email transporter configured. Please configure your Gmail Account & App Password or SMTP settings.'
+    };
+  }
+
+  const stored = loadStoredSmtpConfig();
+  const fromAddress =
+    activeSenderAddress ||
+    process.env.GMAIL_USER ||
+    stored?.gmailUser ||
+    process.env.SMTP_FROM ||
+    process.env.SMTP_USER ||
+    stored?.smtpUser ||
+    'secretariat@nmogujarat.org';
+
+  try {
+    const info = await transporter.sendMail({
+      from: `"NMO Gujarat Portal (Verification Test)" <${fromAddress}>`,
+      to: recipientEmail,
+      subject: `[NMO Gujarat] Nodemailer Test Dispatch (${new Date().toLocaleTimeString('en-IN')})`,
+      text: `Greetings from NMO Gujarat Secretariat.\n\nThis is a verified test email confirming that Nodemailer has been properly configured with the email transporter on your server.\n\nServer Timestamp: ${timestamp}\nFrom: ${fromAddress}\nTo: ${recipientEmail}`,
+      html: `
+        <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 580px; margin: 20px auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 16px; background: #ffffff; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);">
+          <div style="background: linear-gradient(135deg, #b91c1c 0%, #1e3a8a 100%); color: #ffffff; padding: 18px 20px; border-radius: 12px; margin-bottom: 20px;">
+            <h2 style="margin: 0; font-size: 18px; font-weight: 800;">NMO Gujarat Nodemailer Connected</h2>
+            <p style="margin: 4px 0 0 0; font-size: 12px; color: #fde047;">Automated Server Transporter Verification</p>
+          </div>
+          <p style="font-size: 14px; color: #334155; line-height: 1.6;">This verified test email confirms that your Nodemailer SMTP transport service is operational and capable of dispatching outgoing member updates and contact notifications.</p>
+          <div style="background: #f8fafc; border-left: 4px solid #16a34a; padding: 14px 18px; margin: 20px 0; font-size: 13px; line-height: 1.7; border-radius: 0 8px 8px 0;">
+            <strong>Verification Status:</strong> <span style="color: #16a34a; font-weight: bold;">Verified & Active</span><br/>
+            <strong>Sender Account:</strong> <code>${fromAddress}</code><br/>
+            <strong>Target Recipient:</strong> <code>${recipientEmail}</code><br/>
+            <strong>Dispatched At:</strong> ${timestamp}
+          </div>
+          <p style="font-size: 12px; color: #64748b; margin-bottom: 0;">National Medicos Organisation Gujarat Secretariat &middot; <a href="https://nmogujarat.org" style="color: #b91c1c; text-decoration: none;">nmogujarat.org</a></p>
+        </div>
+      `
+    });
+
+    const previewUrl = etherealAccount ? nodemailer.getTestMessageUrl(info) : false;
+    return {
+      success: true,
+      delivered: true,
+      messageId: info.messageId,
+      previewUrl,
+      recipient: recipientEmail,
+      timestamp
+    };
+  } catch (sendErr: any) {
+    console.error('[Email Service] Test email delivery failed:', sendErr.message || sendErr);
+    return {
+      success: false,
+      delivered: false,
+      recipient: recipientEmail,
+      timestamp,
+      error: sendErr.message || 'Failed to dispatch test email'
+    };
+  }
 }
 
 /**
