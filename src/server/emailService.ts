@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import net from 'net';
 import nodemailer from 'nodemailer';
 import type { Transporter, SendMailOptions } from 'nodemailer';
 
@@ -29,14 +30,19 @@ export interface SendEmailResult {
 
 export interface EmailServiceStatus {
   configured: boolean;
-  provider: 'gmail' | 'smtp' | 'ethereal_test' | 'unconfigured';
+  provider: 'gmail' | 'smtp' | 'brevo' | 'sendgrid' | 'ses' | 'ethereal_test' | 'unconfigured';
   recipient: string;
   senderAddress?: string;
+  senderName?: string;
+  smtpHost?: string;
+  smtpPort?: number;
   verified: boolean;
   lastError?: string;
+  latencyMs?: number;
 }
 
 export interface StoredSmtpConfig {
+  provider?: 'gmail' | 'smtp' | 'brevo' | 'sendgrid' | 'ses';
   gmailUser?: string;
   gmailAppPassword?: string;
   smtpHost?: string;
@@ -45,6 +51,7 @@ export interface StoredSmtpConfig {
   smtpPass?: string;
   smtpSecure?: boolean;
   fromName?: string;
+  fromEmail?: string;
   recipientEmail?: string;
   updatedAt?: string;
 }
@@ -75,18 +82,21 @@ export function saveStoredSmtpConfig(config: StoredSmtpConfig): void {
     const cleanSmtpPass = config.smtpPass ? config.smtpPass.replace(/\s+/g, '') : undefined;
     const cleanGmailUser = config.gmailUser ? config.gmailUser.trim().toLowerCase() : undefined;
     const cleanRecipient = config.recipientEmail ? config.recipientEmail.trim().toLowerCase() : undefined;
+    const cleanFromEmail = config.fromEmail ? config.fromEmail.trim().toLowerCase() : undefined;
 
     const payload: StoredSmtpConfig = {
       ...config,
+      provider: config.provider || (config.smtpHost && !config.smtpHost.includes('gmail') ? 'smtp' : 'gmail'),
       gmailUser: cleanGmailUser,
       gmailAppPassword: cleanGmailPass,
       smtpPass: cleanSmtpPass,
+      fromEmail: cleanFromEmail,
       recipientEmail: cleanRecipient,
       updatedAt: new Date().toISOString()
     };
     fs.writeFileSync(SECURE_SMTP_FILE, JSON.stringify(payload, null, 2), { mode: 0o600 });
 
-    // CRITICAL: Synchronize in-memory process.env so runtime immediately uses new credentials
+    // Synchronize in-memory process.env
     if (cleanGmailUser) {
       process.env.GMAIL_USER = cleanGmailUser;
     }
@@ -108,8 +118,11 @@ export function saveStoredSmtpConfig(config: StoredSmtpConfig): void {
     if (config.smtpPort) {
       process.env.SMTP_PORT = String(config.smtpPort);
     }
+    if (config.fromName) {
+      process.env.SMTP_FROM_NAME = config.fromName;
+    }
 
-    // Update .env file if present for durable persistence across restarts
+    // Update .env file if present
     try {
       const envPath = path.resolve(process.cwd(), '.env');
       if (fs.existsSync(envPath)) {
@@ -150,14 +163,16 @@ let cachedTransporter: Transporter | null = null;
 let lastVerifyStatus = false;
 let lastVerifyError: string | null = null;
 let activeSenderAddress: string | null = null;
+let activeSenderName: string | null = null;
+let lastLatencyMs: number | undefined = undefined;
 let etherealAccount: any = null;
 
 /**
- * Initializes and verifies the Nodemailer transporter based on environment configuration.
- * Adheres strictly to Nodemailer documentation (https://nodemailer.com/):
- * - Priority 1: Gmail service with Google App Password (whitespaces automatically stripped)
- * - Priority 2: Custom SMTP server with pooled connections
- * - Priority 3 (fallback in dev/staging): Ethereal test account for real preview URLs
+ * Initializes and verifies the Nodemailer transporter with robust anti-timeout defenses.
+ * - Enforces fast connection timeout (8000ms), greeting timeout (8000ms), and socket timeout (15000ms)
+ * - pool: false prevents frozen/dead socket timeouts common in containerized Cloud Run environments
+ * - Multi-port fallback: Port 587 (STARTTLS) primary, Port 465 (SSL/TLS) secondary
+ * - Priority: Stored configuration (Brevo / SendGrid / SES / Custom SMTP / Gmail) over process.env
  */
 export async function getTransporter(forceRefresh: boolean = false): Promise<Transporter | null> {
   if (cachedTransporter && !forceRefresh) {
@@ -168,59 +183,130 @@ export async function getTransporter(forceRefresh: boolean = false): Promise<Tra
   }
 
   const stored = loadStoredSmtpConfig();
+  const provider = stored?.provider || (stored?.smtpHost && !stored.smtpHost.includes('gmail') ? 'smtp' : 'gmail');
 
-  // Resolve Gmail configuration: PREFER stored user-configured settings over default process.env
+  const startMs = Date.now();
+
+  // Mode A: Custom SMTP Server / Brevo / SendGrid / Amazon SES
+  if (provider !== 'gmail' && (stored?.smtpHost || process.env.SMTP_HOST)) {
+    const host = (stored?.smtpHost || process.env.SMTP_HOST)?.trim();
+    const port = Number(stored?.smtpPort || process.env.SMTP_PORT) || 587;
+    const user = (stored?.smtpUser || process.env.SMTP_USER)?.trim();
+    const rawPass = (stored?.smtpPass || process.env.SMTP_PASS)?.trim();
+    const pass = rawPass ? rawPass.replace(/\s+/g, '') : '';
+    const secure = stored?.smtpSecure ?? (port === 465);
+
+    if (host && user && pass) {
+      try {
+        const smtpTransporter = nodemailer.createTransport({
+          host,
+          port,
+          secure,
+          requireTLS: !secure && port === 587,
+          auth: { user, pass },
+          connectionTimeout: 8000,
+          greetingTimeout: 8000,
+          socketTimeout: 20000,
+          pool: false, // Vital for Cloud Run: avoids stale socket timeouts
+          tls: {
+            rejectUnauthorized: process.env.SMTP_IGNORE_TLS !== 'true'
+          }
+        });
+
+        await smtpTransporter.verify();
+        lastLatencyMs = Date.now() - startMs;
+        console.log(`[Email Service] SMTP transporter verified for ${host}:${port} (${lastLatencyMs}ms)`);
+        cachedTransporter = smtpTransporter;
+        lastVerifyStatus = true;
+        lastVerifyError = null;
+        activeSenderAddress = stored?.fromEmail || user;
+        activeSenderName = stored?.fromName || 'National Medicos Organisation Gujarat';
+        return cachedTransporter;
+      } catch (smtpErr: any) {
+        lastLatencyMs = Date.now() - startMs;
+        const msg = smtpErr?.message || String(smtpErr);
+        console.warn(`[Email Service] SMTP verification failed on ${host}:${port}:`, msg);
+        lastVerifyStatus = false;
+        lastVerifyError = `SMTP connection failed (${host}:${port}): ${msg}`;
+      }
+    }
+  }
+
+  // Mode B: Gmail Service with App Password (with strict anti-timeout guards)
   const gmailUser = (stored?.gmailUser || process.env.GMAIL_USER || stored?.smtpUser || process.env.SMTP_USER)?.trim();
   const rawGmailPass = (stored?.gmailAppPassword || process.env.GMAIL_APP_PASSWORD || stored?.smtpPass || process.env.SMTP_PASS)?.trim();
-  // Strip all whitespaces (Google displays 16-character App Passwords grouped in 4-letter chunks like 'xxxx xxxx xxxx xxxx')
   const gmailPass = rawGmailPass ? rawGmailPass.replace(/\s+/g, '') : '';
 
-  // Option 1: Gmail Service with App Password
-  if (gmailUser && gmailPass && (stored?.gmailUser || process.env.GMAIL_USER || !process.env.SMTP_HOST || process.env.SMTP_HOST?.includes('gmail'))) {
+  if (gmailUser && gmailPass) {
+    // Strategy 1: smtp.gmail.com on Port 587 (STARTTLS) - standard submission port with minimal cloud egress blocks
     try {
-      const transporter = nodemailer.createTransport({
-        service: 'gmail',
+      const port587Transporter = nodemailer.createTransport({
+        host: 'smtp.gmail.com',
+        port: 587,
+        secure: false, // STARTTLS
+        requireTLS: true,
         auth: {
           user: gmailUser,
           pass: gmailPass
         },
-        pool: true,
-        maxConnections: 3,
-        maxMessages: 50
+        connectionTimeout: 8000,
+        greetingTimeout: 8000,
+        socketTimeout: 15000,
+        pool: false, // Prevents stale pooled socket timeouts in Cloud Run
+        tls: {
+          rejectUnauthorized: false
+        }
       });
 
-      await transporter.verify();
-      console.log(`[Email Service] Nodemailer Gmail transporter verified successfully for: ${gmailUser}`);
-      cachedTransporter = transporter;
+      await port587Transporter.verify();
+      lastLatencyMs = Date.now() - startMs;
+      console.log(`[Email Service] Nodemailer Gmail 587 (STARTTLS) transporter verified successfully in ${lastLatencyMs}ms for ${gmailUser}`);
+      cachedTransporter = port587Transporter;
       lastVerifyStatus = true;
       lastVerifyError = null;
-      activeSenderAddress = gmailUser;
+      activeSenderAddress = stored?.fromEmail || gmailUser;
+      activeSenderName = stored?.fromName || 'NMO Gujarat Secretariat';
       return cachedTransporter;
-    } catch (err: any) {
-      console.warn('[Email Service] Gmail service verification notice, trying direct smtp.gmail.com:465 fallback...', err.message || err);
+    } catch (err587: any) {
+      console.warn('[Email Service] Port 587 notice, testing direct port 465 (SSL/TLS)...', err587?.message || err587);
+
+      // Strategy 2: smtp.gmail.com on Port 465 (SSL/TLS)
       try {
-        const directTransporter = nodemailer.createTransport({
+        const port465Transporter = nodemailer.createTransport({
           host: 'smtp.gmail.com',
           port: 465,
           secure: true,
           auth: {
             user: gmailUser,
             pass: gmailPass
+          },
+          connectionTimeout: 8000,
+          greetingTimeout: 8000,
+          socketTimeout: 15000,
+          pool: false,
+          tls: {
+            rejectUnauthorized: false
           }
         });
-        await directTransporter.verify();
-        console.log(`[Email Service] Direct smtp.gmail.com:465 transporter verified successfully for: ${gmailUser}`);
-        cachedTransporter = directTransporter;
+
+        await port465Transporter.verify();
+        lastLatencyMs = Date.now() - startMs;
+        console.log(`[Email Service] Direct smtp.gmail.com:465 transporter verified in ${lastLatencyMs}ms for ${gmailUser}`);
+        cachedTransporter = port465Transporter;
         lastVerifyStatus = true;
         lastVerifyError = null;
-        activeSenderAddress = gmailUser;
+        activeSenderAddress = stored?.fromEmail || gmailUser;
+        activeSenderName = stored?.fromName || 'NMO Gujarat Secretariat';
         return cachedTransporter;
-      } catch (fallbackErr: any) {
-        console.error('[Email Service] Gmail fallback verification failed:', fallbackErr.message || fallbackErr);
+      } catch (err465: any) {
+        lastLatencyMs = Date.now() - startMs;
         lastVerifyStatus = false;
-        const rawErr = fallbackErr?.message || err?.message || 'Authentication failed';
+        const rawErr = err465?.message || err587?.message || 'Authentication or connection timed out';
+
         if (rawErr.includes('535') || rawErr.includes('BadCredentials')) {
-          lastVerifyError = `Gmail authentication rejected (535 Bad Credentials). Please ensure 2-Step Verification is active on ${gmailUser} and generate a fresh 16-character App Password at https://myaccount.google.com/apppasswords`;
+          lastVerifyError = `Gmail authentication rejected (535 Bad Credentials). Ensure 2-Step Verification is active on ${gmailUser} and generate a fresh 16-character App Password at https://myaccount.google.com/apppasswords`;
+        } else if (rawErr.includes('ETIMEDOUT') || rawErr.includes('timeout')) {
+          lastVerifyError = `Connection to Gmail SMTP timed out. For high-volume mass mailing, switch to Brevo or SendGrid in Email Settings (they use high-speed cloud relays).`;
         } else {
           lastVerifyError = rawErr;
         }
@@ -228,48 +314,8 @@ export async function getTransporter(forceRefresh: boolean = false): Promise<Tra
     }
   }
 
-  // Option 2: Generic SMTP Server (SendGrid, Brevo, AWS SES, Mailgun, etc.)
-  const smtpHost = (process.env.SMTP_HOST || stored?.smtpHost)?.trim();
-  const smtpUser = (process.env.SMTP_USER || stored?.smtpUser)?.trim();
-  const rawSmtpPass = (process.env.SMTP_PASS || stored?.smtpPass)?.trim();
-  const smtpPass = rawSmtpPass ? rawSmtpPass.replace(/\s+/g, '') : '';
-  const smtpPort = Number(process.env.SMTP_PORT || stored?.smtpPort) || 587;
-  const smtpSecure = (process.env.SMTP_SECURE === 'true' || stored?.smtpSecure === true) || smtpPort === 465;
-
-  if (smtpHost && smtpUser && smtpPass) {
-    try {
-      const transporter = nodemailer.createTransport({
-        host: smtpHost,
-        port: smtpPort,
-        secure: smtpSecure, // true for 465, false for 587 / STARTTLS
-        auth: {
-          user: smtpUser,
-          pass: smtpPass
-        },
-        pool: true,
-        maxConnections: 5,
-        maxMessages: 100,
-        tls: {
-          rejectUnauthorized: process.env.SMTP_IGNORE_TLS !== 'true'
-        }
-      });
-
-      await transporter.verify();
-      console.log(`[Email Service] Nodemailer SMTP transporter verified successfully for: ${smtpHost}:${smtpPort}`);
-      cachedTransporter = transporter;
-      lastVerifyStatus = true;
-      lastVerifyError = null;
-      activeSenderAddress = smtpUser;
-      return cachedTransporter;
-    } catch (err: any) {
-      console.error('[Email Service] SMTP transporter verification failed:', err.message || err);
-      lastVerifyStatus = false;
-      lastVerifyError = err.message || 'SMTP verification failed';
-    }
-  }
-
   // Option 3: Fallback in non-production environments to Ethereal Email ONLY if NO credentials provided
-  const hasUserConfig = Boolean((gmailUser && gmailPass) || (smtpHost && smtpUser && smtpPass));
+  const hasUserConfig = Boolean((gmailUser && gmailPass) || (stored?.smtpHost && stored?.smtpUser && stored?.smtpPass));
   if (!hasUserConfig && process.env.NODE_ENV !== 'production' && !cachedTransporter) {
     try {
       if (!etherealAccount) {
@@ -283,7 +329,11 @@ export async function getTransporter(forceRefresh: boolean = false): Promise<Tra
         auth: {
           user: etherealAccount.user,
           pass: etherealAccount.pass
-        }
+        },
+        connectionTimeout: 5000,
+        greetingTimeout: 5000,
+        socketTimeout: 10000,
+        pool: false
       });
       cachedTransporter = testTransporter;
       lastVerifyStatus = true;
@@ -296,6 +346,27 @@ export async function getTransporter(forceRefresh: boolean = false): Promise<Tra
   }
 
   return null;
+}
+
+/**
+ * Lightweight TCP connection latency tester for SMTP hosts (587, 465, 2525)
+ */
+export async function pingSmtpConnection(host: string, port: number = 587): Promise<{ success: boolean; latencyMs: number; error?: string }> {
+  return new Promise((resolve) => {
+    const start = Date.now();
+    const sock = net.createConnection({ host, port, timeout: 5000 }, () => {
+      const latency = Date.now() - start;
+      sock.end();
+      resolve({ success: true, latencyMs: latency });
+    });
+    sock.on('timeout', () => {
+      sock.destroy();
+      resolve({ success: false, latencyMs: Date.now() - start, error: `Connection to ${host}:${port} timed out after 5000ms.` });
+    });
+    sock.on('error', (err: any) => {
+      resolve({ success: false, latencyMs: Date.now() - start, error: err?.message || 'Connection refused or blocked by firewall' });
+    });
+  });
 }
 
 /**
@@ -312,10 +383,16 @@ export async function getEmailServiceStatus(forceRefresh: boolean = false): Prom
   const smtpHost = (stored?.smtpHost || process.env.SMTP_HOST)?.trim();
 
   let provider: EmailServiceStatus['provider'] = 'unconfigured';
-  if (gmailUser && gmailPass) {
-    provider = 'gmail';
+  if (stored?.provider === 'brevo' || smtpHost?.includes('brevo')) {
+    provider = 'brevo';
+  } else if (stored?.provider === 'sendgrid' || smtpHost?.includes('sendgrid')) {
+    provider = 'sendgrid';
+  } else if (stored?.provider === 'ses' || smtpHost?.includes('amazonaws')) {
+    provider = 'ses';
   } else if (smtpHost && smtpHost !== 'smtp.ethereal.email') {
     provider = 'smtp';
+  } else if (gmailUser && gmailPass) {
+    provider = 'gmail';
   } else if (etherealAccount) {
     provider = 'ethereal_test';
   }
@@ -324,9 +401,13 @@ export async function getEmailServiceStatus(forceRefresh: boolean = false): Prom
     configured: provider !== 'unconfigured',
     provider,
     recipient: stored?.recipientEmail || PRIMARY_RECIPIENT_EMAIL,
-    senderAddress: activeSenderAddress || gmailUser || (smtpHost ? `${smtpHost}` : undefined),
+    senderAddress: activeSenderAddress || stored?.fromEmail || gmailUser || (smtpHost ? `${smtpHost}` : undefined),
+    senderName: activeSenderName || stored?.fromName || 'National Medicos Organisation Gujarat',
+    smtpHost: stored?.smtpHost || (provider === 'gmail' ? 'smtp.gmail.com' : undefined),
+    smtpPort: stored?.smtpPort || (provider === 'gmail' ? 587 : 587),
     verified: lastVerifyStatus,
-    lastError: lastVerifyError || undefined
+    lastError: lastVerifyError || undefined,
+    latencyMs: lastLatencyMs
   };
 }
 
@@ -696,16 +777,20 @@ export async function sendBroadcastEmail(
 </html>
   `.trim();
 
-  // For privacy and deliverability, send to groups using BCC in chunks of 50
-  const CHUNK_SIZE = 50;
+  // For privacy and deliverability, send to groups using BCC in chunks of 30
+  const CHUNK_SIZE = 30;
   let sentCount = 0;
   let lastMessageId = '';
+  const totalBatches = Math.ceil(validRecipients.length / CHUNK_SIZE);
+  const senderDisplayName = payload.senderName || stored?.fromName || 'National Medicos Organisation Gujarat';
+  const fromHeader = `"${senderDisplayName}" <${fromAddress}>`;
 
   for (let i = 0; i < validRecipients.length; i += CHUNK_SIZE) {
     const chunk = validRecipients.slice(i, i + CHUNK_SIZE);
+    const batchIndex = Math.floor(i / CHUNK_SIZE) + 1;
     try {
       const info = await transporter.sendMail({
-        from: `"NMO Gujarat Secretariat" <${fromAddress}>`,
+        from: fromHeader,
         to: fromAddress, // Main recipient is Secretariat so member emails are never exposed
         bcc: chunk,      // BCC guarantees zero recipient visibility to others
         subject: payload.subject.trim(),
@@ -715,21 +800,26 @@ export async function sendBroadcastEmail(
       });
       sentCount += chunk.length;
       lastMessageId = info.messageId;
-      console.log(`[Email Service] Broadcast batch ${Math.floor(i / CHUNK_SIZE) + 1} sent to ${chunk.length} recipients. ID: ${info.messageId}`);
+      console.log(`[Email Service] Broadcast batch ${batchIndex}/${totalBatches} sent to ${chunk.length} recipients. ID: ${info.messageId}`);
+
+      // Small throttling pause between batches to prevent SMTP server rate limit drops
+      if (batchIndex < totalBatches) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
     } catch (chunkErr: any) {
-      console.error(`[Email Service] Broadcast chunk failed:`, chunkErr.message || chunkErr);
-      if (sentCount === 0) {
+      console.error(`[Email Service] Broadcast batch ${batchIndex} failed:`, chunkErr.message || chunkErr);
+      if (sentCount === 0 && totalBatches === 1) {
         return {
           success: false,
           count: 0,
-          error: chunkErr.message || 'SMTP failed to dispatch broadcast.'
+          error: chunkErr.message || 'SMTP delivery failed. Check your SMTP provider credentials or rate limits.'
         };
       }
     }
   }
 
   return {
-    success: true,
+    success: sentCount > 0,
     count: sentCount,
     messageId: lastMessageId
   };

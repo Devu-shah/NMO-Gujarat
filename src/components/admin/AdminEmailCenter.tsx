@@ -16,17 +16,24 @@ import {
   ChevronUp,
   ExternalLink,
   Terminal,
-  Lock
+  Lock,
+  Server,
+  Zap,
+  Activity
 } from 'lucide-react';
 import { apiUrl } from '../../lib/api';
 
 interface EmailServiceStatus {
   configured: boolean;
-  provider: 'gmail' | 'smtp' | 'ethereal_test' | 'unconfigured';
+  provider: 'gmail' | 'smtp' | 'brevo' | 'sendgrid' | 'ses' | 'ethereal_test' | 'unconfigured';
   recipient: string;
   senderAddress?: string;
+  senderName?: string;
+  smtpHost?: string;
+  smtpPort?: number;
   verified: boolean;
   lastError?: string;
+  latencyMs?: number;
 }
 
 export const AdminEmailCenter: React.FC = () => {
@@ -42,12 +49,23 @@ export const AdminEmailCenter: React.FC = () => {
   const [showSetupModal, setShowSetupModal] = useState<boolean>(false);
   const [showAppPasswordGuide, setShowAppPasswordGuide] = useState<boolean>(false);
 
-  // Configuration Form State
+  // Multi-Provider Configuration Form State
+  const [selectedProvider, setSelectedProvider] = useState<'gmail' | 'brevo' | 'sendgrid' | 'ses' | 'smtp'>('gmail');
   const [configEmail, setConfigEmail] = useState<string>('secretariat@nmogujarat.org');
   const [configAppPassword, setConfigAppPassword] = useState<string>('');
+  const [smtpHost, setSmtpHost] = useState<string>('smtp-relay.brevo.com');
+  const [smtpPort, setSmtpPort] = useState<number>(587);
+  const [smtpUser, setSmtpUser] = useState<string>('');
+  const [smtpPass, setSmtpPass] = useState<string>('');
+  const [fromName, setFromName] = useState<string>('National Medicos Organisation Gujarat');
+  const [fromEmail, setFromEmail] = useState<string>('secretariat@nmogujarat.org');
   const [recipientEmail, setRecipientEmail] = useState<string>('secretariat@nmogujarat.org');
   const [isSavingConfig, setIsSavingConfig] = useState<boolean>(false);
   const [configFeedback, setConfigFeedback] = useState<{ type: 'success' | 'warning' | 'error'; message: string } | null>(null);
+
+  // Live TCP ping state
+  const [isPinging, setIsPinging] = useState<boolean>(false);
+  const [pingResult, setPingResult] = useState<{ success: boolean; latencyMs: number; error?: string } | null>(null);
 
   // Test Email State
   const [testRecipient, setTestRecipient] = useState<string>(currentUser?.email || 'secretariat@nmogujarat.org');
@@ -78,9 +96,22 @@ export const AdminEmailCenter: React.FC = () => {
           setEmailStatus(data.emailService);
           if (data.emailService.senderAddress) {
             setConfigEmail(data.emailService.senderAddress);
+            setFromEmail(data.emailService.senderAddress);
+          }
+          if (data.emailService.senderName) {
+            setFromName(data.emailService.senderName);
           }
           if (data.emailService.recipient) {
             setRecipientEmail(data.emailService.recipient);
+          }
+          if (data.emailService.smtpHost) {
+            setSmtpHost(data.emailService.smtpHost);
+          }
+          if (data.emailService.smtpPort) {
+            setSmtpPort(data.emailService.smtpPort);
+          }
+          if (data.emailService.provider && data.emailService.provider !== 'unconfigured' && data.emailService.provider !== 'ethereal_test') {
+            setSelectedProvider(data.emailService.provider as any);
           }
         }
       }
@@ -95,13 +126,63 @@ export const AdminEmailCenter: React.FC = () => {
     checkEmailStatus();
   }, []);
 
+  const handleSelectPreset = (p: 'gmail' | 'brevo' | 'sendgrid' | 'ses' | 'smtp') => {
+    setSelectedProvider(p);
+    setPingResult(null);
+    setConfigFeedback(null);
+    if (p === 'gmail') {
+      setSmtpHost('smtp.gmail.com');
+      setSmtpPort(587);
+    } else if (p === 'brevo') {
+      setSmtpHost('smtp-relay.brevo.com');
+      setSmtpPort(587);
+      if (!smtpUser && configEmail) setSmtpUser(configEmail);
+    } else if (p === 'sendgrid') {
+      setSmtpHost('smtp.sendgrid.net');
+      setSmtpPort(587);
+      setSmtpUser('apikey');
+    } else if (p === 'ses') {
+      setSmtpHost('email-smtp.us-east-1.amazonaws.com');
+      setSmtpPort(587);
+    }
+  };
+
+  const handlePingTest = async () => {
+    setIsPinging(true);
+    setPingResult(null);
+    try {
+      const targetHost = selectedProvider === 'gmail' ? 'smtp.gmail.com' : (smtpHost.trim() || 'smtp.gmail.com');
+      const targetPort = selectedProvider === 'gmail' ? 587 : (Number(smtpPort) || 587);
+      const res = await fetch(apiUrl('/api/email/ping'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host: targetHost, port: targetPort })
+      });
+      const data = await res.json();
+      setPingResult(data);
+    } catch (err: any) {
+      setPingResult({ success: false, latencyMs: 0, error: err.message || 'Ping failed' });
+    } finally {
+      setIsPinging(false);
+    }
+  };
+
   // Save Nodemailer credentials
   const handleSaveCredentials = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!configEmail.trim() || !configAppPassword.trim()) {
+
+    if (selectedProvider === 'gmail' && (!configEmail.trim() || !configAppPassword.trim())) {
       setConfigFeedback({
         type: 'error',
         message: 'Please provide both your Gmail account and 16-character Google App Password.'
+      });
+      return;
+    }
+
+    if (selectedProvider !== 'gmail' && (!smtpHost.trim() || !smtpUser.trim() || !smtpPass.trim())) {
+      setConfigFeedback({
+        type: 'error',
+        message: 'Please provide SMTP Host, Port, Username, and Password / API Key.'
       });
       return;
     }
@@ -110,14 +191,29 @@ export const AdminEmailCenter: React.FC = () => {
     setConfigFeedback(null);
 
     try {
+      const payload: Record<string, any> = {
+        provider: selectedProvider,
+        fromName: fromName.trim(),
+        fromEmail: fromEmail.trim() || configEmail.trim(),
+        recipientEmail: recipientEmail.trim()
+      };
+
+      if (selectedProvider === 'gmail') {
+        payload.gmailUser = configEmail.trim();
+        payload.gmailAppPassword = configAppPassword.trim();
+        payload.smtpHost = 'smtp.gmail.com';
+        payload.smtpPort = 587;
+      } else {
+        payload.smtpHost = smtpHost.trim();
+        payload.smtpPort = Number(smtpPort) || 587;
+        payload.smtpUser = smtpUser.trim();
+        payload.smtpPass = smtpPass.trim();
+      }
+
       const res = await fetch(apiUrl('/api/email/save-config'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          gmailUser: configEmail.trim(),
-          gmailAppPassword: configAppPassword.trim(),
-          recipientEmail: recipientEmail.trim()
-        })
+        body: JSON.stringify(payload)
       });
 
       const data = await res.json();
@@ -125,11 +221,11 @@ export const AdminEmailCenter: React.FC = () => {
         const isVerified = Boolean(data.emailService?.verified);
         setConfigFeedback({
           type: isVerified ? 'success' : 'warning',
-          message: data.message || (isVerified ? 'Configuration verified and saved!' : 'Configuration saved securely to server!')
+          message: data.message || (isVerified ? 'Configuration verified and activated!' : 'Configuration saved securely to server!')
         });
         setEmailStatus(data.emailService);
         if (isVerified) {
-          setTimeout(() => setShowSetupModal(false), 2000);
+          setTimeout(() => setShowSetupModal(false), 2500);
         }
       } else {
         setConfigFeedback({
@@ -342,10 +438,10 @@ export const AdminEmailCenter: React.FC = () => {
               </div>
               <p className="text-xs text-slate-500 mt-0.5">
                 {emailStatus?.verified
-                  ? `Active Sender: ${emailStatus.senderAddress || 'Verified'} | Receiving Inquiries at: ${emailStatus.recipient || 'secretariat@nmogujarat.org'}`
+                  ? `Active Sender: ${emailStatus.senderAddress || 'Verified'} | Provider: ${(emailStatus.provider || 'SMTP').toUpperCase()}${emailStatus.latencyMs ? ` (${emailStatus.latencyMs}ms)` : ''} | Receiving Inquiries at: ${emailStatus.recipient || 'secretariat@nmogujarat.org'}`
                   : emailStatus?.lastError
                   ? `Notice: ${emailStatus.lastError}`
-                  : 'Nodemailer requires a Gmail Account & 16-character Google App Password to dispatch emails.'}
+                  : 'Nodemailer requires a Gmail Account & 16-character App Password, or Brevo / SendGrid / Custom SMTP Relay to dispatch emails.'}
               </p>
             </div>
           </div>
@@ -476,68 +572,292 @@ export const AdminEmailCenter: React.FC = () => {
         {/* Super Admin Quick Config Box */}
         {showSetupModal && isSuperAdmin && (
           <form onSubmit={handleSaveCredentials} className="mt-5 pt-5 border-t border-slate-200 space-y-4 animate-in fade-in duration-200">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <div className="flex items-center gap-2">
-                <Key className="w-4 h-4 text-red-700" />
+                <Server className="w-4 h-4 text-red-700" />
                 <span className="font-bold text-xs uppercase tracking-wider text-slate-800">
-                  Update Nodemailer Gmail Transporter Credentials
+                  Mass Mailing & SMTP Relay Architecture
                 </span>
               </div>
-              <span className="text-[10px] text-slate-500 font-medium">
-                Encrypted server storage
-              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handlePingTest}
+                  disabled={isPinging}
+                  className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 text-slate-700 font-semibold rounded-md text-[11px] flex items-center gap-1 transition-colors cursor-pointer"
+                >
+                  <Activity className={`w-3 h-3 text-red-600 ${isPinging ? 'animate-spin' : ''}`} />
+                  <span>{isPinging ? 'Pinging Relay...' : 'Ping Relay (2s)'}</span>
+                </button>
+                <span className="text-[10px] text-slate-500 font-medium hidden sm:inline">
+                  Anti-Timeout Mode Active
+                </span>
+              </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+            {/* Provider Selector Tabs */}
+            <div>
+              <label className="block text-slate-700 font-semibold text-xs mb-1.5">
+                Select Outgoing Email Provider
+              </label>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleSelectPreset('gmail')}
+                  className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                    selectedProvider === 'gmail'
+                      ? 'border-red-600 bg-red-50/70 text-red-950 font-bold shadow-xs'
+                      : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-bold">Gmail / Workspace</span>
+                    <Zap className="w-3.5 h-3.5 text-red-600" />
+                  </div>
+                  <span className="text-[10px] text-slate-500 font-normal block leading-tight">
+                    Standard personal/org mail (Port 587)
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleSelectPreset('brevo')}
+                  className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                    selectedProvider === 'brevo'
+                      ? 'border-red-600 bg-red-50/70 text-red-950 font-bold shadow-xs'
+                      : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-bold">Brevo (Mass Mail)</span>
+                    <span className="px-1.5 py-0.2 bg-emerald-600 text-white rounded text-[9px] font-bold">Recommended</span>
+                  </div>
+                  <span className="text-[10px] text-slate-500 font-normal block leading-tight">
+                    Free 300/day, no daily throttle
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleSelectPreset('sendgrid')}
+                  className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                    selectedProvider === 'sendgrid'
+                      ? 'border-red-600 bg-red-50/70 text-red-950 font-bold shadow-xs'
+                      : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-bold">SendGrid</span>
+                    <Server className="w-3.5 h-3.5 text-blue-600" />
+                  </div>
+                  <span className="text-[10px] text-slate-500 font-normal block leading-tight">
+                    API Key relay (Port 587)
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleSelectPreset('smtp')}
+                  className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                    selectedProvider === 'smtp'
+                      ? 'border-red-600 bg-red-50/70 text-red-950 font-bold shadow-xs'
+                      : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-bold">Custom SMTP Relay</span>
+                    <Key className="w-3.5 h-3.5 text-slate-600" />
+                  </div>
+                  <span className="text-[10px] text-slate-500 font-normal block leading-tight">
+                    Amazon SES, Mailjet, or VPS
+                  </span>
+                </button>
+              </div>
+            </div>
+
+            {/* Live Ping Banner */}
+            {pingResult && (
+              <div className={`p-2.5 rounded-xl border text-xs flex items-center justify-between animate-in fade-in duration-200 ${
+                pingResult.success
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                  : 'bg-red-50 border-red-200 text-red-900'
+              }`}>
+                <div className="flex items-center gap-2">
+                  {pingResult.success ? (
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                  ) : (
+                    <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+                  )}
+                  <span>
+                    {pingResult.success
+                      ? `Socket connected to ${selectedProvider === 'gmail' ? 'smtp.gmail.com' : smtpHost}:587 in ${pingResult.latencyMs}ms! Port is open and responsive.`
+                      : `Ping failed: ${pingResult.error}`}
+                  </span>
+                </div>
+                {pingResult.success && (
+                  <span className="text-[10px] font-bold px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded-full shrink-0">
+                    {pingResult.latencyMs} ms
+                  </span>
+                )}
+              </div>
+            )}
+
+            {/* Fields for Gmail */}
+            {selectedProvider === 'gmail' && (
+              <div className="space-y-3">
+                <div className="p-3 bg-blue-50/80 border border-blue-200/80 rounded-xl text-xs text-blue-900">
+                  <div className="font-bold flex items-center gap-1.5 mb-1">
+                    <Zap className="w-3.5 h-3.5 text-blue-700" />
+                    <span>Gmail High-Speed Direct Submission</span>
+                  </div>
+                  <p className="text-[11px] leading-relaxed text-blue-800">
+                    Connects directly via <code className="bg-blue-100 px-1 py-0.5 rounded font-mono font-bold">smtp.gmail.com:587</code> with STARTTLS and anti-timeout protections. For mass mailing to 500+ doctors, Brevo or SendGrid is recommended to avoid Google's daily personal quotas.
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+                  <div>
+                    <label className="block text-slate-700 font-semibold mb-1">
+                      Google / Gmail Account Email *
+                    </label>
+                    <input
+                      type="email"
+                      required
+                      value={configEmail}
+                      onChange={(e) => setConfigEmail(e.target.value)}
+                      placeholder="devanshshah768@gmail.com"
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs"
+                    />
+                    <span className="text-[10px] text-slate-400 mt-1 block">
+                      The Google account that generated the App Password.
+                    </span>
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-700 font-semibold mb-1">
+                      Google App Password (16 Letters) *
+                    </label>
+                    <input
+                      type="password"
+                      required
+                      value={configAppPassword}
+                      onChange={(e) => setConfigAppPassword(e.target.value)}
+                      placeholder="xxxx xxxx xxxx xxxx"
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs font-mono"
+                    />
+                    <span className="text-[10px] text-slate-400 mt-1 block">
+                      16-character Google App Password (grouped spaces are automatically removed).
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Fields for Brevo, SendGrid, or Custom SMTP */}
+            {selectedProvider !== 'gmail' && (
+              <div className="space-y-3">
+                {selectedProvider === 'brevo' && (
+                  <div className="p-3 bg-emerald-50/80 border border-emerald-200/80 rounded-xl text-xs text-emerald-950">
+                    <div className="font-bold flex items-center gap-1.5 mb-1">
+                      <Sparkles className="w-3.5 h-3.5 text-emerald-700" />
+                      <span>Brevo (Sendinblue) Mass Communication Setup</span>
+                    </div>
+                    <p className="text-[11px] leading-relaxed text-emerald-900">
+                      Preconfigured for <code className="bg-emerald-100 px-1 py-0.5 rounded font-mono font-bold">smtp-relay.brevo.com:587</code>. Enter your Brevo account email as the username and your Master SMTP Key (from <a href="https://app.brevo.com/settings/keys/smtp" target="_blank" rel="noreferrer" className="underline font-bold">brevo.com/settings/keys/smtp</a>) as the password.
+                    </p>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+                  <div>
+                    <label className="block text-slate-700 font-semibold mb-1">
+                      SMTP Relay Host *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={smtpHost}
+                      onChange={(e) => setSmtpHost(e.target.value)}
+                      placeholder="smtp-relay.brevo.com or smtp.sendgrid.net"
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs font-mono"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-700 font-semibold mb-1">
+                      SMTP Port *
+                    </label>
+                    <input
+                      type="number"
+                      required
+                      value={smtpPort}
+                      onChange={(e) => setSmtpPort(Number(e.target.value))}
+                      placeholder="587"
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs font-mono"
+                    />
+                    <span className="text-[10px] text-slate-400 mt-1 block">
+                      587 (STARTTLS recommended) or 465 (SSL).
+                    </span>
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-700 font-semibold mb-1">
+                      SMTP Username / Account *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={smtpUser}
+                      onChange={(e) => setSmtpUser(e.target.value)}
+                      placeholder={selectedProvider === 'sendgrid' ? 'apikey' : 'your-brevo-login@email.com'}
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-700 font-semibold mb-1">
+                      SMTP Password / API Key *
+                    </label>
+                    <input
+                      type="password"
+                      required
+                      value={smtpPass}
+                      onChange={(e) => setSmtpPass(e.target.value)}
+                      placeholder="Master SMTP Key or API token"
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs font-mono"
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Sender and Recipient Details */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs pt-1 border-t border-slate-100">
               <div>
-                <label className="block text-slate-700 font-semibold mb-1">
-                  Google / Gmail Account Email *
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Sender Display Name
+                </label>
+                <input
+                  type="text"
+                  value={fromName}
+                  onChange={(e) => setFromName(e.target.value)}
+                  placeholder="National Medicos Organisation Gujarat"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Primary Contact Notification Recipient
                 </label>
                 <input
                   type="email"
-                  required
-                  value={configEmail}
-                  onChange={(e) => setConfigEmail(e.target.value)}
-                  placeholder="secretariat@nmogujarat.org or yourgmail@gmail.com"
+                  value={recipientEmail}
+                  onChange={(e) => setRecipientEmail(e.target.value)}
+                  placeholder="secretariat@nmogujarat.org"
                   className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs"
                 />
-                <span className="text-[10px] text-slate-400 mt-1 block">
-                  The Google account that generated the App Password.
-                </span>
               </div>
-
-              <div>
-                <label className="block text-slate-700 font-semibold mb-1">
-                  Google App Password (16 Letters) *
-                </label>
-                <input
-                  type="password"
-                  required
-                  value={configAppPassword}
-                  onChange={(e) => setConfigAppPassword(e.target.value)}
-                  placeholder="xxxx xxxx xxxx xxxx"
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs font-mono"
-                />
-                <span className="text-[10px] text-slate-400 mt-1 block">
-                  16-character Google App Password (grouped spaces are automatically removed).
-                </span>
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Primary Contact Notification Recipient
-              </label>
-              <input
-                type="email"
-                value={recipientEmail}
-                onChange={(e) => setRecipientEmail(e.target.value)}
-                placeholder="secretariat@nmogujarat.org"
-                className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs"
-              />
-              <span className="text-[10px] text-slate-400 mt-1 block">
-                Contact Us inquiries submitted by doctors and visitors will be delivered to this address.
-              </span>
             </div>
 
             {configFeedback && (
@@ -573,7 +893,7 @@ export const AdminEmailCenter: React.FC = () => {
                 className="px-4 py-2 bg-red-700 hover:bg-red-800 disabled:opacity-50 text-white font-bold rounded-lg text-xs shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
               >
                 <CheckCircle2 className="w-4 h-4" />
-                <span>{isSavingConfig ? 'Verifying with Gmail SMTP...' : 'Save & Verify Transporter'}</span>
+                <span>{isSavingConfig ? 'Testing Relay Connection...' : 'Save & Verify Relay'}</span>
               </button>
             </div>
           </form>
@@ -750,14 +1070,20 @@ export const AdminEmailCenter: React.FC = () => {
 
         {/* Dispatch Bar */}
         <div className="pt-4 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
-          <div className="text-slate-500">
-            Target Recipients: <strong className="text-slate-900">{recipientCount} verified address{recipientCount !== 1 ? 'es' : ''}</strong>
+          <div className="space-y-0.5">
+            <div className="text-slate-500">
+              Target Recipients: <strong className="text-slate-900">{recipientCount} verified address{recipientCount !== 1 ? 'es' : ''}</strong>
+            </div>
+            <div className="text-[11px] text-emerald-700 flex items-center gap-1 font-medium">
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+              <span>Anti-Timeout Mass Delivery: Auto-batched into chunks of 30 via BCC with rate-limiting pauses.</span>
+            </div>
           </div>
 
           <button
             type="submit"
             disabled={isSending || recipientCount === 0}
-            className="px-6 py-2.5 bg-red-700 hover:bg-red-800 disabled:opacity-50 text-white font-bold rounded-lg shadow-xs flex items-center justify-center gap-2 transition-colors cursor-pointer"
+            className="px-6 py-2.5 bg-red-700 hover:bg-red-800 disabled:opacity-50 text-white font-bold rounded-lg shadow-xs flex items-center justify-center gap-2 transition-colors cursor-pointer shrink-0"
           >
             <Send className="w-4 h-4" />
             <span>{isSending ? 'Sending to All Recipients...' : `Dispatch to ${recipientCount || 0} Recipient${recipientCount !== 1 ? 's' : ''}`}</span>

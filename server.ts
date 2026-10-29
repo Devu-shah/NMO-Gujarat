@@ -20,7 +20,8 @@ import {
   sendTestEmail,
   sendBroadcastEmail,
   saveStoredSmtpConfig,
-  loadStoredSmtpConfig
+  loadStoredSmtpConfig,
+  pingSmtpConnection
 } from './src/server/emailService';
 
 dotenv.config();
@@ -805,16 +806,54 @@ Recipient:        ${RECIPIENT_EMAIL}
     }
   });
 
+  // Live TCP/TLS connection ping tester (under 2 seconds, no hanging)
+  app.post('/api/email/ping', async (req, res) => {
+    try {
+      const { host, port } = req.body || {};
+      const stored = loadStoredSmtpConfig();
+      const targetHost = host?.trim() || stored?.smtpHost || (stored?.gmailUser ? 'smtp.gmail.com' : 'smtp.gmail.com');
+      const targetPort = Number(port || stored?.smtpPort || 587);
+
+      const pingResult = await pingSmtpConnection(targetHost, targetPort);
+      return res.status(200).json({
+        success: pingResult.success,
+        host: targetHost,
+        port: targetPort,
+        latencyMs: pingResult.latencyMs,
+        error: pingResult.error
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        success: false,
+        error: err?.message || 'Error executing ping test'
+      });
+    }
+  });
+
   // Save SMTP / Gmail configuration securely (Super Admin Only)
   app.post('/api/email/save-config', async (req, res) => {
     try {
-      const { gmailUser, gmailAppPassword, smtpHost, smtpPort, smtpUser, smtpPass, smtpSecure, recipientEmail } = req.body || {};
+      const {
+        provider,
+        gmailUser,
+        gmailAppPassword,
+        smtpHost,
+        smtpPort,
+        smtpUser,
+        smtpPass,
+        smtpSecure,
+        fromName,
+        fromEmail,
+        recipientEmail
+      } = req.body || {};
 
       const cleanUser = gmailUser?.trim().toLowerCase();
       const cleanPass = gmailAppPassword ? gmailAppPassword.replace(/\s+/g, '') : undefined;
       const cleanRecip = recipientEmail?.trim().toLowerCase();
+      const cleanFromEmail = fromEmail?.trim().toLowerCase();
 
       saveStoredSmtpConfig({
+        provider: provider || (smtpHost && !smtpHost.includes('gmail') ? 'smtp' : 'gmail'),
         gmailUser: cleanUser,
         gmailAppPassword: cleanPass,
         smtpHost: smtpHost?.trim(),
@@ -822,6 +861,8 @@ Recipient:        ${RECIPIENT_EMAIL}
         smtpUser: smtpUser?.trim(),
         smtpPass: smtpPass ? smtpPass.replace(/\s+/g, '') : undefined,
         smtpSecure: Boolean(smtpSecure),
+        fromName: fromName?.trim(),
+        fromEmail: cleanFromEmail,
         recipientEmail: cleanRecip
       });
 
@@ -830,8 +871,11 @@ Recipient:        ${RECIPIENT_EMAIL}
         const adminDb = getAdminFirestore();
         if (adminDb) {
           await adminDb.collection('Settings').doc('smtpConfig').set({
+            provider: provider || 'gmail',
             gmailUser: cleanUser,
             recipientEmail: cleanRecip,
+            fromName: fromName?.trim() || 'National Medicos Organisation Gujarat',
+            fromEmail: cleanFromEmail || cleanUser || null,
             smtpHost: smtpHost?.trim() || null,
             smtpPort: smtpPort ? Number(smtpPort) : null,
             smtpUser: smtpUser?.trim() || null,
@@ -850,8 +894,8 @@ Recipient:        ${RECIPIENT_EMAIL}
         saved: true,
         verified: status.verified,
         message: status.verified
-          ? 'Email transporter configuration verified and activated successfully!'
-          : 'Credentials saved securely! Notice from Gmail SMTP: ' + (status.lastError || 'Check 2-Step Verification and 16-character App Password.'),
+          ? `Transporter verified and activated successfully! (${status.latencyMs ? `${status.latencyMs}ms` : 'Ready'})`
+          : `Credentials saved securely! Notice from SMTP relay: ${status.lastError || 'Check credentials'}`,
         emailService: status
       });
     } catch (err: any) {
