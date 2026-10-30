@@ -90,33 +90,7 @@ export async function submitSupportInquiry(data: {
     // 1. Save to Firestore 'inquiries' collection
     await setDoc(doc(db, 'inquiries', ticketId), inquiryDoc);
 
-    // 2. Also record in 'mail' collection for automated Firebase trigger email notification
-    try {
-      await setDoc(doc(db, 'mail', `notify_${ticketId}`), {
-        to: [data.email.trim().toLowerCase()],
-        message: {
-          subject: `[${ticketId}] NMO Gujarat Support: Inquiry Received`,
-          text: `Namaste ${data.name},\n\nWe have received your inquiry regarding "${data.category}". Your Ticket Reference ID is ${ticketId}.\n\nSubject: ${data.subject}\n\nOur administrative team will review your query and respond shortly.\n\nYou can track and approve the solution anytime using your Reference ID on the portal.\n\nWarm regards,\nNational Medicos Organisation Gujarat`,
-          html: `<div style="font-family:sans-serif;color:#1e293b;padding:16px;">
-            <h2 style="color:#b91c1c;">National Medicos Organisation Gujarat</h2>
-            <p>Namaste <strong>${data.name}</strong>,</p>
-            <p>Your inquiry has been registered under Reference ID: <strong style="font-size:16px;color:#b91c1c;">${ticketId}</strong>.</p>
-            <table style="width:100%;border-collapse:collapse;margin:16px 0;font-size:14px;">
-              <tr><td style="padding:6px;border-bottom:1px solid #e2e8f0;font-weight:bold;width:120px;">Category:</td><td style="padding:6px;border-bottom:1px solid #e2e8f0;">${data.category}</td></tr>
-              <tr><td style="padding:6px;border-bottom:1px solid #e2e8f0;font-weight:bold;">Subject:</td><td style="padding:6px;border-bottom:1px solid #e2e8f0;">${data.subject}</td></tr>
-            </table>
-            <p>Our secretariat will review and provide a resolution. You can review and approve the solution on the NMO Gujarat portal using this Reference ID.</p>
-            <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0;"/>
-            <p style="font-size:12px;color:#64748b;">NMO Gujarat • "प्राणिनाम् आर्तिनाशनम्"</p>
-          </div>`
-        },
-        createdAt: timestamp
-      });
-    } catch (mailErr) {
-      console.warn('Notice queuing trigger email doc:', mailErr);
-    }
-
-    // 3. Dispatch to backend Nodemailer email service
+    // 2. Dispatch to backend Nodemailer email service
     try {
       await fetch(apiUrl('/api/contact'), {
         method: 'POST',
@@ -193,20 +167,41 @@ export function normalizeInquiryDoc(data: any, docId: string): SupportInquiry {
 }
 
 /**
- * Fetch a single ticket by Reference ID or Email
+ * Fetch a single ticket by Reference ID and verified Email
  */
-export async function getInquiryByTicketId(ticketId: string): Promise<SupportInquiry | null> {
+export async function getInquiryByTicketId(
+  ticketId: string,
+  emailVerification?: string
+): Promise<SupportInquiry | null> {
   const cleanId = ticketId.trim();
   if (!cleanId) return null;
 
+  // 1. If email verification is supplied, query through the secure server-verified endpoint
+  if (emailVerification && emailVerification.trim()) {
+    try {
+      const resp = await fetch(apiUrl('/api/inquiries/track'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ticketId: cleanId, email: emailVerification.trim().toLowerCase() })
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data.inquiry) {
+          return normalizeInquiryDoc(data.inquiry, data.inquiry.id || cleanId);
+        }
+      }
+    } catch (apiErr) {
+      console.warn('Backend ticket verification query notice:', apiErr);
+    }
+  }
+
+  // 2. Direct Firestore query (permitted for authenticated owners and administrators)
   try {
-    // 1. Direct document lookup by ID
     const snap = await getDoc(doc(db, 'inquiries', cleanId));
     if (snap.exists()) {
       return normalizeInquiryDoc(snap.data(), snap.id);
     }
 
-    // 2. Query by ticketId field (case-tolerant uppercase search)
     const q = query(collection(db, 'inquiries'), where('ticketId', '==', cleanId.toUpperCase()), limit(1));
     const querySnap = await getDocs(q);
     if (!querySnap.empty) {
@@ -214,7 +209,7 @@ export async function getInquiryByTicketId(ticketId: string): Promise<SupportInq
       return normalizeInquiryDoc(matchDoc.data(), matchDoc.id);
     }
   } catch (err) {
-    console.warn('Error fetching inquiry by ticketId:', err);
+    console.warn('Notice querying inquiry from Firestore:', err);
   }
   return null;
 }

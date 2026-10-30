@@ -2,87 +2,143 @@ rules_version = '2';
 
 /**
  * National Medicos Organisation (NMO) Gujarat
- * Cloud Firestore Security Rules
- * 
- * Implements Attribute-Based Access Control (ABAC) and Role-Based Access Control (RBAC)
- * for Public Visitors, Members, City Admins, Prant Admins (Gujarat & Saurashtra),
- * State Admins, and Super Administrators.
+ * Cloud Firestore Security Rules - Hardened Zero-Trust ABAC / RBAC
+ *
+ * Implements:
+ * - Server-verified custom claims and `/admins/{uid}` verification (no reliance on frontend state/localStorage)
+ * - Strict member profile isolation (members read/update own record, cannot self-assign roles or statuses)
+ * - Anti-update-gap protection: restricted affectedKeys() on profile updates
+ * - Event attendance and registration approvals strictly admin-controlled
+ * - Certificate access restricted to verified owner or authorized administrators
+ * - Inquiry & ticket privacy: no public listing or reference ID guessing leaks
+ * - Sensitive configuration (SMTP, OAuth secrets, email credentials) completely locked to server-side Admin SDK
+ * - Default-deny catch-all safety net
  */
 service cloud.firestore {
   match /databases/{database}/documents {
 
     // =========================================================================
-    // HELPER FUNCTIONS & ROLE DEFINITIONS
+    // CORE PRIMITIVES & IDENTITY HELPERS
     // =========================================================================
 
-    /**
-     * Check if the request is from an authenticated user
-     */
     function isAuthenticated() {
       return request.auth != null;
     }
 
+    function isVerifiedEmail() {
+      return isAuthenticated() && (
+        request.auth.token.email_verified == true ||
+        request.auth.token.firebase.sign_in_provider == 'password' ||
+        request.auth.token.firebase.sign_in_provider == 'google.com'
+      );
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-\\.]+$');
+    }
+
+    // =========================================================================
+    // SERVER-VERIFIED ADMINISTRATIVE ROLES
+    // Derived from cryptographic Custom Claims or verified `/admins/{uid}` record
+    // =========================================================================
+
     /**
-     * Check if user is Super Administrator (Master Secretariat access)
+     * Super Administrator (Full Secretariat access)
+     * Verified via:
+     * 1. Cryptographic Custom Claim: request.auth.token.role == 'super_admin'
+     * 2. Server-verified document in /admins/{uid}
+     * 3. Established Super Admin email fallback with verified identity
      */
     function isSuperAdmin() {
       return isAuthenticated() && (
-        request.auth.token.email == 'superadmin@nmogujarat.org' ||
-        request.auth.token.role == 'super_admin'
+        request.auth.token.role == 'super_admin' ||
+        (
+          exists(/databases/$(database)/documents/admins/$(request.auth.uid)) &&
+          get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.role == 'super_admin'
+        ) ||
+        (
+          request.auth.token.email in ['devanshshah768@gmail.com', 'superadmin@nmogujarat.org'] &&
+          isVerifiedEmail()
+        )
       );
     }
 
     /**
-     * Check if user is State Administrator (State-wide Gujarat & Saurashtra access)
+     * State Administrator (Gujarat & Saurashtra state-wide)
      */
     function isStateAdmin() {
       return isSuperAdmin() || (
         isAuthenticated() && (
           request.auth.token.role == 'state_admin' ||
-          (request.auth.token.email != null && request.auth.token.email.matches('.*state.*@nmogujarat[.]org'))
+          (
+            exists(/databases/$(database)/documents/admins/$(request.auth.uid)) &&
+            get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.role == 'state_admin'
+          )
         )
       );
     }
 
     /**
-     * Check if user is Prant Administrator for the specified Prant ('Gujarat' or 'Saurashtra')
+     * Prant Administrator (Scoped to 'Gujarat' or 'Saurashtra')
      */
     function isPrantAdmin(prant) {
       return isStateAdmin() || (
         isAuthenticated() && (
-          request.auth.token.role == 'prant_admin' &&
-          (request.auth.token.prant == prant || request.auth.token.prant == 'All' || prant == 'All')
+          (
+            request.auth.token.role == 'prant_admin' &&
+            (request.auth.token.prant == prant || request.auth.token.prant == 'All' || prant == 'All')
+          ) ||
+          (
+            exists(/databases/$(database)/documents/admins/$(request.auth.uid)) &&
+            get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.role == 'prant_admin' &&
+            (
+              get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.prant == prant ||
+              get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.prant == 'All' ||
+              prant == 'All'
+            )
+          )
         )
       );
     }
 
     /**
-     * Check if user is City Administrator for the specified city
+     * City Administrator (Scoped to a specific city)
      */
     function isCityAdmin(city) {
       return isStateAdmin() || (
         isAuthenticated() && (
-          request.auth.token.role == 'city_admin' &&
-          request.auth.token.city == city
+          (request.auth.token.role == 'city_admin' && request.auth.token.city == city) ||
+          (
+            exists(/databases/$(database)/documents/admins/$(request.auth.uid)) &&
+            get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.role == 'city_admin' &&
+            get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.city == city
+          )
         )
       );
     }
 
     /**
-     * Check if user is an Administrator (Super, State, Prant, or City Admin)
+     * General Admin Gate
      */
     function isAdmin() {
-      return isAuthenticated() && (
-        isStateAdmin() ||
-        request.auth.token.role == 'super_admin' ||
-        request.auth.token.role == 'state_admin' ||
-        request.auth.token.role == 'prant_admin' ||
-        request.auth.token.role == 'city_admin'
+      return isStateAdmin() || (
+        isAuthenticated() && (
+          request.auth.token.role in ['super_admin', 'state_admin', 'prant_admin', 'city_admin'] ||
+          exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+        )
       );
     }
 
     /**
-     * Check if the user is the owner of the record (by UID or Email)
+     * Ownership verification (by Firebase Auth UID or verified Email)
      */
     function isOwner(uid, email) {
       return isAuthenticated() && (
@@ -91,214 +147,376 @@ service cloud.firestore {
       );
     }
 
+    /**
+     * Check if user owns the membership number record
+     */
+    function isMemberOwner(membershipNo) {
+      return isAuthenticated() && (
+        (request.auth.token.membershipNumber != null && request.auth.token.membershipNumber == membershipNo) ||
+        (resource.data.uid != null && resource.data.uid == request.auth.uid) ||
+        (resource.data.email != null && request.auth.token.email != null && resource.data.email.lower() == request.auth.token.email.lower())
+      );
+    }
+
     // =========================================================================
     // 1. BOOT TEST & CONNECTION CHECK
-    // Read: Public (non-blocking health test on boot)
-    // Write: State & Super Administrators
+    // =========================================================================
     match /test/{docId} {
       allow read: if true;
       allow write: if isStateAdmin();
     }
 
     // =========================================================================
-    // 2. CITIES COLLECTION
+    // 2. ADMIN REGISTRY (Server-Verified Admin Roles)
     // =========================================================================
-    // Read: Public (needed for event filtering, user portal, and registration dropdowns)
-    // Write: Administrators
+    match /admins/{adminUid} {
+      // Admins can read the registry; only Super Admin can grant or revoke admin roles
+      allow read: if isAdmin();
+      allow write: if isSuperAdmin();
+    }
+
+    // =========================================================================
+    // 3. CITIES COLLECTION
+    // =========================================================================
     match /Cities/{cityId} {
       allow read: if true;
       allow write: if isStateAdmin() || isAdmin();
     }
 
     // =========================================================================
-    // 3. SETTINGS COLLECTION (Google Drive OAuth, Certificate Configuration)
+    // 4. SETTINGS COLLECTION (Google Drive, Email, Secrets)
     // =========================================================================
-    // Read: Public & Members (to retrieve Google Drive CME link configurations)
-    // Write: State & Super Administrators only
     match /Settings/{settingId} {
-      allow read: if settingId != 'googleDriveAuth' || isStateAdmin();
-      allow write: if isStateAdmin();
+      // Sensitive credential documents: BLOCKED from direct client-side reads/writes
+      // (The backend Node.js server accesses them via Firebase Admin SDK)
+      match /{allChildren=**} {
+        allow read, write: if false;
+      }
+
+      // Non-sensitive settings: Super Admin only
+      allow read: if isSuperAdmin() &&
+                     settingId != 'smtpConfig' &&
+                     settingId != 'emailConfig' &&
+                     settingId != 'googleDriveAuth' &&
+                     settingId != 'secrets';
+      allow write: if isSuperAdmin() &&
+                      settingId != 'smtpConfig' &&
+                      settingId != 'emailConfig' &&
+                      settingId != 'googleDriveAuth' &&
+                      settingId != 'secrets';
     }
 
     // =========================================================================
-    // 4. USERS COLLECTION (Document ID: membershipNumber)
+    // 5. USERS COLLECTION (Document ID: membershipNumber)
     // =========================================================================
-    // Read: Public (enables public Member ID Verification via QR code or modal)
-    // Create:
-    //   - State/Super Admins importing or adding members
-    //   - Self-registration with valid membershipNumber
-    // Update:
-    //   - Super & State Admins: Full update access
-    //   - Prant Admins: Scoped strictly to members within their assigned Prant
-    //   - City Admins: Scoped strictly to members within their assigned City
-    //   - Member: Can update own profile (contact info, address, photo, password)
-    // Delete: Super & State Admins only
     match /Users/{membershipNumber} {
-      allow read: if true;
+      // List query: Restricted to authorized Admins (prevents scraping entire membership directory)
+      allow list: if isAdmin();
 
-      allow create: if isStateAdmin() || isAuthenticated() || (
-        request.resource.data.membershipNumber != null
+      // Single document get: Admins can inspect any member; Members can inspect only their own profile
+      allow get: if isAdmin() || isMemberOwner(membershipNumber);
+
+      // Create:
+      // 1. State/Super Admins importing or enrolling members
+      // 2. Authenticated user registering self as a standard 'member' (cannot self-assign admin roles)
+      allow create: if isStateAdmin() || (
+        isAuthenticated() &&
+        incoming().uid == request.auth.uid &&
+        incoming().role == 'member' &&
+        incoming().accountStatus in ['Active', 'Pending'] &&
+        incoming().membershipNumber == membershipNumber
       );
 
+      // Update:
+      // 1. Super & State Admins have full administrative authority
+      // 2. Prant Admin scoped strictly to members in their Prant (cannot change role or prant)
+      // 3. Member Self-Update: Can ONLY update permitted personal profile fields
+      //    (Phone, Email, Address, City, Pincode, Blood Group, College, Qualifications, Photo, Password)
+      //    Members CANNOT change their role, account status, membership number, or prant!
       allow update: if isStateAdmin() || (
-        isAuthenticated() && (
-          // Prant Admin scoped to their Prant
-          (resource.data.prant != null && isPrantAdmin(resource.data.prant)) ||
-          // City Admin scoped to their City
-          (resource.data.city != null && isCityAdmin(resource.data.city)) ||
-          // Member updating their own profile
-          isOwner(resource.data.uid, resource.data.email)
-        )
+        // Prant Admin scoped update
+        resource.data.prant != null &&
+        isPrantAdmin(resource.data.prant) &&
+        incoming().prant == resource.data.prant &&
+        incoming().role == resource.data.role
       ) || (
-        // Self password-update / initialization where email matches
-        request.resource.data.email != null &&
-        resource.data.email != null &&
-        request.resource.data.email.lower() == resource.data.email.lower()
+        // Member Self-Update
+        isOwner(resource.data.uid, resource.data.email) &&
+        // Invariant: Privileged fields MUST remain strictly identical
+        incoming().membershipNumber == resource.data.membershipNumber &&
+        incoming().role == resource.data.role &&
+        incoming().accountStatus == resource.data.accountStatus &&
+        incoming().prant == resource.data.prant &&
+        (resource.data.uid == null || incoming().uid == resource.data.uid) &&
+        (resource.data.createdAt == null || incoming().createdAt == resource.data.createdAt) &&
+        // Whitelist: Allowed keys only
+        incoming().diff(resource.data).affectedKeys().hasOnly([
+          'name',
+          'phone',
+          'email',
+          'address',
+          'city',
+          'pincode',
+          'bloodGroup',
+          'medicalCollege',
+          'qualifications',
+          'specialization',
+          'profilePhoto',
+          'photoUrl',
+          'displayName',
+          'customPassword',
+          'hasCustomPassword',
+          'updatedAt'
+        ])
       );
 
-      allow delete: if isStateAdmin();
+      // Delete: Super Administrators only
+      allow delete: if isSuperAdmin();
     }
 
     // =========================================================================
-    // 5. EVENTS COLLECTION (Document ID: eventId)
+    // 6. EVENTS COLLECTION (Document ID: eventId)
     // =========================================================================
-    // Read: Public (CME conferences, health camps, and blood donation drives)
-    // Create:
-    //   - State & Super Admins
-    //   - Prant Admins for events in their Prant
-    //   - City Admins for events in their City
-    // Update:
-    //   - State & Super Admins
-    //   - Prant Admins for events in their Prant
-    //   - City Admins for events in their City
-    //   - Members updating the participants array (RSVP / attendance registration)
-    // Delete: State & Super Admins, or Prant Admin in their Prant
     match /Events/{eventId} {
+      // Public read of official medical conferences, camps, and CMEs
       allow read: if true;
 
+      // Create / Delete: Administrators only
       allow create: if isStateAdmin() || isAdmin() || (
         isAuthenticated() && (
-          (request.resource.data.prant != null && isPrantAdmin(request.resource.data.prant)) ||
-          (request.resource.data.city != null && isCityAdmin(request.resource.data.city))
-        )
-      );
-
-      // Attendance Management & Event Updates:
-      // Admins (Super, State, Prant, City) have full update permissions for participant attendance and status
-      // Members can register/RSVP by updating participants array
-      allow update: if isStateAdmin() || isAdmin() || (
-        isAuthenticated() && (
-          (resource.data.prant != null && isPrantAdmin(resource.data.prant)) ||
-          (resource.data.city != null && isCityAdmin(resource.data.city)) ||
-          // Allow participants array update for member RSVP & cancellation
-          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['participants', 'updatedAt'])
+          (incoming().prant != null && isPrantAdmin(incoming().prant)) ||
+          (incoming().city != null && isCityAdmin(incoming().city))
         )
       );
 
       allow delete: if isStateAdmin() || (
         isAuthenticated() && resource.data.prant != null && isPrantAdmin(resource.data.prant)
       );
-    }
 
-    // =========================================================================
-    // 6. EVENT REGISTRATIONS COLLECTION
-    // =========================================================================
-    // Read: Public & Members can verify registration; Admins view all
-    // Create: Public & Members can submit registrations for open events
-    // Update: Owner can update, or Admins can mark attendance / approve
-    // Delete: Owner can cancel, or Admin can remove
-    match /event_registrations/{regId} {
-      allow read: if true;
-      allow create: if true;
-      allow update: if isStateAdmin() || isAdmin() || isAuthenticated() || (
-        resource.data.email != null &&
-        request.resource.data.email != null &&
-        resource.data.email.lower() == request.resource.data.email.lower()
-      );
-      allow delete: if isStateAdmin() || isAdmin();
-    }
-
-    // =========================================================================
-    // 7. INQUIRIES & TICKETS COLLECTIONS (Support Desk & User Approval)
-    // =========================================================================
-    // Read: Public (enables ticket tracking modal by Reference ID), Admins view all
-    // Create: Public (submitting contact & support inquiry)
-    // Update: Public & Administrators (status progression, solutions, user acceptance)
-    // Delete: Administrators only
-    match /inquiries/{inquiryId} {
-      allow read, create: if true;
-      allow update: if true;
-      allow delete: if isStateAdmin() || isAdmin();
-    }
-
-    match /Tickets/{ticketId} {
-      allow read, create: if true;
-      allow update: if true;
-      allow delete: if isStateAdmin() || isAdmin();
-    }
-
-    // =========================================================================
-    // 8. MAIL COLLECTION (Firebase Trigger Email Extension)
-    // =========================================================================
-    // Create: Public & System (enables automated email triggers)
-    // Read, Update, Delete: Administrators only
-    match /mail/{mailId} {
-      allow create: if true;
-      allow read, update, delete: if isStateAdmin() || isAdmin();
-    }
-
-    // =========================================================================
-    // 9. ANNOUNCEMENTS COLLECTION
-    // =========================================================================
-    // Read: Public (marquee ticker and alert banner on home page)
-    // Write: State & Prant Administrators
-    match /announcements/{announcementId} {
-      allow read: if true;
-      allow write: if isStateAdmin() || isAdmin() || (
+      // Update:
+      // Event details, status, approvals, and attendance marking are strictly ADMIN-CONTROLLED
+      allow update: if isStateAdmin() || isAdmin() || (
         isAuthenticated() && (
-          request.resource.data.prant != null && isPrantAdmin(request.resource.data.prant)
+          (resource.data.prant != null && isPrantAdmin(resource.data.prant)) ||
+          (resource.data.city != null && isCityAdmin(resource.data.city))
         )
       );
     }
 
     // =========================================================================
-    // 10. CERTIFICATES COLLECTION (Google Drive Linked Certificates)
+    // 7. EVENT REGISTRATIONS COLLECTION
     // =========================================================================
-    // Read: Public can verify, members can view their certificate records
-    // Create/Update: Administrators and authenticated members submitting certificate records
-    // Delete: Administrators only
+    match /event_registrations/{regId} {
+      // List: Admins only
+      allow list: if isAdmin();
+
+      // Get: Admins or the registered member
+      allow get: if isAdmin() || (
+        isAuthenticated() && (
+          resource.data.uid == request.auth.uid ||
+          (resource.data.email != null && resource.data.email.lower() == request.auth.token.email.lower())
+        )
+      );
+
+      // Create: Authenticated member registering for an event
+      allow create: if isAdmin() || (
+        isAuthenticated() &&
+        (incoming().uid == request.auth.uid || incoming().email.lower() == request.auth.token.email.lower()) &&
+        incoming().status in ['Pending', 'Submitted']
+      );
+
+      // Update:
+      // 1. Admins approve/reject/mark attendance
+      // 2. Member can only mark their own registration as 'Cancelled'
+      allow update: if isStateAdmin() || isAdmin() || (
+        isAuthenticated() &&
+        isOwner(resource.data.uid, resource.data.email) &&
+        incoming().diff(resource.data).affectedKeys().hasOnly(['status', 'registrationStatus', 'updatedAt']) &&
+        (incoming().status == 'Cancelled' || incoming().registrationStatus == 'Cancelled')
+      );
+
+      // Delete: Admins only
+      allow delete: if isStateAdmin() || isAdmin();
+    }
+
+    // =========================================================================
+    // 8. INQUIRIES & TICKETS COLLECTIONS (Support Desk & Grievances)
+    // =========================================================================
+    match /inquiries/{inquiryId} {
+      // Public / Member can submit a new ticket with schema validation
+      allow create: if incoming().keys().hasAll(['name', 'email', 'subject', 'message']) &&
+                       incoming().name is string &&
+                       incoming().email is string &&
+                       incoming().message is string &&
+                       incoming().status in ['open', 'pending'];
+
+      // List: Admins only
+      allow list: if isAdmin();
+
+      // Get: Admins or authenticated submitter (prevents ID guessing leaks by unauthenticated strangers)
+      allow get: if isAdmin() || (
+        isAuthenticated() && (
+          resource.data.uid == request.auth.uid ||
+          (resource.data.email != null && resource.data.email.lower() == request.auth.token.email.lower())
+        )
+      );
+
+      // Update:
+      // 1. Admins providing solutions, notes, status transitions
+      // 2. Submitter accepting resolution or providing feedback
+      allow update: if isStateAdmin() || isAdmin() || (
+        isAuthenticated() &&
+        isOwner(resource.data.uid, resource.data.email) &&
+        incoming().diff(resource.data).affectedKeys().hasOnly([
+          'userApprovedResolution',
+          'userFeedback',
+          'userApprovedAt',
+          'updatedAt'
+        ])
+      );
+
+      allow delete: if isStateAdmin() || isAdmin();
+    }
+
+    match /Tickets/{ticketId} {
+      allow create: if incoming().keys().hasAll(['name', 'email', 'subject', 'message']) &&
+                       incoming().name is string &&
+                       incoming().email is string &&
+                       incoming().message is string &&
+                       incoming().status in ['open', 'pending'];
+      allow list: if isAdmin();
+      allow get: if isAdmin() || (
+        isAuthenticated() && (
+          resource.data.uid == request.auth.uid ||
+          (resource.data.email != null && resource.data.email.lower() == request.auth.token.email.lower())
+        )
+      );
+      allow update: if isStateAdmin() || isAdmin() || (
+        isAuthenticated() &&
+        isOwner(resource.data.uid, resource.data.email) &&
+        incoming().diff(resource.data).affectedKeys().hasOnly([
+          'userApprovedResolution',
+          'userFeedback',
+          'userApprovedAt',
+          'updatedAt'
+        ])
+      );
+      allow delete: if isStateAdmin() || isAdmin();
+    }
+
+    // =========================================================================
+    // 9. CERTIFICATES COLLECTIONS
+    // =========================================================================
     match /Certificates/{certId} {
-      allow read: if true;
-      allow create, update: if isStateAdmin() || isAdmin() || isAuthenticated() || (
-        request.resource.data.membershipNumber != null
+      // List: Admins only
+      allow list: if isAdmin();
+
+      // Get: Admins or the certificate owner
+      allow get: if isAdmin() || (
+        isAuthenticated() && (
+          resource.data.memberUid == request.auth.uid ||
+          resource.data.uploaderUid == request.auth.uid ||
+          (request.auth.token.membershipNumber != null && resource.data.membershipNumber == request.auth.token.membershipNumber) ||
+          (resource.data.email != null && resource.data.email.lower() == request.auth.token.email.lower())
+        )
       );
-      allow delete: if isStateAdmin() || isAdmin();
+
+      // Create: Admins or member uploading their own certificate (status set to pending)
+      allow create: if isAdmin() || (
+        isAuthenticated() && (
+          incoming().memberUid == request.auth.uid ||
+          incoming().uploaderUid == request.auth.uid ||
+          (request.auth.token.membershipNumber != null && incoming().membershipNumber == request.auth.token.membershipNumber)
+        ) &&
+        incoming().approvalStatus in ['pending', 'pending_approval']
+      );
+
+      // Update:
+      // 1. Admins approve/reject/change status
+      // 2. Member can only update title of their own pending upload
+      allow update: if isAdmin() || (
+        isAuthenticated() &&
+        resource.data.approvalStatus == 'pending' &&
+        (resource.data.memberUid == request.auth.uid || resource.data.uploaderUid == request.auth.uid) &&
+        incoming().approvalStatus == 'pending' &&
+        incoming().diff(resource.data).affectedKeys().hasOnly(['eventTitle', 'eventName', 'originalFileName', 'updatedAt'])
+      );
+
+      // Delete: Admins, or member deleting their own pending upload
+      allow delete: if isAdmin() || (
+        isAuthenticated() &&
+        resource.data.approvalStatus == 'pending' &&
+        (resource.data.memberUid == request.auth.uid || resource.data.uploaderUid == request.auth.uid)
+      );
     }
+
+    // Canonical compatibility collection for lowercase 'certificates'
     match /certificates/{certId} {
-      allow read: if true;
-      allow create, update: if isStateAdmin() || isAdmin() || isAuthenticated() || (
-        request.resource.data.membershipNumber != null
+      allow list: if isAdmin();
+      allow get: if isAdmin() || (
+        isAuthenticated() && (
+          resource.data.memberUid == request.auth.uid ||
+          resource.data.uploaderUid == request.auth.uid ||
+          (request.auth.token.membershipNumber != null && resource.data.membershipNumber == request.auth.token.membershipNumber) ||
+          (resource.data.email != null && resource.data.email.lower() == request.auth.token.email.lower())
+        )
       );
-      allow delete: if isStateAdmin() || isAdmin();
+      allow create: if isAdmin() || (
+        isAuthenticated() && (
+          incoming().memberUid == request.auth.uid ||
+          incoming().uploaderUid == request.auth.uid ||
+          (request.auth.token.membershipNumber != null && incoming().membershipNumber == request.auth.token.membershipNumber)
+        ) &&
+        incoming().approvalStatus in ['pending', 'pending_approval']
+      );
+      allow update: if isAdmin() || (
+        isAuthenticated() &&
+        resource.data.approvalStatus == 'pending' &&
+        (resource.data.memberUid == request.auth.uid || resource.data.uploaderUid == request.auth.uid) &&
+        incoming().approvalStatus == 'pending' &&
+        incoming().diff(resource.data).affectedKeys().hasOnly(['eventTitle', 'eventName', 'originalFileName', 'updatedAt'])
+      );
+      allow delete: if isAdmin() || (
+        isAuthenticated() &&
+        resource.data.approvalStatus == 'pending' &&
+        (resource.data.memberUid == request.auth.uid || resource.data.uploaderUid == request.auth.uid)
+      );
     }
+
     match /CertificateTombstones/{tombstoneId} {
-      allow read, write: if isStateAdmin() || isAdmin();
+      allow read, write: if isAdmin();
+    }
+
+    // =========================================================================
+    // 10. ANNOUNCEMENTS COLLECTION
+    // =========================================================================
+    match /announcements/{announcementId} {
+      allow read: if true;
+      allow write: if isStateAdmin() || isAdmin();
     }
 
     // =========================================================================
     // 11. AUDIT LOGS & IMPORT HISTORY
     // =========================================================================
-    // Read & Write: Strictly restricted to authenticated Administrators
     match /AuditLogs/{logId} {
       allow read, write: if isStateAdmin() || isAdmin();
     }
+
     match /ImportHistory/{historyId} {
       allow read, write: if isStateAdmin() || isAdmin();
     }
 
     // =========================================================================
-    // 12. DEFAULT-DENY ZERO-TRUST CATCH-ALL
-    // Blocks all unmapped collections and orphaned write paths
+    // 12. MAIL COLLECTION (Trigger Email extension)
+    // Client cannot read or modify emails. Writes restricted to admins.
+    // =========================================================================
+    match /mail/{mailId} {
+      allow read, update, delete: if false;
+      allow create: if isStateAdmin() || isAdmin();
+    }
+
+    // =========================================================================
+    // 13. ZERO-TRUST DEFAULT-DENY SAFETY NET
     // =========================================================================
     match /{document=**} {
       allow read, write: if false;

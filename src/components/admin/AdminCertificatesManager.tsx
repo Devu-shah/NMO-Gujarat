@@ -275,12 +275,8 @@ export const AdminCertificatesManager: React.FC = () => {
 
     // Listen to real-time changes in Certificates so admin approvals/rejections update immediately
     let unsub1: (() => void) | undefined;
-    let unsub2: (() => void) | undefined;
     try {
       unsub1 = onSnapshot(collection(db, 'Certificates'), () => {
-        loadPendingCertificates();
-      });
-      unsub2 = onSnapshot(collection(db, 'certificates'), () => {
         loadPendingCertificates();
       });
     } catch (e) {
@@ -289,7 +285,6 @@ export const AdminCertificatesManager: React.FC = () => {
 
     return () => {
       if (unsub1) unsub1();
-      if (unsub2) unsub2();
     };
   }, []);
 

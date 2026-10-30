@@ -1206,14 +1206,12 @@ export const syncCertificateToFirestore = async (cert: DriveCertificateFile): Pr
     };
 
     const promises: Promise<any>[] = [
-      setDoc(doc(db, 'Certificates', docId), dataToSave, { merge: true }).catch(() => {}),
-      setDoc(doc(db, 'certificates', docId), dataToSave, { merge: true }).catch(() => {})
+      setDoc(doc(db, 'Certificates', docId), dataToSave, { merge: true }).catch(() => {})
     ];
 
     if (cert.id && cert.id !== docId) {
       promises.push(
-        setDoc(doc(db, 'Certificates', cert.id), dataToSave, { merge: true }).catch(() => {}),
-        setDoc(doc(db, 'certificates', cert.id), dataToSave, { merge: true }).catch(() => {})
+        setDoc(doc(db, 'Certificates', cert.id), dataToSave, { merge: true }).catch(() => {})
       );
     }
 
@@ -1235,34 +1233,27 @@ export const fetchMemberCertificatesFromFirestore = async (
   const foundMap = new Map<string, DriveCertificateFile>();
 
   try {
-    const collectionsToTry = ['Certificates', 'certificates'];
-    const fieldsToTry = ['membershipNumber', 'membershipId'];
+    // Single direct query against canonical Certificates collection
+    const snap = await getDocs(
+      query(collection(db, 'Certificates'), where('membershipNumber', '==', cleanNo))
+    ).catch(() => ({ docs: [] } as any));
 
-    const queries = collectionsToTry.flatMap((col) =>
-      fieldsToTry.map((field) =>
-        getDocs(query(collection(db, col), where(field, '==', cleanNo))).catch(() => ({ docs: [] } as any))
-      )
-    );
-
-    const snapshots = await Promise.all(queries);
-    for (const snap of snapshots) {
-      if (snap?.docs && Array.isArray(snap.docs)) {
-        for (const docSnap of snap.docs) {
-          const data = docSnap.data() as DriveCertificateFile;
-          const id = data.id || (data as any).driveFileId || (data as any).certId || docSnap.id;
-          if (id && !foundMap.has(id)) {
-            const rawStatus = (data as any).status || data.approvalStatus || 'approved';
-            const isMissing = Boolean((data as any).isMissingFromDrive || rawStatus === 'missing' || data.approvalStatus === 'missing');
-            foundMap.set(id, {
-              ...data,
-              id,
-              status: isMissing ? 'missing' : rawStatus,
-              approvalStatus: (isMissing ? 'missing' : (data.approvalStatus || rawStatus || 'approved')) as any,
-              isMissingFromDrive: isMissing,
-              proxyViewUrl: data.proxyViewUrl || `/api/drive/file/${id}?memberId=${encodeURIComponent(cleanNo)}`,
-              proxyDownloadUrl: data.proxyDownloadUrl || `/api/drive/file/${id}?download=true&memberId=${encodeURIComponent(cleanNo)}`
-            });
-          }
+    if (snap?.docs && Array.isArray(snap.docs)) {
+      for (const docSnap of snap.docs) {
+        const data = docSnap.data() as DriveCertificateFile;
+        const id = data.id || (data as any).driveFileId || (data as any).certId || docSnap.id;
+        if (id && !foundMap.has(id)) {
+          const rawStatus = (data as any).status || data.approvalStatus || 'approved';
+          const isMissing = Boolean((data as any).isMissingFromDrive || rawStatus === 'missing' || data.approvalStatus === 'missing');
+          foundMap.set(id, {
+            ...data,
+            id,
+            status: isMissing ? 'missing' : rawStatus,
+            approvalStatus: (isMissing ? 'missing' : (data.approvalStatus || rawStatus || 'approved')) as any,
+            isMissingFromDrive: isMissing,
+            proxyViewUrl: data.proxyViewUrl || `/api/drive/file/${id}?memberId=${encodeURIComponent(cleanNo)}`,
+            proxyDownloadUrl: data.proxyDownloadUrl || `/api/drive/file/${id}?download=true&memberId=${encodeURIComponent(cleanNo)}`
+          });
         }
       }
     }
@@ -1696,14 +1687,10 @@ export const fetchSubmissionLists = async (): Promise<SubmissionListsResult> => 
 
   // 2. Query Firestore directly from both 'Certificates' and 'certificates' collections to merge and catch any client-created records
   try {
-    const [snapCap, snapLower] = await Promise.all([
-      getDocs(collection(db, 'Certificates')).catch(() => ({ docs: [] } as any)),
-      getDocs(collection(db, 'certificates')).catch(() => ({ docs: [] } as any))
-    ]);
+    const snapCap = await getDocs(collection(db, 'Certificates')).catch(() => ({ docs: [] } as any));
+    const allDocs = snapCap.docs || [];
 
-    const allDocs = [...snapCap.docs, ...snapLower.docs];
-
-    allDocs.forEach((d) => {
+    allDocs.forEach((d: any) => {
       const c = d.data() as any;
       if (!c) return;
 
@@ -2191,9 +2178,7 @@ export const deleteDriveCertificate = async (
     const idToDelete = certId || driveFileId;
     await Promise.all([
       deleteDoc(doc(db, 'Certificates', idToDelete)).catch(() => {}),
-      deleteDoc(doc(db, 'certificates', idToDelete)).catch(() => {}),
-      deleteDoc(doc(db, 'Certificates', driveFileId)).catch(() => {}),
-      deleteDoc(doc(db, 'certificates', driveFileId)).catch(() => {})
+      deleteDoc(doc(db, 'Certificates', driveFileId)).catch(() => {})
     ]);
   } catch (err) {
     console.debug('Client Firestore cache deletion notice:', err);
@@ -2271,9 +2256,7 @@ export const deleteUserUploadedCertificate = async (
     const idToDelete = certId || driveFileId;
     await Promise.all([
       deleteDoc(doc(db, 'Certificates', idToDelete)).catch(() => {}),
-      deleteDoc(doc(db, 'certificates', idToDelete)).catch(() => {}),
-      deleteDoc(doc(db, 'Certificates', driveFileId)).catch(() => {}),
-      deleteDoc(doc(db, 'certificates', driveFileId)).catch(() => {})
+      deleteDoc(doc(db, 'Certificates', driveFileId)).catch(() => {})
     ]);
   } catch (err) {
     console.debug('Client Firestore cache deletion notice:', err);

@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useNMO } from '../context/NMOContext';
 import {
   getInquiryByTicketId,
   approveTicketSolution,
@@ -16,7 +17,8 @@ import {
   Sparkles,
   AlertCircle,
   HelpCircle,
-  FileCheck
+  FileCheck,
+  Mail
 } from 'lucide-react';
 
 interface TicketTrackerModalProps {
@@ -30,7 +32,9 @@ export const TicketTrackerModal: React.FC<TicketTrackerModalProps> = ({
   onClose,
   initialTicketId = ''
 }) => {
+  const { currentUser } = useNMO();
   const [ticketInput, setTicketInput] = useState<string>(initialTicketId);
+  const [emailInput, setEmailInput] = useState<string>(currentUser?.email || '');
   const [ticket, setTicket] = useState<SupportInquiry | null>(null);
   const [isSearching, setIsSearching] = useState<boolean>(false);
   const [searchError, setSearchError] = useState<string | null>(null);
@@ -50,17 +54,27 @@ export const TicketTrackerModal: React.FC<TicketTrackerModalProps> = ({
       return;
     }
 
+    const emailToVerify = (emailInput || currentUser?.email || '').trim().toLowerCase();
+    if (!emailToVerify && !currentUser) {
+      setSearchError('Please enter the contact email address submitted with your ticket for ownership verification.');
+      return;
+    }
+
     setIsSearching(true);
     setSearchError(null);
     setTicket(null);
     setApprovalSuccess(false);
 
     try {
-      const found = await getInquiryByTicketId(cleanId);
+      const found = await getInquiryByTicketId(cleanId, emailToVerify);
       if (found) {
         setTicket(found);
       } else {
-        setSearchError(`No support ticket found for Reference ID "${cleanId}". Please check your Reference ID and try again.`);
+        setSearchError(
+          emailToVerify
+            ? `No support ticket found matching Reference ID "${cleanId}" and email "${emailToVerify}".`
+            : `No ticket found for "${cleanId}".`
+        );
       }
     } catch (err: any) {
       setSearchError('Search failed: ' + err.message);
@@ -127,25 +141,44 @@ export const TicketTrackerModal: React.FC<TicketTrackerModalProps> = ({
           </button>
         </div>
 
-        {/* Search Bar */}
-        <form onSubmit={handleSearch} className="flex gap-2">
-          <div className="relative flex-1">
-            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-            <input
-              type="text"
-              placeholder="Enter Reference ID e.g. NMO-TKT-123456"
-              value={ticketInput}
-              onChange={(e) => setTicketInput(e.target.value)}
-              className="w-full pl-9 pr-3 py-2.5 border border-slate-300 rounded-xl font-mono text-xs focus:outline-hidden focus:ring-2 focus:ring-red-500 uppercase"
-            />
+        {/* Search Bar with 2-Factor Ownership Verification */}
+        <form onSubmit={handleSearch} className="space-y-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            <div className="relative">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                required
+                placeholder="Ticket Ref ID (e.g. NMO-TKT-123456)"
+                value={ticketInput}
+                onChange={(e) => setTicketInput(e.target.value)}
+                className="w-full pl-9 pr-3 py-2.5 border border-slate-300 rounded-xl font-mono text-xs focus:outline-hidden focus:ring-2 focus:ring-red-500 uppercase"
+              />
+            </div>
+            <div className="relative">
+              <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+              <input
+                type="email"
+                required
+                placeholder="Contact Email Address"
+                value={emailInput}
+                onChange={(e) => setEmailInput(e.target.value)}
+                className="w-full pl-9 pr-3 py-2.5 border border-slate-300 rounded-xl text-xs focus:outline-hidden focus:ring-2 focus:ring-red-500"
+              />
+            </div>
           </div>
-          <button
-            type="submit"
-            disabled={isSearching}
-            className="px-5 py-2.5 bg-red-700 hover:bg-red-800 text-white font-bold rounded-xl transition-colors cursor-pointer shrink-0 disabled:opacity-50"
-          >
-            {isSearching ? 'Searching...' : 'Track Ticket'}
-          </button>
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-[11px] text-slate-500">
+              🔒 Email verification required to safeguard inquiry privacy.
+            </span>
+            <button
+              type="submit"
+              disabled={isSearching}
+              className="px-5 py-2.5 bg-red-700 hover:bg-red-800 text-white font-bold rounded-xl transition-colors cursor-pointer shrink-0 disabled:opacity-50"
+            >
+              {isSearching ? 'Verifying...' : 'Track Ticket'}
+            </button>
+          </div>
         </form>
 
         {searchError && (

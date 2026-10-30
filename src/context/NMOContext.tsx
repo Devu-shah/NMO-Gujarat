@@ -33,6 +33,7 @@ import {
   deleteDoc,
   query,
   where,
+  limit,
   onSnapshot,
   writeBatch
 } from 'firebase/firestore';
@@ -162,8 +163,8 @@ interface NMOContextType {
   cities: string[];
   addCityToDatabase: (cityName: string) => Promise<void>;
 
-  // Local caching & manual database sync
-  refreshFromDatabase: (force?: boolean) => Promise<{ usersCount: number; eventsCount: number; registrationsCount: number }>;
+  // Local caching & manual database sync (quota-optimized: users fetched only on admin demand)
+  refreshFromDatabase: (force?: boolean, includeUsers?: boolean) => Promise<{ usersCount: number; eventsCount: number; registrationsCount: number }>;
   isSyncing: boolean;
   lastSyncTime: string | null;
   addEventRSVPManually: (eventId: string, participantData: Partial<EventParticipant>) => Promise<void>;
@@ -420,26 +421,43 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Client-Side Caching & Fast Manual Syncing:
   // Instead of continuous streaming onSnapshot querying the whole database on every render,
   // data is securely cached in local storage for instant loading. Admins can click "Refresh from Database"
-  // anytime they want to pull the latest changes from Firestore.
-  const refreshFromDatabase = async (force: boolean = false): Promise<{
+  // Client-Side Caching & Fast Manual Syncing (Quota Optimized):
+  // Instead of querying all collections on every public visit, public users only load Events.
+  // The full Users master directory is only queried when an administrator requests it or enters Admin Console.
+  const refreshFromDatabase = async (force: boolean = false, includeUsers: boolean = false): Promise<{
     usersCount: number;
     eventsCount: number;
     registrationsCount: number;
   }> => {
     setIsSyncing(true);
     try {
-      // 1. Fetch Users collection
-      const usersSnap = await getDocs(collection(db, 'Users'));
-      const fetchedUsers: NMOUserRecord[] = [];
-      usersSnap.forEach((docSnap) => {
-        const data = docSnap.data() as NMOUserRecord;
-        fetchedUsers.push({
-          ...data,
-          membershipNumber: data.membershipNumber || docSnap.id
-        });
-      });
+      let fetchedUsers: NMOUserRecord[] = [...users];
 
-      // 2. Fetch Events collection
+      // 1. Fetch Users collection ONLY when requested for Administrative purposes
+      if (includeUsers) {
+        try {
+          const usersSnap = await getDocs(collection(db, 'Users'));
+          fetchedUsers = [];
+          usersSnap.forEach((docSnap) => {
+            const data = docSnap.data() as NMOUserRecord;
+            fetchedUsers.push({
+              ...data,
+              membershipNumber: data.membershipNumber || docSnap.id
+            });
+          });
+
+          if (fetchedUsers.length > 0 || force) {
+            setUsers(fetchedUsers);
+            try {
+              localStorage.setItem(LOCAL_STORAGE_USERS_KEY, JSON.stringify(fetchedUsers));
+            } catch {}
+          }
+        } catch (usersErr) {
+          console.debug('Notice loading Users collection:', usersErr);
+        }
+      }
+
+      // 2. Fetch Events collection (needed for public upcoming events and CME)
       const eventsSnap = await getDocs(collection(db, 'Events'));
       const fetchedEvents: NMOEvent[] = [];
       eventsSnap.forEach((docSnap) => {
@@ -451,59 +469,54 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         });
       });
 
-      // 3. Fetch event_registrations to ensure all RSVPs and attendance are merged
+      // 3. Fetch event_registrations ONLY when loading users / administrative sync
       let regCount = 0;
-      try {
-        const regSnap = await getDocs(collection(db, 'event_registrations'));
-        regCount = regSnap.size;
-        regSnap.forEach((docSnap) => {
-          const regData = docSnap.data() as any;
-          const targetEvtId = regData.eventId;
-          if (targetEvtId) {
-            const targetEvt = fetchedEvents.find((e) => e.eventId === targetEvtId);
-            if (targetEvt) {
-              const memNo = (regData.membershipNumber || '').toUpperCase();
-              if (memNo) {
-                targetEvt.participants = targetEvt.participants || [];
-                const existingIdx = targetEvt.participants.findIndex(
-                  (p) => p.membershipNumber.toUpperCase() === memNo
-                );
-                const participantItem: EventParticipant = {
-                  membershipNumber: memNo,
-                  uid: regData.uid,
-                  name: regData.name || 'Member',
-                  email: regData.email || '',
-                  phone: regData.phone || '',
-                  medicalCollege: regData.medicalCollege || '',
-                  prant: regData.prant || targetEvt.prant,
-                  registrationDate: regData.registrationDate || new Date().toISOString().split('T')[0],
-                  approvalStatus: regData.registrationStatus || regData.status || 'Pending',
-                  attendanceStatus: regData.attendanceStatus || 'Pending'
-                };
-                if (existingIdx >= 0) {
-                  targetEvt.participants[existingIdx] = {
-                    ...targetEvt.participants[existingIdx],
-                    ...participantItem
+      if (includeUsers) {
+        try {
+          const regSnap = await getDocs(collection(db, 'event_registrations'));
+          regCount = regSnap.size;
+          regSnap.forEach((docSnap) => {
+            const regData = docSnap.data() as any;
+            const targetEvtId = regData.eventId;
+            if (targetEvtId) {
+              const targetEvt = fetchedEvents.find((e) => e.eventId === targetEvtId);
+              if (targetEvt) {
+                const memNo = (regData.membershipNumber || '').toUpperCase();
+                if (memNo) {
+                  targetEvt.participants = targetEvt.participants || [];
+                  const existingIdx = targetEvt.participants.findIndex(
+                    (p) => p.membershipNumber.toUpperCase() === memNo
+                  );
+                  const participantItem: EventParticipant = {
+                    membershipNumber: memNo,
+                    uid: regData.uid,
+                    name: regData.name || 'Member',
+                    email: regData.email || '',
+                    phone: regData.phone || '',
+                    medicalCollege: regData.medicalCollege || '',
+                    prant: regData.prant || targetEvt.prant,
+                    registrationDate: regData.registrationDate || new Date().toISOString().split('T')[0],
+                    approvalStatus: regData.registrationStatus || regData.status || 'Pending',
+                    attendanceStatus: regData.attendanceStatus || 'Pending'
                   };
-                } else {
-                  targetEvt.participants.push(participantItem);
+                  if (existingIdx >= 0) {
+                    targetEvt.participants[existingIdx] = {
+                      ...targetEvt.participants[existingIdx],
+                      ...participantItem
+                    };
+                  } else {
+                    targetEvt.participants.push(participantItem);
+                  }
                 }
               }
             }
-          }
-        });
-      } catch (e) {
-        console.debug('Notice loading event_registrations:', e);
+          });
+        } catch (e) {
+          console.debug('Notice loading event_registrations:', e);
+        }
       }
 
-      // Update state and cache
-      if (fetchedUsers.length > 0 || force) {
-        setUsers(fetchedUsers);
-        try {
-          localStorage.setItem(LOCAL_STORAGE_USERS_KEY, JSON.stringify(fetchedUsers));
-        } catch {}
-      }
-
+      // Update events state and cache
       if (fetchedEvents.length > 0 || force) {
         setEvents(fetchedEvents);
         try {
@@ -511,32 +524,19 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         } catch {}
       }
 
-      // 4. Fetch Cities collection from database
+      // 4. Cities: use local default cities without spamming Firestore writes
       try {
-        const citiesSnap = await getDocs(collection(db, 'Cities'));
-        const loadedCities: string[] = [];
-        citiesSnap.forEach((d) => {
-          const val = d.data()?.name || d.id;
-          if (val && typeof val === 'string') loadedCities.push(val.trim());
-        });
-        if (loadedCities.length > 0) {
-          setDbCities(loadedCities);
-          try {
-            localStorage.setItem(LOCAL_STORAGE_CITIES_KEY, JSON.stringify(loadedCities));
-          } catch {}
-        } else {
-          // Seed Cities collection in Firestore
-          for (const c of DEFAULT_GUJARAT_CITIES) {
-            setDoc(doc(db, 'Cities', c), {
-              name: c,
-              state: 'Gujarat',
-              createdAt: new Date().toISOString()
-            }).catch(() => {});
+        const cachedCities = localStorage.getItem(LOCAL_STORAGE_CITIES_KEY);
+        if (cachedCities) {
+          const parsed = JSON.parse(cachedCities);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            setDbCities(parsed);
           }
+        } else {
           setDbCities(DEFAULT_GUJARAT_CITIES);
         }
       } catch (e) {
-        console.debug('Notice fetching Cities collection:', e);
+        setDbCities(DEFAULT_GUJARAT_CITIES);
       }
 
       const syncTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -558,19 +558,17 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  // One-time initial seeding on mount only if client cache is empty
+  // One-time initial seeding on mount: Only load public events; DO NOT fetch all users
   useEffect(() => {
-    const cachedUsersStr = localStorage.getItem(LOCAL_STORAGE_USERS_KEY);
     const cachedEventsStr = localStorage.getItem(LOCAL_STORAGE_EVENTS_KEY);
-    const hasCachedUsers = cachedUsersStr && JSON.parse(cachedUsersStr).length > 0;
     const hasCachedEvents = cachedEventsStr && JSON.parse(cachedEventsStr).length > 0;
 
-    if (!hasCachedUsers && !hasCachedEvents) {
-      refreshFromDatabase();
+    if (!hasCachedEvents) {
+      refreshFromDatabase(false, false);
     }
   }, []);
 
-  // Firebase Auth state listener
+  // Firebase Auth state listener (targeted single-doc lookup to minimize quota)
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       setFirebaseUser(user);
@@ -580,12 +578,29 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           emailLower === 'devanshshah768@gmail.com' ||
           emailLower === 'superadmin@nmogujarat.org';
 
-        // Look for matching user in the Users collection
+        // 1. Look for matching user in existing state
         let matched = users.find(
           (u) =>
             (u.email && u.email.toLowerCase() === emailLower) ||
             u.uid === user.uid
         );
+
+        // 2. Targeted single document lookup if not in state (1 read max instead of 10,000)
+        if (!matched && !isSuperAdminEmail) {
+          try {
+            const qEmail = query(collection(db, 'Users'), where('email', '==', emailLower), limit(1));
+            const snap = await getDocs(qEmail);
+            if (!snap.empty) {
+              const data = snap.docs[0].data() as NMOUserRecord;
+              matched = {
+                ...data,
+                membershipNumber: data.membershipNumber || snap.docs[0].id
+              };
+            }
+          } catch (lookupErr) {
+            console.debug('Notice looking up user record:', lookupErr);
+          }
+        }
 
         if (!matched && isSuperAdminEmail) {
           matched = {
@@ -614,6 +629,11 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
         if (matched) {
           setCurrentUser(matched);
+
+          // If logged-in user is an administrator, fetch full administrative users list
+          if (matched.role && matched.role !== 'member') {
+            refreshFromDatabase(false, true).catch(() => {});
+          }
         }
       } else {
         // Maintain admin login: Check if Super Admin server-side cookie or session token exists

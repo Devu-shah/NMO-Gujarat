@@ -1,0 +1,94 @@
+rules_version = '2';
+
+/**
+ * National Medicos Organisation (NMO) Gujarat
+ * Firebase Cloud Storage Security Rules
+ *
+ * Implements strict ownership, role-based access, content-type checks,
+ * file-size constraints, and zero-trust default-deny.
+ */
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // =========================================================================
+    // HELPER FUNCTIONS
+    // =========================================================================
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isSuperAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.role == 'super_admin' ||
+        request.auth.token.email in ['devanshshah768@gmail.com', 'superadmin@nmogujarat.org']
+      );
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && (
+        isSuperAdmin() ||
+        request.auth.token.role in ['state_admin', 'prant_admin', 'city_admin']
+      );
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isValidImage() {
+      return request.resource.contentType.matches('image/(jpeg|png|webp|gif)') &&
+             request.resource.size < 5 * 1024 * 1024; // 5 MB max
+    }
+
+    function isValidCertificateDoc() {
+      return (
+        request.resource.contentType.matches('application/pdf') ||
+        request.resource.contentType.matches('image/(jpeg|png|webp)')
+      ) && request.resource.size < 15 * 1024 * 1024; // 15 MB max
+    }
+
+    // =========================================================================
+    // 1. PROFILE PHOTOS
+    // Path: /profile_photos/{userId}/{fileName}
+    // =========================================================================
+    match /profile_photos/{userId}/{fileName} {
+      // Public read of profile avatars for member badges & directory
+      allow read: if true;
+      // Write: user can only upload their own avatar, within 5MB and valid image type
+      allow write: if (isOwner(userId) || isAdmin()) && isValidImage();
+    }
+
+    // =========================================================================
+    // 2. MEMBER CERTIFICATES
+    // Path: /certificates/{userId}/{fileName}
+    // =========================================================================
+    match /certificates/{userId}/{fileName} {
+      // Read: Owner and Admins only
+      allow read: if isOwner(userId) || isAdmin();
+      // Write: Owner (submitting own cert) or Admin, within 15MB and PDF/Image
+      allow write: if (isOwner(userId) || isAdmin()) && isValidCertificateDoc();
+    }
+
+    // =========================================================================
+    // 3. EVENT BANNERS & POSTERS
+    // Path: /event_banners/{eventId}/{fileName}
+    // =========================================================================
+    match /event_banners/{eventId}/{fileName} {
+      // Public read for CME & camp event flyers
+      allow read: if true;
+      // Write: Admins only, valid image up to 10MB
+      allow write: if isAdmin() &&
+                   request.resource.contentType.matches('image/(jpeg|png|webp)') &&
+                   request.resource.size < 10 * 1024 * 1024;
+    }
+
+    // =========================================================================
+    // 4. DEFAULT-DENY ZERO-TRUST CATCH-ALL
+    // Blocks all unmapped buckets, paths, and arbitrary file uploads
+    // =========================================================================
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

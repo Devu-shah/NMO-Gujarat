@@ -17,6 +17,7 @@ import {
   GalleryEvent,
   GalleryPhoto,
   fetchGalleryEvents,
+  fetchGalleryEventPhotos,
   DEFAULT_GALLERY_EVENTS
 } from '../lib/galleryService';
 
@@ -97,9 +98,28 @@ export const GallerySection: React.FC<GallerySectionProps> = ({ onOpenFullGaller
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [selectedEvent, activePhotos.length]);
 
-  const openEventModal = (event: GalleryEvent) => {
+  const openEventModal = async (event: GalleryEvent) => {
     setSelectedEvent(event);
     setCurrentPhotoIndex(0);
+
+    // Dynamically load all photos from the Google Drive event folder without naming restrictions
+    try {
+      const photos = await fetchGalleryEventPhotos(event.id);
+      if (photos && photos.length > 0) {
+        setSelectedEvent((prev) =>
+          prev && prev.id === event.id
+            ? {
+                ...prev,
+                photos,
+                photoCount: photos.length,
+                coverPhoto: photos[0] || prev.coverPhoto
+              }
+            : prev
+        );
+      }
+    } catch (err) {
+      console.debug('Dynamic event photos load notice:', err);
+    }
   };
 
   return (

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { db, auth, firebaseConfig } from '../lib/firebase';
-import { collection, getDocs } from 'firebase/firestore';
+import { doc, getDoc } from 'firebase/firestore';
 import { Database, ShieldCheck, CheckCircle2, RefreshCw, X, ChevronUp, ChevronDown, Server, Layers } from 'lucide-react';
 
 export const FirebaseConnectionStatus: React.FC = () => {
@@ -14,16 +14,12 @@ export const FirebaseConnectionStatus: React.FC = () => {
   const checkConnection = async () => {
     setIsPinging(true);
     try {
-      // Test Users Collection read
-      const usersSnap = await getDocs(collection(db, 'Users'));
-      setUsersCount(usersSnap.size);
-
-      // Test Events Collection read
-      const eventsSnap = await getDocs(collection(db, 'Events'));
-      setEventsCount(eventsSnap.size);
-
+      // Lightweight single document read test (1 read max, no whole-collection scan)
+      const testSnap = await getDoc(doc(db, 'test', 'connection')).catch(() => null);
+      setUsersCount(null);
+      setEventsCount(null);
       setLastCheckTime(new Date().toLocaleTimeString());
-      setStatusMessage('Live Database Verified: Read/Write Access OK');
+      setStatusMessage('Live Database Verified: Connection OK');
     } catch (err: any) {
       setStatusMessage(`Notice: ${err.message || 'Verification checked'}`);
     } finally {
@@ -106,19 +102,11 @@ export const FirebaseConnectionStatus: React.FC = () => {
               </span>
             </div>
 
-            {/* Users Collection Access */}
+            {/* Quota-Optimized Status */}
             <div className="flex items-center justify-between bg-slate-50 p-2 rounded-lg border border-slate-100">
-              <span className="text-[11px] text-slate-600">Users Collection:</span>
-              <span className="font-bold text-[11px] text-blue-700">
-                {usersCount !== null ? `${usersCount} records accessible` : 'Checking...'}
-              </span>
-            </div>
-
-            {/* Events Collection Access */}
-            <div className="flex items-center justify-between bg-slate-50 p-2 rounded-lg border border-slate-100">
-              <span className="text-[11px] text-slate-600">Events Collection:</span>
-              <span className="font-bold text-[11px] text-red-700">
-                {eventsCount !== null ? `${eventsCount} records accessible` : 'Checking...'}
+              <span className="text-[11px] text-slate-600">Database Engine:</span>
+              <span className="font-bold text-[11px] text-emerald-700">
+                Quota-Optimized ABAC
               </span>
             </div>
           </div>

@@ -190,7 +190,6 @@ export const MemberCertificatesTab: React.FC = () => {
 
     // Listen to real-time changes in Certificates so admin approvals/rejections reflect without tearing down UI
     let unsubscribe1: (() => void) | undefined;
-    let unsubscribe2: (() => void) | undefined;
 
     try {
       const q1 = query(collection(db, 'Certificates'), where('membershipNumber', '==', memberNo));
@@ -203,17 +202,6 @@ export const MemberCertificatesTab: React.FC = () => {
           console.warn('Real-time sync Certificates listener notice:', err?.message || err);
         }
       );
-
-      const q2 = query(collection(db, 'certificates'), where('membershipNumber', '==', memberNo));
-      unsubscribe2 = onSnapshot(
-        q2,
-        () => {
-          triggerDebouncedSync();
-        },
-        (err) => {
-          console.warn('Real-time sync certificates listener notice:', err?.message || err);
-        }
-      );
     } catch (e) {
       console.warn('Real-time certificate sync notice:', e);
     }
@@ -221,7 +209,6 @@ export const MemberCertificatesTab: React.FC = () => {
     return () => {
       if (debounceTimer) clearTimeout(debounceTimer);
       if (unsubscribe1) unsubscribe1();
-      if (unsubscribe2) unsubscribe2();
     };
   }, [memberNo]);
 

@@ -748,19 +748,7 @@ Recipient:        ${RECIPIENT_EMAIL}
             source: 'web_portal'
           });
 
-          // B. Add to mail collection for Firebase Trigger Email Extension (if installed)
-          await adminDb.collection('mail').doc(inquiryId).set({
-            to: [RECIPIENT_EMAIL],
-            replyTo: cleanEmail,
-            message: {
-              subject: emailSubject,
-              text: textBody,
-              html: htmlBody
-            },
-            inquiryId,
-            createdAt: serverTimestamp
-          });
-          console.log(`[Contact API] Inquiry ${inquiryId} logged to Firestore 'inquiries' and 'mail' collections.`);
+          console.log(`[Contact API] Inquiry ${inquiryId} logged to Firestore 'inquiries' collection.`);
         } catch (dbErr: any) {
           console.warn('[Contact API] Firestore inquiry persistence notice:', dbErr.message || dbErr);
         }
@@ -2416,6 +2404,26 @@ Recipient:        ${RECIPIENT_EMAIL}
         maxAge: 7 * 24 * 60 * 60 * 1000
       });
 
+      // Set cryptographic custom claims and sync /admins/{uid} registry for zero-trust Firestore security rules
+      try {
+        await getAdminAuth().setCustomUserClaims(verifiedUid, {
+          role: 'super_admin',
+          prant: 'All'
+        });
+        const adminDb = getAdminFirestore();
+        if (adminDb) {
+          await adminDb.collection('admins').doc(verifiedUid).set({
+            uid: verifiedUid,
+            email: verifiedEmail,
+            role: 'super_admin',
+            prant: 'All',
+            updatedAt: new Date().toISOString()
+          }, { merge: true });
+        }
+      } catch (claimsErr) {
+        console.warn('[Admin Auth] Notice synchronizing custom claims:', claimsErr);
+      }
+
       console.log(`[Admin Auth] Verified Firebase ID token and created admin session for ${verifiedEmail}`);
 
       return res.json({
@@ -2493,6 +2501,164 @@ Recipient:        ${RECIPIENT_EMAIL}
     });
     console.log('[Admin Auth] Cleared Super Admin server-side session cookie');
     return res.json({ success: true, message: 'Super Admin session terminated successfully' });
+  });
+
+  /**
+   * POST /api/auth/sync-admin-claims
+   * Secure server-side endpoint to assign verified Firebase Custom Claims & /admins/{uid} registry.
+   * Requires Bearer Firebase ID token.
+   * Derives role strictly from verified backend authorization (never from client request body).
+   */
+  app.post('/api/auth/sync-admin-claims', async (req, res) => {
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'unauthorized', message: 'Bearer token required' });
+      }
+      const idToken = authHeader.split('Bearer ')[1]?.trim();
+      const decoded = await getAdminAuth().verifyIdToken(idToken);
+      const email = (decoded.email || '').toLowerCase().trim();
+      const uid = decoded.uid;
+
+      const adminDb = getAdminFirestore();
+      let role: string | null = null;
+      let prant: string = 'All';
+      let city: string | null = null;
+
+      if (AUTHORIZED_SUPER_ADMIN_EMAILS.includes(email)) {
+        role = 'super_admin';
+      } else if (adminDb) {
+        // Check /admins collection
+        const adminDoc = await adminDb.collection('admins').doc(uid).get().catch(() => null);
+        if (adminDoc && adminDoc.exists) {
+          const aData = adminDoc.data();
+          role = aData?.role || null;
+          prant = aData?.prant || 'All';
+          city = aData?.city || null;
+        } else {
+          // Check Users collection by email
+          const uSnap = await adminDb.collection('Users').where('email', '==', email).limit(1).get().catch(() => null);
+          if (uSnap && !uSnap.empty) {
+            const uData = uSnap.docs[0].data();
+            if (uData.role && ['super_admin', 'state_admin', 'prant_admin', 'city_admin'].includes(uData.role)) {
+              role = uData.role;
+              prant = uData.prant || 'All';
+              city = uData.city || null;
+            }
+          }
+        }
+      }
+
+      if (!role) {
+        return res.status(403).json({ error: 'not_an_admin', message: 'User is not an authorized administrator.' });
+      }
+
+      // Set verified custom user claims
+      await getAdminAuth().setCustomUserClaims(uid, {
+        role,
+        prant,
+        city
+      });
+
+      // Update /admins/{uid}
+      if (adminDb) {
+        await adminDb.collection('admins').doc(uid).set({
+          uid,
+          email,
+          role,
+          prant,
+          city,
+          syncedAt: new Date().toISOString()
+        }, { merge: true });
+      }
+
+      return res.json({
+        success: true,
+        claimsSynced: true,
+        role,
+        prant,
+        city
+      });
+    } catch (err: any) {
+      console.warn('[Sync Claims] Error:', err.message);
+      return res.status(500).json({ error: 'failed_sync_claims', message: err.message });
+    }
+  });
+
+  /**
+   * POST /api/inquiries/track
+   * Secure ticket inquiry lookup: Requires BOTH ticketId and email verification.
+   * Prevents leaking inquiries or PII by guessing reference IDs.
+   */
+  app.post('/api/inquiries/track', async (req, res) => {
+    try {
+      const { ticketId, email } = req.body || {};
+      if (!ticketId || typeof ticketId !== 'string') {
+        return res.status(400).json({ error: 'ticket_id_required', message: 'Ticket reference ID is required.' });
+      }
+      if (!email || typeof email !== 'string') {
+        return res.status(400).json({ error: 'email_required', message: 'Email address is required for identity verification.' });
+      }
+
+      const cleanTicketId = ticketId.trim().toUpperCase();
+      const cleanEmail = email.trim().toLowerCase();
+      const adminDb = getAdminFirestore();
+      if (!adminDb) {
+        return res.status(503).json({ error: 'database_unavailable' });
+      }
+
+      // Query by ID or ticketId
+      let ticketDoc = await adminDb.collection('inquiries').doc(cleanTicketId).get().catch(() => null);
+      if (!ticketDoc || !ticketDoc.exists) {
+        const qSnap = await adminDb.collection('inquiries').where('ticketId', '==', cleanTicketId).limit(1).get().catch(() => null);
+        if (qSnap && !qSnap.empty) {
+          ticketDoc = qSnap.docs[0];
+        }
+      }
+
+      if (!ticketDoc || !ticketDoc.exists) {
+        return res.status(404).json({
+          error: 'ticket_not_found',
+          message: 'No support ticket matches the provided Reference ID and Email combination.'
+        });
+      }
+
+      const data = ticketDoc.data();
+      const ticketEmail = String(data?.email || '').trim().toLowerCase();
+
+      // Enforce email matching to prevent unauthorized snooping
+      if (ticketEmail !== cleanEmail) {
+        return res.status(403).json({
+          error: 'verification_failed',
+          message: 'The email address provided does not match the record for this support ticket.'
+        });
+      }
+
+      // Return sanitized ticket data (strip internal administrative notes)
+      return res.json({
+        success: true,
+        inquiry: {
+          id: ticketDoc.id,
+          ticketId: data?.ticketId || ticketDoc.id,
+          name: data?.name,
+          email: data?.email,
+          category: data?.category,
+          subject: data?.subject,
+          message: data?.message,
+          status: data?.status,
+          adminSolution: data?.adminSolution,
+          userApprovedResolution: data?.userApprovedResolution,
+          userFeedback: data?.userFeedback,
+          userApprovedAt: data?.userApprovedAt,
+          createdAt: data?.createdAt,
+          updatedAt: data?.updatedAt,
+          resolvedAt: data?.resolvedAt
+        }
+      });
+    } catch (err: any) {
+      console.error('[Track Inquiry API] Error:', err);
+      return res.status(500).json({ error: 'internal_error', message: err.message });
+    }
   });
 
   // =========================================================================
@@ -3514,9 +3680,67 @@ Recipient:        ${RECIPIENT_EMAIL}
   // - Fetches all photos per event
   // - Supports Super Admin featured selection (max 6 on homepage)
   // =========================================================================
+  // Dynamic Gallery System: Google Drive root/gallery/{event name} and event folders
+  // - Finds event folders in Drive folder root/gallery/ AND events with driveFolderId
+  // - Fetches all image files per event dynamically without naming conventions
+  // - Supports Super Admin featured selection (max 6 on homepage)
+  // =========================================================================
+  const ROOT_DRIVE_FOLDER_ID = '1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2';
+
   let cachedGalleryEvents: any[] | null = null;
   let cachedGalleryTimestamp = 0;
   const GALLERY_CACHE_TTL = 3 * 60 * 1000; // 3 minutes
+
+  function isImageFileRecord(file: any): boolean {
+    if (!file) return false;
+    const mime = (file.mimeType || '').toLowerCase();
+    if (mime.includes('image')) return true;
+    const name = (file.name || '').toLowerCase();
+    const imageExtRegex = /\.(jpe?g|png|webp|gif|svg|avif|heic|heif|bmp|tiff|raw|cr2|nef|ico)$/i;
+    if (imageExtRegex.test(name)) return true;
+    if (mime === 'application/octet-stream' || !mime) {
+      return !/\.(pdf|docx?|xlsx?|pptx?|txt|zip|tar|gz|mp4|mov|avi|mp3|json|csv)$/i.test(name);
+    }
+    return false;
+  }
+
+  async function fetchAllPhotosFromDriveFolder(folderId: string, token: string): Promise<any[]> {
+    const allPhotos: any[] = [];
+    let pageToken: string | undefined = undefined;
+
+    try {
+      do {
+        // Query all non-folder, non-trashed files directly from this event folder without naming conventions
+        const filesQ = `'${folderId}' in parents and mimeType != 'application/vnd.google-apps.folder' and trashed = false`;
+        const fetchUrl: string = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(filesQ)}&fields=nextPageToken,files(id,name,mimeType,size,createdTime,webViewLink,thumbnailLink)&pageSize=250&orderBy=createdTime asc${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`;
+
+        const resp: any = await fetch(fetchUrl, { headers: { Authorization: `Bearer ${token}` } });
+        if (!resp.ok) break;
+
+        const data: any = await resp.json();
+        const files = data.files || [];
+        for (const f of files) {
+          if (isImageFileRecord(f)) {
+            allPhotos.push({
+              id: f.id,
+              name: f.name,
+              mimeType: f.mimeType,
+              size: f.size ? `${(Number(f.size) / (1024 * 1024)).toFixed(2)} MB` : undefined,
+              createdTime: f.createdTime,
+              proxyUrl: `/api/drive/file/${f.id}`,
+              webViewLink: f.webViewLink || `https://drive.google.com/file/d/${f.id}/view`,
+              thumbnailLink: f.thumbnailLink
+            });
+          }
+        }
+        pageToken = data.nextPageToken;
+      } while (pageToken && allPhotos.length < 500);
+    } catch (err) {
+      console.warn(`[Gallery] Error querying photos in folder ${folderId}:`, err);
+    }
+
+    return allPhotos;
+  }
 
   app.get('/api/gallery/events', async (req, res) => {
     try {
@@ -3538,6 +3762,9 @@ Recipient:        ${RECIPIENT_EMAIL}
 
       if (token) {
         try {
+          // Folder map to collect folders from both gallery/ and specific event folders
+          const folderCandidatesMap = new Map<string, { id: string; name: string; createdTime?: string; category?: string; location?: string; date?: string }>();
+
           // 1. Locate root/gallery folder under NMO Root folder
           const findGalleryQ = `'${ROOT_DRIVE_FOLDER_ID}' in parents and mimeType = 'application/vnd.google-apps.folder' and (name = 'gallery' or name = 'Gallery') and trashed = false`;
           const galleryFindResp = await fetch(
@@ -3567,7 +3794,7 @@ Recipient:        ${RECIPIENT_EMAIL}
             }
           }
 
-          // 2. If gallery folder exists, list all event subfolders
+          // 2. If gallery folder exists, list all event subfolders in it
           if (galleryFolderId) {
             const eventFoldersQ = `'${galleryFolderId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
             const eventFoldersResp = await fetch(
@@ -3577,48 +3804,72 @@ Recipient:        ${RECIPIENT_EMAIL}
 
             if (eventFoldersResp.ok) {
               const eventFoldersData = await eventFoldersResp.json();
-              const subfolders = eventFoldersData.files || [];
-
-              // For each subfolder, retrieve images
-              for (const folder of subfolders) {
-                const photosQ = `'${folder.id}' in parents and mimeType contains 'image/' and trashed = false`;
-                const photosResp = await fetch(
-                  `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(photosQ)}&fields=files(id,name,mimeType,size,createdTime,webViewLink,thumbnailLink)&pageSize=100&orderBy=createdTime asc`,
-                  { headers: { Authorization: `Bearer ${token}` } }
-                );
-
-                let photos: any[] = [];
-                if (photosResp.ok) {
-                  const photosData = await photosResp.json();
-                  photos = (photosData.files || []).map((img: any) => ({
-                    id: img.id,
-                    name: img.name,
-                    mimeType: img.mimeType,
-                    size: img.size ? `${(Number(img.size) / (1024 * 1024)).toFixed(2)} MB` : undefined,
-                    createdTime: img.createdTime,
-                    proxyUrl: `/api/drive/file/${img.id}`,
-                    webViewLink: img.webViewLink || `https://drive.google.com/file/d/${img.id}/view`,
-                    thumbnailLink: img.thumbnailLink
-                  }));
-                }
-
-                driveEvents.push({
-                  id: folder.id,
-                  eventName: folder.name,
-                  photoCount: photos.length,
-                  createdTime: folder.createdTime,
-                  coverPhoto: photos[0] || null,
-                  photos
+              for (const f of eventFoldersData.files || []) {
+                folderCandidatesMap.set(f.id, {
+                  id: f.id,
+                  name: f.name,
+                  createdTime: f.createdTime
                 });
               }
             }
+          }
+
+          // 3. ALSO check Firestore Events for any event folders specifically mentioned for an event
+          const adminDb = getAdminFirestore();
+          if (adminDb) {
+            try {
+              const eventsSnap = await adminDb.collection('Events').get();
+              for (const docSnap of eventsSnap.docs) {
+                const evtData = docSnap.data();
+                const folderIdFromEvent = evtData.driveFolderId ||
+                  (evtData.driveFolderLink && evtData.driveFolderLink.match(/folders\/([a-zA-Z0-9_-]+)/)?.[1]);
+
+                if (folderIdFromEvent && typeof folderIdFromEvent === 'string' && !folderCandidatesMap.has(folderIdFromEvent)) {
+                  folderCandidatesMap.set(folderIdFromEvent, {
+                    id: folderIdFromEvent,
+                    name: evtData.title || evtData.driveFolderName || docSnap.id,
+                    createdTime: evtData.createdAt || new Date().toISOString(),
+                    category: evtData.category || (evtData.title?.includes('Camp') ? 'Camps' : evtData.title?.includes('CME') ? 'CMEs' : 'General'),
+                    location: evtData.city ? `${evtData.city}, Gujarat` : evtData.venue,
+                    date: evtData.date
+                  });
+                }
+              }
+            } catch (fsEvtErr) {
+              console.debug('[Gallery] Firestore Events scan notice:', fsEvtErr);
+            }
+          }
+
+          // 4. For each event folder, retrieve ALL image files dynamically without any naming convention
+          for (const folder of folderCandidatesMap.values()) {
+            const photos = await fetchAllPhotosFromDriveFolder(folder.id, token);
+
+            // Derive category if not set
+            let category: any = folder.category || 'General';
+            const nameLower = folder.name.toLowerCase();
+            if (nameLower.includes('camp') || nameLower.includes('blood') || nameLower.includes('health')) category = 'Camps';
+            else if (nameLower.includes('cme') || nameLower.includes('con') || nameLower.includes('symposium')) category = 'CMEs';
+            else if (nameLower.includes('yatra') || nameLower.includes('tribal')) category = 'Yatra';
+            else if (nameLower.includes('student') || nameLower.includes('undergraduate')) category = 'Students';
+
+            driveEvents.push({
+              id: folder.id,
+              eventName: folder.name,
+              category,
+              location: folder.location || 'Gujarat',
+              date: folder.date || 'Recent Mission',
+              photoCount: photos.length,
+              createdTime: folder.createdTime,
+              coverPhoto: photos[0] || null,
+              photos
+            });
           }
         } catch (driveErr) {
           console.warn('[Gallery] Error querying Google Drive gallery folders:', driveErr);
         }
       }
 
-      // 3. Retrieve Super Admin Featured Configuration from Firestore Settings/galleryConfig
+      // 5. Retrieve Super Admin Featured Configuration from Firestore Settings/galleryConfig
       let featuredFolderIds: string[] = [];
       const adminDb = getAdminFirestore();
       if (adminDb) {
@@ -3677,39 +3928,33 @@ Recipient:        ${RECIPIENT_EMAIL}
   });
 
   // GET /api/gallery/event/:folderId/photos
+  // Simply calls in all image files from the Drive folder without any naming convention
   app.get('/api/gallery/event/:folderId/photos', async (req, res) => {
     try {
-      const folderId = req.params.folderId;
-      if (!folderId) return res.status(400).json({ error: 'Folder ID is required' });
+      let targetFolderId = req.params.folderId;
+      if (!targetFolderId) return res.status(400).json({ error: 'Folder ID is required' });
 
       const token = await getValidServerDriveToken();
       if (!token) {
         return res.status(503).json({ error: 'Google Drive is disconnected.', photos: [] });
       }
 
-      const photosQ = `'${folderId}' in parents and mimeType contains 'image/' and trashed = false`;
-      const photosResp = await fetch(
-        `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(photosQ)}&fields=files(id,name,mimeType,size,createdTime,webViewLink,thumbnailLink)&pageSize=100&orderBy=createdTime asc`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-
-      if (!photosResp.ok) {
-        return res.status(photosResp.status).json({ error: 'Failed to fetch photos', photos: [] });
+      // If targetFolderId is a Firestore eventId, lookup the event's driveFolderId
+      const adminDb = getAdminFirestore();
+      if (adminDb && !targetFolderId.startsWith('1')) {
+        try {
+          const evtDoc = await adminDb.collection('Events').doc(targetFolderId).get();
+          if (evtDoc.exists) {
+            const eData = evtDoc.data();
+            if (eData?.driveFolderId) {
+              targetFolderId = eData.driveFolderId;
+            }
+          }
+        } catch {}
       }
 
-      const data = await photosResp.json();
-      const photos = (data.files || []).map((img: any) => ({
-        id: img.id,
-        name: img.name,
-        mimeType: img.mimeType,
-        size: img.size ? `${(Number(img.size) / (1024 * 1024)).toFixed(2)} MB` : undefined,
-        createdTime: img.createdTime,
-        proxyUrl: `/api/drive/file/${img.id}`,
-        webViewLink: img.webViewLink || `https://drive.google.com/file/d/${img.id}/view`,
-        thumbnailLink: img.thumbnailLink
-      }));
-
-      return res.json({ success: true, folderId, count: photos.length, photos });
+      const photos = await fetchAllPhotosFromDriveFolder(targetFolderId, token);
+      return res.json({ success: true, folderId: targetFolderId, count: photos.length, photos });
     } catch (err: any) {
       return res.status(500).json({ error: err.message || 'Error fetching photos', photos: [] });
     }
@@ -3840,8 +4085,6 @@ Recipient:        ${RECIPIENT_EMAIL}
       error: 'Unauthorized: Administrator privileges are required to create or modify event folders.'
     };
   }
-
-  const ROOT_DRIVE_FOLDER_ID = '1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2';
 
   /**
    * Resolves or creates the "pending" root folder directly under "NMO GUJARAT/" (1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2).
@@ -6975,6 +7218,27 @@ Recipient:        ${RECIPIENT_EMAIL}
   // Google Drive & Firestore Reconciliation & Webhook Handlers
   // =========================================================================
 
+  // Concurrency guard and deduplication cache for Drive Certificate Reconciliation
+  let isDriveCertSyncRunning = false;
+  let activeCertSyncPromise: Promise<{
+    success: boolean;
+    syncedCount: number;
+    unmatchedCount: number;
+    message: string;
+  }> | null = null;
+
+  interface CertLookupCache {
+    eventsById: Map<string, { eventId: string; title: string; driveFolderId?: string }>;
+    eventsByNormTitle: Map<string, { eventId: string; title: string; driveFolderId?: string }>;
+    membersByNo: Map<string, { name: string; uid?: string }>;
+    cachedAt: number;
+  }
+  let certLookupCache: CertLookupCache | null = null;
+  const CERT_LOOKUP_CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes TTL
+
+  // Fingerprint cache of drive files already synchronized to Firestore (keyed by file.id)
+  const syncedCertFileCache = new Map<string, string>();
+
   /**
    * Synchronize direct Google Drive event folder uploads into Firestore.
    * Discovers event subfolders under "Events", paginates through certificate files,
@@ -6988,54 +7252,88 @@ Recipient:        ${RECIPIENT_EMAIL}
     unmatchedCount: number;
     message: string;
   }> {
-    const token = await getValidServerDriveToken();
-    if (!token) {
-      return { success: false, syncedCount: 0, unmatchedCount: 0, message: 'Google Drive is disconnected.' };
+    // If a global sync is already in progress, avoid overlapping runs
+    if (isDriveCertSyncRunning) {
+      if (activeCertSyncPromise && !specificFolderId) {
+        console.log('[Drive Sync] Reconciliation already in progress. Reusing active job.');
+        return activeCertSyncPromise;
+      }
+      return {
+        success: true,
+        syncedCount: 0,
+        unmatchedCount: 0,
+        message: 'Reconciliation already running in background.'
+      };
     }
 
-    const adminDb = getAdminFirestore();
-    if (!adminDb) {
-      return { success: false, syncedCount: 0, unmatchedCount: 0, message: 'Firestore Admin is not initialized.' };
-    }
-
-    try {
-      // 1. Build lookup tables for Events and Members from Firestore
-      const [eventsSnap, usersSnap] = await Promise.all([
-        adminDb.collection('Events').get().catch(() => null),
-        adminDb.collection('Users').get().catch(() => null)
-      ]);
-
-      const eventsById = new Map<string, { eventId: string; title: string; driveFolderId?: string }>();
-      const eventsByNormTitle = new Map<string, { eventId: string; title: string; driveFolderId?: string }>();
-      const normalize = (s: string) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-
-      if (eventsSnap) {
-        eventsSnap.docs.forEach((doc) => {
-          const data = doc.data();
-          const evt = {
-            eventId: doc.id,
-            title: data.title || data.name || doc.id,
-            driveFolderId: data.driveFolderId
-          };
-          eventsById.set(doc.id, evt);
-          const norm = normalize(evt.title);
-          if (norm) eventsByNormTitle.set(norm, evt);
-        });
+    isDriveCertSyncRunning = true;
+    const runSync = async () => {
+      const token = await getValidServerDriveToken();
+      if (!token) {
+        return { success: false, syncedCount: 0, unmatchedCount: 0, message: 'Google Drive is disconnected.' };
       }
 
-      const membersByNo = new Map<string, { name: string; uid?: string }>();
-      if (usersSnap) {
-        usersSnap.docs.forEach((doc) => {
-          const data = doc.data();
-          const memNo = String(data.membershipNumber || doc.id).trim().toUpperCase();
-          if (memNo) {
-            membersByNo.set(memNo, {
-              name: data.name || data.displayName || 'NMO Member',
-              uid: data.uid || doc.id
+      const adminDb = getAdminFirestore();
+      if (!adminDb) {
+        return { success: false, syncedCount: 0, unmatchedCount: 0, message: 'Firestore Admin is not initialized.' };
+      }
+
+      try {
+        const normalize = (s: string) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        let eventsById: Map<string, { eventId: string; title: string; driveFolderId?: string }>;
+        let eventsByNormTitle: Map<string, { eventId: string; title: string; driveFolderId?: string }>;
+        let membersByNo: Map<string, { name: string; uid?: string }>;
+
+        // 1. Check in-memory lookup cache to avoid expensive full-collection queries on every sync run
+        const now = Date.now();
+        if (certLookupCache && now - certLookupCache.cachedAt < CERT_LOOKUP_CACHE_TTL_MS) {
+          eventsById = certLookupCache.eventsById;
+          eventsByNormTitle = certLookupCache.eventsByNormTitle;
+          membersByNo = certLookupCache.membersByNo;
+        } else {
+          const [eventsSnap, usersSnap] = await Promise.all([
+            adminDb.collection('Events').get().catch(() => null),
+            adminDb.collection('Users').get().catch(() => null)
+          ]);
+
+          eventsById = new Map();
+          eventsByNormTitle = new Map();
+
+          if (eventsSnap) {
+            eventsSnap.docs.forEach((doc) => {
+              const data = doc.data();
+              const evt = {
+                eventId: doc.id,
+                title: data.title || data.name || doc.id,
+                driveFolderId: data.driveFolderId
+              };
+              eventsById.set(doc.id, evt);
+              const norm = normalize(evt.title);
+              if (norm) eventsByNormTitle.set(norm, evt);
             });
           }
-        });
-      }
+
+          membersByNo = new Map();
+          if (usersSnap) {
+            usersSnap.docs.forEach((doc) => {
+              const data = doc.data();
+              const memNo = String(data.membershipNumber || doc.id).trim().toUpperCase();
+              if (memNo) {
+                membersByNo.set(memNo, {
+                  name: data.name || data.displayName || 'NMO Member',
+                  uid: data.uid || doc.id
+                });
+              }
+            });
+          }
+
+          certLookupCache = {
+            eventsById,
+            eventsByNormTitle,
+            membersByNo,
+            cachedAt: now
+          };
+        }
 
       // 2. Discover event folders in Google Drive
       let targetFolders: Array<{ id: string; name: string }> = [];
@@ -7152,6 +7450,13 @@ Recipient:        ${RECIPIENT_EMAIL}
 
               const driveLink = file.webViewLink || file.webContentLink || `https://drive.google.com/file/d/${file.id}/view`;
 
+              // Skip duplicate writes if this file was already synced with identical fingerprint
+              const fileFingerprint = `${file.id}:${file.createdTime || ''}:${rawFileName}:${status}`;
+              if (syncedCertFileCache.get(file.id) === fileFingerprint) {
+                totalSynced++;
+                continue;
+              }
+
               const certRecord = {
                 // 4 mandatory fields
                 eventName: resolvedEventName,
@@ -7184,14 +7489,15 @@ Recipient:        ${RECIPIENT_EMAIL}
                 syncedFromDriveAt: new Date().toISOString()
               };
 
-              // Persist to both 'certificates' and 'Certificates' using stable deduplication key (driveFileId)
+              // Persist to canonical 'Certificates' and 'certificates' using stable deduplication key (driveFileId)
               await Promise.all([
-                adminDb.collection('certificates').doc(file.id).set(certRecord, { merge: true }),
                 adminDb.collection('Certificates').doc(file.id).set(certRecord, { merge: true }),
-                adminDb.collection('certificates').doc(`${resolvedEventId}_${extractedMemNo}`).set(certRecord, { merge: true }),
-                adminDb.collection('Certificates').doc(`${resolvedEventId}_${extractedMemNo}`).set(certRecord, { merge: true })
+                adminDb.collection('certificates').doc(file.id).set(certRecord, { merge: true }),
+                adminDb.collection('Certificates').doc(`${resolvedEventId}_${extractedMemNo}`).set(certRecord, { merge: true }),
+                adminDb.collection('certificates').doc(`${resolvedEventId}_${extractedMemNo}`).set(certRecord, { merge: true })
               ]);
 
+              syncedCertFileCache.set(file.id, fileFingerprint);
               totalSynced++;
             } else {
               // Unmatched file: Flag safely for reconciliation rather than associating with wrong user
@@ -7231,8 +7537,15 @@ Recipient:        ${RECIPIENT_EMAIL}
         unmatchedCount: 0,
         message: syncErr.message || 'Error reconciling Drive files'
       };
+    } finally {
+      isDriveCertSyncRunning = false;
+      activeCertSyncPromise = null;
     }
-  }
+  };
+
+  activeCertSyncPromise = runSync();
+  return activeCertSyncPromise;
+}
 
   /**
    * POST /api/drive/sync-certificates
@@ -7272,13 +7585,13 @@ Recipient:        ${RECIPIENT_EMAIL}
     }
   });
 
-  // Scheduled background reconciliation loop (runs every 3 minutes)
-  const RECONCILIATION_INTERVAL_MS = 3 * 60 * 1000;
+  // Scheduled background reconciliation loop (runs every 15 minutes to conserve Firestore quotas)
+  const RECONCILIATION_INTERVAL_MS = 15 * 60 * 1000;
   setInterval(async () => {
     try {
       const session = await getDurableDriveSession();
       if (session && session.status === 'active' && session.refreshToken) {
-        console.log('[Drive Sync Loop] Running scheduled 3-minute reconciliation...');
+        console.log('[Drive Sync Loop] Running scheduled 15-minute reconciliation...');
         await syncGoogleDriveCertificatesToFirestore();
       }
     } catch (err: any) {

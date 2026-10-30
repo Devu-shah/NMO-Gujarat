@@ -20,7 +20,13 @@ import {
   CheckCircle2,
   Sparkles,
   Shield,
-  RefreshCw
+  RefreshCw,
+  Phone,
+  Mail,
+  MessageCircle,
+  MapPin,
+  LifeBuoy,
+  Heart
 } from 'lucide-react';
 
 interface AdminMemberDataTableProps {
@@ -53,6 +59,9 @@ export const AdminMemberDataTable: React.FC<AdminMemberDataTableProps> = ({
   const [isClearing, setIsClearing] = useState(false);
   const [clearFeedback, setClearFeedback] = useState<string | null>(null);
   const [isSavingMember, setIsSavingMember] = useState(false);
+
+  // Dedicated Emergency Contact Modal state
+  const [emergencyMemberModal, setEmergencyMemberModal] = useState<NMOMember | null>(null);
 
   const nonAdminCount = useMemo(() => {
     return members.filter((m) => !isProtectedAdminUser(m, currentUser)).length;
@@ -110,17 +119,18 @@ export const AdminMemberDataTable: React.FC<AdminMemberDataTableProps> = ({
   // Selection
   const [selectedNumbers, setSelectedNumbers] = useState<Set<string>>(new Set());
 
-  // Visible Standard Columns
+  // Visible Standard Columns (Prominently displaying Blood Group, Phone, Email & City for emergency connect)
   const [visibleColumns, setVisibleColumns] = useState({
     membershipNumber: true,
     name: true,
     prant: true,
-    qualifications: true,
-    medicalCollege: true,
     bloodGroup: true,
     phone: true,
-    email: false,
-    registrationNumber: true,
+    email: true,
+    city: true,
+    medicalCollege: true,
+    qualifications: false,
+    registrationNumber: false,
     status: true,
     validTill: false
   });
@@ -643,20 +653,48 @@ export const AdminMemberDataTable: React.FC<AdminMemberDataTableProps> = ({
                   </th>
                 )}
 
-                {visibleColumns.qualifications && (
-                  <th className="p-3.5 whitespace-nowrap">Qualifications</th>
+                {visibleColumns.bloodGroup && (
+                  <th className="p-3.5 whitespace-nowrap text-center text-rose-800 font-bold">
+                    <div className="flex items-center justify-center gap-1">
+                      <span>🩸</span>
+                      <span>Blood</span>
+                    </div>
+                  </th>
+                )}
+
+                {visibleColumns.phone && (
+                  <th className="p-3.5 whitespace-nowrap">
+                    <div className="flex items-center gap-1">
+                      <Phone className="w-3 h-3 text-slate-400" />
+                      <span>Phone / WhatsApp</span>
+                    </div>
+                  </th>
+                )}
+
+                {(visibleColumns as any).email && (
+                  <th className="p-3.5 whitespace-nowrap">
+                    <div className="flex items-center gap-1">
+                      <Mail className="w-3 h-3 text-slate-400" />
+                      <span>Email</span>
+                    </div>
+                  </th>
+                )}
+
+                {(visibleColumns as any).city && (
+                  <th className="p-3.5 whitespace-nowrap">
+                    <div className="flex items-center gap-1">
+                      <MapPin className="w-3 h-3 text-slate-400" />
+                      <span>City / Dist</span>
+                    </div>
+                  </th>
                 )}
 
                 {visibleColumns.medicalCollege && (
                   <th className="p-3.5 whitespace-nowrap">Medical College</th>
                 )}
 
-                {visibleColumns.bloodGroup && (
-                  <th className="p-3.5 whitespace-nowrap text-center">Blood</th>
-                )}
-
-                {visibleColumns.phone && (
-                  <th className="p-3.5 whitespace-nowrap">Phone</th>
+                {visibleColumns.qualifications && (
+                  <th className="p-3.5 whitespace-nowrap">Qualifications</th>
                 )}
 
                 {visibleColumns.registrationNumber && (
@@ -749,27 +787,77 @@ export const AdminMemberDataTable: React.FC<AdminMemberDataTableProps> = ({
                         </td>
                       )}
 
-                      {visibleColumns.qualifications && (
-                        <td className="p-3.5 text-slate-700 whitespace-nowrap">
-                          {m.qualifications || '—'}
+                      {visibleColumns.bloodGroup && (
+                        <td className="p-3.5 text-center whitespace-nowrap">
+                          {m.bloodGroup ? (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-black bg-rose-50 text-rose-700 border border-rose-200/80 shadow-2xs">
+                              <span className="text-[10px] mr-1">🩸</span>
+                              {m.bloodGroup}
+                            </span>
+                          ) : (
+                            <span className="text-slate-300 font-mono text-xs">—</span>
+                          )}
+                        </td>
+                      )}
+
+                      {visibleColumns.phone && (
+                        <td className="p-3.5 font-mono text-slate-700 whitespace-nowrap">
+                          {m.phone ? (
+                            <div className="flex items-center gap-1.5">
+                              <a
+                                href={`tel:${m.phone}`}
+                                className="text-slate-800 hover:text-red-700 font-bold hover:underline"
+                                title="Click to Call"
+                              >
+                                {m.phone}
+                              </a>
+                              <a
+                                href={`https://wa.me/${m.phone.replace(/[^0-9]/g, '')}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="p-1 text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50 rounded"
+                                title="Chat on WhatsApp"
+                              >
+                                <MessageCircle className="w-3.5 h-3.5" />
+                              </a>
+                            </div>
+                          ) : (
+                            <span className="text-slate-300 font-mono text-xs">—</span>
+                          )}
+                        </td>
+                      )}
+
+                      {(visibleColumns as any).email && (
+                        <td className="p-3.5 font-mono text-slate-600 whitespace-nowrap text-xs max-w-xs truncate">
+                          {m.email ? (
+                            <a
+                              href={`mailto:${m.email}`}
+                              className="text-slate-700 hover:text-red-700 hover:underline"
+                              title={m.email}
+                            >
+                              {m.email}
+                            </a>
+                          ) : (
+                            <span className="text-slate-300">—</span>
+                          )}
+                        </td>
+                      )}
+
+                      {(visibleColumns as any).city && (
+                        <td className="p-3.5 text-slate-700 whitespace-nowrap font-medium text-xs">
+                          {m.city || m.nmoState || '—'}
                         </td>
                       )}
 
                       {visibleColumns.medicalCollege && (
                         <td className="p-3.5 text-slate-600 whitespace-nowrap max-w-xs truncate">
-                          {m.medicalCollege}
+                          {m.medicalCollege || '—'}
                         </td>
                       )}
 
-                      {visibleColumns.bloodGroup && (
-                        <td className="p-3.5 text-center font-bold text-red-700 whitespace-nowrap">
-                          {m.bloodGroup || '—'}
-                        </td>
-                      )}
-
-                      {visibleColumns.phone && (
-                        <td className="p-3.5 font-mono text-slate-600 whitespace-nowrap">
-                          {m.phone || '—'}
+                      {visibleColumns.qualifications && (
+                        <td className="p-3.5 text-slate-700 whitespace-nowrap">
+                          {m.qualifications || '—'}
                         </td>
                       )}
 
@@ -827,6 +915,13 @@ export const AdminMemberDataTable: React.FC<AdminMemberDataTableProps> = ({
                       {/* Actions */}
                       <td className="p-3.5 text-right whitespace-nowrap">
                         <div className="flex items-center justify-end gap-1.5">
+                          <button
+                            onClick={() => setEmergencyMemberModal(m)}
+                            className="p-1.5 text-rose-600 hover:text-rose-800 hover:bg-rose-50 rounded transition-colors"
+                            title="Emergency Connect & Full Details"
+                          >
+                            <LifeBuoy className="w-3.5 h-3.5" />
+                          </button>
                           <button
                             onClick={() => {
                               setEditingMember(m);
@@ -1135,18 +1230,76 @@ export const AdminMemberDataTable: React.FC<AdminMemberDataTableProps> = ({
 
                 <div>
                   <label className="block text-slate-700 font-semibold mb-1">
-                    Valid Till
+                    City / District
                   </label>
                   <input
-                    type="date"
-                    value={editingMember.studentMembershipValidTill}
+                    type="text"
+                    value={editingMember.city || ''}
                     onChange={(e) =>
-                      setEditingMember({
-                        ...editingMember,
-                        studentMembershipValidTill: e.target.value
-                      })
+                      setEditingMember({ ...editingMember, city: e.target.value })
                     }
+                    placeholder="e.g. Ahmedabad, Rajkot"
                     className="w-full px-3 py-2 border border-slate-300 rounded-lg"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-slate-700 font-semibold mb-1">
+                    Pincode
+                  </label>
+                  <input
+                    type="text"
+                    value={editingMember.pincode || ''}
+                    onChange={(e) =>
+                      setEditingMember({ ...editingMember, pincode: e.target.value })
+                    }
+                    placeholder="e.g. 380016"
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg font-mono"
+                  />
+                </div>
+
+                <div className="sm:col-span-2">
+                  <label className="block text-slate-700 font-semibold mb-1">
+                    Residential / Hospital Address
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={editingMember.address || ''}
+                    onChange={(e) =>
+                      setEditingMember({ ...editingMember, address: e.target.value })
+                    }
+                    placeholder="Full residential or clinic address for emergency outreach..."
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-slate-700 font-semibold mb-1">
+                    Emergency Ref Contact Person
+                  </label>
+                  <input
+                    type="text"
+                    value={editingMember.refPerson || ''}
+                    onChange={(e) =>
+                      setEditingMember({ ...editingMember, refPerson: e.target.value })
+                    }
+                    placeholder="e.g. Dr. Ramesh Patel (HOD / Senior)"
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-slate-700 font-semibold mb-1">
+                    Emergency Ref Contact Phone
+                  </label>
+                  <input
+                    type="text"
+                    value={editingMember.refPersonPhone || ''}
+                    onChange={(e) =>
+                      setEditingMember({ ...editingMember, refPersonPhone: e.target.value })
+                    }
+                    placeholder="e.g. 9876543210"
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg font-mono"
                   />
                 </div>
               </div>
@@ -1155,7 +1308,7 @@ export const AdminMemberDataTable: React.FC<AdminMemberDataTableProps> = ({
                 <button
                   type="button"
                   onClick={() => setEditingMember(null)}
-                  className="px-4 py-2 border border-slate-300 rounded-lg text-slate-700 hover:bg-slate-100 font-semibold"
+                  className="px-4 py-2 border border-slate-300 rounded-lg text-slate-700 hover:bg-slate-100 font-semibold cursor-pointer"
                 >
                   Cancel
                 </button>
@@ -1169,6 +1322,164 @@ export const AdminMemberDataTable: React.FC<AdminMemberDataTableProps> = ({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Emergency Member Contact & Full Details Modal */}
+      {emergencyMemberModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/75 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 sm:p-7 shadow-2xl border border-rose-200 overflow-hidden space-y-5">
+            {/* Header */}
+            <div className="flex items-start justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-3">
+                <div className="p-3 bg-rose-100 text-rose-700 rounded-2xl">
+                  <LifeBuoy className="w-6 h-6" />
+                </div>
+                <div>
+                  <span className="text-[10px] uppercase font-bold tracking-wider text-rose-600 bg-rose-50 px-2 py-0.5 rounded-full border border-rose-200">
+                    Emergency Outreach Card
+                  </span>
+                  <h3 className="text-xl font-black text-slate-900 mt-1">
+                    {emergencyMemberModal.name}
+                  </h3>
+                  <p className="text-xs font-mono font-bold text-slate-500">
+                    {emergencyMemberModal.membershipNumber} · {emergencyMemberModal.prant} Prant
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setEmergencyMemberModal(null)}
+                className="text-slate-400 hover:text-slate-700 p-1 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Prominent Blood Group Badge */}
+            <div className="p-4 bg-gradient-to-r from-rose-50 via-red-50 to-amber-50 border border-rose-200 rounded-2xl flex items-center justify-between">
+              <div>
+                <span className="text-xs font-bold text-rose-800 uppercase tracking-wide">
+                  Blood Group
+                </span>
+                <div className="text-2xl font-black text-rose-700 flex items-center gap-1 mt-0.5">
+                  <span>🩸</span>
+                  <span>{emergencyMemberModal.bloodGroup || 'Not Specified'}</span>
+                </div>
+              </div>
+              <div className="text-right">
+                <span className="text-[11px] font-semibold text-slate-500 block">Status</span>
+                <span className="text-xs font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200">
+                  {emergencyMemberModal.status || 'Active Member'}
+                </span>
+              </div>
+            </div>
+
+            {/* Direct Connect Action Buttons */}
+            <div className="grid grid-cols-2 gap-3">
+              {emergencyMemberModal.phone ? (
+                <>
+                  <a
+                    href={`tel:${emergencyMemberModal.phone}`}
+                    className="p-3 bg-red-700 hover:bg-red-800 text-white rounded-xl font-bold text-xs flex items-center justify-center gap-2 shadow-xs transition-colors"
+                  >
+                    <Phone className="w-4 h-4" />
+                    <span>Call Mobile</span>
+                  </a>
+                  <a
+                    href={`https://wa.me/${emergencyMemberModal.phone.replace(/[^0-9]/g, '')}?text=${encodeURIComponent(
+                      `Hello Dr. ${emergencyMemberModal.name}, this is an urgent communication from NMO Gujarat regarding a medical seva emergency.`
+                    )}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="p-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold text-xs flex items-center justify-center gap-2 shadow-xs transition-colors"
+                  >
+                    <MessageCircle className="w-4 h-4" />
+                    <span>WhatsApp</span>
+                  </a>
+                </>
+              ) : (
+                <div className="col-span-2 p-2 bg-slate-100 rounded-xl text-center text-xs text-slate-500 font-semibold">
+                  No direct phone number recorded on profile.
+                </div>
+              )}
+            </div>
+
+            {/* Full Emergency Contact Details List */}
+            <div className="space-y-2.5 text-xs bg-slate-50 p-4 rounded-2xl border border-slate-200/80">
+              <div className="flex items-start justify-between py-1 border-b border-slate-200/60">
+                <span className="font-semibold text-slate-500">Phone Number:</span>
+                <span className="font-mono font-bold text-slate-800">
+                  {emergencyMemberModal.phone || '—'}
+                </span>
+              </div>
+
+              <div className="flex items-start justify-between py-1 border-b border-slate-200/60">
+                <span className="font-semibold text-slate-500">Email Address:</span>
+                <span className="font-mono font-bold text-slate-800">
+                  {emergencyMemberModal.email ? (
+                    <a href={`mailto:${emergencyMemberModal.email}`} className="text-red-700 hover:underline">
+                      {emergencyMemberModal.email}
+                    </a>
+                  ) : (
+                    '—'
+                  )}
+                </span>
+              </div>
+
+              <div className="flex items-start justify-between py-1 border-b border-slate-200/60">
+                <span className="font-semibold text-slate-500">City / District:</span>
+                <span className="font-bold text-slate-800">
+                  {emergencyMemberModal.city || emergencyMemberModal.nmoState || '—'}
+                </span>
+              </div>
+
+              <div className="flex items-start justify-between py-1 border-b border-slate-200/60">
+                <span className="font-semibold text-slate-500">Medical College:</span>
+                <span className="font-bold text-slate-800 text-right max-w-xs">
+                  {emergencyMemberModal.medicalCollege || '—'}
+                </span>
+              </div>
+
+              {emergencyMemberModal.address && (
+                <div className="py-1 border-b border-slate-200/60">
+                  <span className="font-semibold text-slate-500 block mb-0.5">Address:</span>
+                  <p className="font-medium text-slate-800 leading-relaxed">
+                    {emergencyMemberModal.address}
+                    {emergencyMemberModal.pincode ? ` - ${emergencyMemberModal.pincode}` : ''}
+                  </p>
+                </div>
+              )}
+
+              {(emergencyMemberModal.refPerson || emergencyMemberModal.refPersonPhone) && (
+                <div className="pt-1">
+                  <span className="font-bold text-rose-800 block mb-0.5">
+                    Alternate / Emergency Reference:
+                  </span>
+                  <div className="flex items-center justify-between text-slate-700">
+                    <span>{emergencyMemberModal.refPerson || 'Reference Contact'}</span>
+                    {emergencyMemberModal.refPersonPhone && (
+                      <a
+                        href={`tel:${emergencyMemberModal.refPersonPhone}`}
+                        className="font-mono font-bold text-red-700 hover:underline flex items-center gap-1"
+                      >
+                        <Phone className="w-3 h-3" />
+                        <span>{emergencyMemberModal.refPersonPhone}</span>
+                      </a>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="pt-2 flex justify-end">
+              <button
+                onClick={() => setEmergencyMemberModal(null)}
+                className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white font-semibold rounded-xl text-xs transition-colors cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
           </div>
         </div>
       )}

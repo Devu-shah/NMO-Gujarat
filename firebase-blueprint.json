@@ -117,9 +117,27 @@
         "updatedAt": { "type": "string", "maxLength": 40 }
       },
       "required": ["ticketId", "name", "email", "category", "subject", "message", "status"]
+    "Admin": {
+      "title": "Admin",
+      "description": "Server-verified administrator registry indexed by Firebase Auth UID",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "email": { "type": "string", "maxLength": 120 },
+        "role": { "type": "string", "enum": ["super_admin", "state_admin", "prant_admin", "city_admin"] },
+        "prant": { "type": "string", "enum": ["Gujarat", "Saurashtra", "All"] },
+        "city": { "type": "string", "maxLength": 100 },
+        "assignedAt": { "type": "string", "maxLength": 40 },
+        "assignedBy": { "type": "string", "maxLength": 120 }
+      },
+      "required": ["uid", "email", "role"]
     }
   },
   "firestore": {
+    "/admins/{adminUid}": {
+      "schema": { "$ref": "#/entities/Admin" },
+      "description": "Server-verified administrative registry for RBAC rule evaluations"
+    },
     "/Users/{membershipNumber}": {
       "schema": { "$ref": "#/entities/User" },
       "description": "Master Users collection keyed by unique Membership Number"

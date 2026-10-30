@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNMO } from '../context/NMOContext';
 import { NMOEvent } from '../types/nmo';
 import {
@@ -19,7 +19,9 @@ import {
   ShieldCheck,
   Copy,
   Printer,
-  CheckCircle2
+  CheckCircle2,
+  RefreshCw,
+  Sparkles
 } from 'lucide-react';
 
 interface EventsSectionProps {
@@ -37,8 +39,44 @@ export const EventsSection: React.FC<EventsSectionProps> = ({ onOpenAuth }) => {
     eventRegistrations,
     exportEventParticipantsToCSV,
     updateParticipantApproval,
-    updateParticipantAttendance
+    updateParticipantAttendance,
+    refreshFromDatabase,
+    isSyncing
   } = useNMO();
+
+  // Local session state caching layer to prevent repeated Firestore fetches during a single session
+  const [cachedEvents, setCachedEvents] = useState<NMOEvent[]>(() => {
+    try {
+      const stored = sessionStorage.getItem('NMO_SESSION_EVENTS_CACHE');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {}
+    return events;
+  });
+
+  const [cacheTimestamp, setCacheTimestamp] = useState<string | null>(() => {
+    try {
+      return sessionStorage.getItem('NMO_SESSION_EVENTS_TIMESTAMP') || null;
+    } catch {
+      return null;
+    }
+  });
+
+  useEffect(() => {
+    if (events && events.length > 0) {
+      setCachedEvents(events);
+      try {
+        sessionStorage.setItem('NMO_SESSION_EVENTS_CACHE', JSON.stringify(events));
+        const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        sessionStorage.setItem('NMO_SESSION_EVENTS_TIMESTAMP', nowStr);
+        setCacheTimestamp(nowStr);
+      } catch {}
+    }
+  }, [events]);
+
+  const activeEvents = cachedEvents.length > 0 ? cachedEvents : events;
 
   const [selectedPrantFilter, setSelectedPrantFilter] = useState<'All' | 'Gujarat' | 'Saurashtra'>('All');
   const [selectedCityFilter, setSelectedCityFilter] = useState<string>('All');
@@ -96,7 +134,7 @@ export const EventsSection: React.FC<EventsSectionProps> = ({ onOpenAuth }) => {
   const [membershipInput, setMembershipInput] = useState(currentMember?.membershipNumber || '');
   const [nameInput, setNameInput] = useState(currentMember?.name || '');
 
-  const filteredEvents = events.filter((e) => {
+  const filteredEvents = activeEvents.filter((e) => {
     if (selectedPrantFilter !== 'All' && e.prant !== selectedPrantFilter && e.prant !== 'All') {
       return false;
     }
@@ -163,9 +201,17 @@ export const EventsSection: React.FC<EventsSectionProps> = ({ onOpenAuth }) => {
         {/* Section Header */}
         <div className="flex flex-col md:flex-row md:items-end justify-between mb-10 gap-4">
           <div>
-            <span className="text-xs font-bold uppercase tracking-wider text-red-700">
-              Conferences · Health Camps · CMEs
-            </span>
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-bold uppercase tracking-wider text-red-700">
+                Conferences · Health Camps · CMEs
+              </span>
+              {cacheTimestamp && (
+                <span className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200/60">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                  Session Cached ({cacheTimestamp})
+                </span>
+              )}
+            </div>
             <h2 className="text-3xl sm:text-4xl font-black text-slate-900 tracking-tight mt-1">
               Upcoming Events & Seva Programs
             </h2>
@@ -174,37 +220,57 @@ export const EventsSection: React.FC<EventsSectionProps> = ({ onOpenAuth }) => {
             </p>
           </div>
 
-          {/* Interactive Prant Filter Segmented Control */}
-          <div className="flex items-center gap-1 p-1 bg-slate-200/80 rounded-lg self-start">
+          {/* Interactive Prant Filter Segmented Control & Cache Refresh */}
+          <div className="flex items-center gap-2 self-start flex-wrap">
+            <div className="flex items-center gap-1 p-1 bg-slate-200/80 rounded-lg">
+              <button
+                onClick={() => setSelectedPrantFilter('All')}
+                className={`px-3.5 py-1.5 text-xs font-semibold rounded-md transition-colors cursor-pointer ${
+                  selectedPrantFilter === 'All'
+                    ? 'bg-white text-slate-900 shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                All Events ({activeEvents.length})
+              </button>
+              <button
+                onClick={() => setSelectedPrantFilter('Gujarat')}
+                className={`px-3.5 py-1.5 text-xs font-semibold rounded-md transition-colors cursor-pointer ${
+                  selectedPrantFilter === 'Gujarat'
+                    ? 'bg-white text-red-700 shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Gujarat Prant
+              </button>
+              <button
+                onClick={() => setSelectedPrantFilter('Saurashtra')}
+                className={`px-3.5 py-1.5 text-xs font-semibold rounded-md transition-colors cursor-pointer ${
+                  selectedPrantFilter === 'Saurashtra'
+                    ? 'bg-white text-blue-700 shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Saurashtra Prant
+              </button>
+            </div>
+
             <button
-              onClick={() => setSelectedPrantFilter('All')}
-              className={`px-3.5 py-1.5 text-xs font-semibold rounded-md transition-colors ${
-                selectedPrantFilter === 'All'
-                  ? 'bg-white text-slate-900 shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
+              onClick={async () => {
+                try {
+                  const res = await refreshFromDatabase(true, false);
+                  const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                  setCacheTimestamp(nowStr);
+                } catch {}
+              }}
+              disabled={isSyncing}
+              className="p-2 text-slate-500 hover:text-slate-900 bg-white border border-slate-300 rounded-lg text-xs flex items-center gap-1.5 cursor-pointer shadow-2xs hover:bg-slate-50 transition-colors disabled:opacity-50"
+              title="Refresh events list from database"
             >
-              All Events ({events.length})
-            </button>
-            <button
-              onClick={() => setSelectedPrantFilter('Gujarat')}
-              className={`px-3.5 py-1.5 text-xs font-semibold rounded-md transition-colors ${
-                selectedPrantFilter === 'Gujarat'
-                  ? 'bg-white text-red-700 shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              Gujarat Prant
-            </button>
-            <button
-              onClick={() => setSelectedPrantFilter('Saurashtra')}
-              className={`px-3.5 py-1.5 text-xs font-semibold rounded-md transition-colors ${
-                selectedPrantFilter === 'Saurashtra'
-                  ? 'bg-white text-blue-700 shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              Saurashtra Prant
+              <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin text-red-600' : ''}`} />
+              <span className="text-[11px] font-semibold hidden md:inline">
+                {isSyncing ? 'Syncing...' : 'Refresh'}
+              </span>
             </button>
           </div>
         </div>
