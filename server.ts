@@ -421,10 +421,314 @@ async function startServer() {
   app.use(express.urlencoded({ extended: true, limit: '25mb' }));
   app.use(cookieParser());
 
-  // Comprehensive Health and Diagnostic Check
-  // Reports operational status of Firebase Admin SDK and Google Drive OAuth without leaking secrets
+  // =========================================================================
+  // Cryptographic Server-Side Admin Session & Authorization Infrastructure
+  // Zero-trust verification: strictly validates HMAC session tokens or Firebase ID tokens
+  // =========================================================================
+  const SUPER_ADMIN_EMAIL = (process.env.VITE_SUPER_ADMIN_EMAIL || 'devanshshah768@gmail.com').toLowerCase().trim();
+  const SUPER_ADMIN_COOKIE_NAME = 'nmo_superadmin_session';
+
+  // Secure SESSION_SECRET: Never use an insecure default in production
+  let effectiveSessionSecret = process.env.SESSION_SECRET;
+  if (!effectiveSessionSecret) {
+    if (process.env.NODE_ENV === 'production') {
+      console.error('[Security Warning] SESSION_SECRET is not configured in production environment! Generating an ephemeral secret.');
+      effectiveSessionSecret = crypto.randomBytes(32).toString('hex');
+    } else {
+      effectiveSessionSecret = 'nmo-gujarat-superadmin-secret-2026-secure-key';
+    }
+  }
+  const SESSION_SECRET = effectiveSessionSecret;
+
+  const AUTHORIZED_SUPER_ADMIN_EMAILS = [
+    SUPER_ADMIN_EMAIL,
+    'superadmin@nmogujarat.org',
+    'devanshshah768@gmail.com'
+  ].map((e) => e.toLowerCase().trim());
+
+  type AdminRole = 'super_admin' | 'state_admin' | 'prant_admin' | 'city_admin';
+
+  interface SuperAdminSessionPayload {
+    email: string;
+    role: 'super_admin';
+    membershipNumber: string;
+    name: string;
+    uid?: string;
+    issuedAt: number;
+    expiresAt: number;
+  }
+
+  interface VerifiedAdminIdentity {
+    authorized: boolean;
+    role?: AdminRole;
+    email?: string;
+    name?: string;
+    uid?: string;
+    prant?: string;
+    city?: string;
+    error?: string;
+  }
+
+  const ROLE_HIERARCHY: Record<AdminRole, number> = {
+    super_admin: 4,
+    state_admin: 3,
+    prant_admin: 2,
+    city_admin: 1
+  };
+
+  function createSuperAdminSessionToken(payload: SuperAdminSessionPayload): string {
+    const dataStr = Buffer.from(JSON.stringify(payload)).toString('base64url');
+    const hmac = crypto.createHmac('sha256', SESSION_SECRET).update(dataStr).digest('base64url');
+    return `${dataStr}.${hmac}`;
+  }
+
+  function verifySuperAdminSessionToken(token: string): SuperAdminSessionPayload | null {
+    try {
+      if (!token || typeof token !== 'string' || !token.includes('.')) return null;
+      const [dataStr, hmac] = token.split('.');
+      const expectedHmac = crypto.createHmac('sha256', SESSION_SECRET).update(dataStr).digest('base64url');
+      if (!crypto.timingSafeEqual(Buffer.from(hmac), Buffer.from(expectedHmac))) {
+        return null;
+      }
+      const json = Buffer.from(dataStr, 'base64url').toString('utf-8');
+      const parsed = JSON.parse(json) as SuperAdminSessionPayload;
+      if (Date.now() > parsed.expiresAt) {
+        return null;
+      }
+      // Strictly require BOTH authorized super admin email AND role === 'super_admin'
+      const cleanParsedEmail = (parsed.email || '').toLowerCase().trim();
+      const isAuthorizedEmail = AUTHORIZED_SUPER_ADMIN_EMAILS.includes(cleanParsedEmail);
+      if (!isAuthorizedEmail || parsed.role !== 'super_admin') {
+        console.warn('[Admin Auth] Rejected forged or unauthorized token role/email mismatch:', cleanParsedEmail);
+        return null;
+      }
+      return parsed;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Cryptographic Zero-Trust Administrator Verification:
+   * 1. Validates Super Admin HMAC session cookie
+   * 2. Validates HMAC Bearer token or Firebase Admin ID token
+   * 3. Checks custom user claims (decoded.role), /admins/{uid} registry, and whitelist
+   * 4. Enforces role hierarchy (minRole)
+   * 5. Zero-tolerance for unverified headers (x-admin-role), query params, or client cookies
+   */
+  async function verifyAdminAuthorization(
+    req: express.Request,
+    minRole?: AdminRole
+  ): Promise<VerifiedAdminIdentity> {
+    // 1. Check Super Admin session cookie
+    const cookieToken = req.cookies && req.cookies[SUPER_ADMIN_COOKIE_NAME];
+    if (cookieToken) {
+      const session = verifySuperAdminSessionToken(cookieToken);
+      if (session && session.role === 'super_admin') {
+        return {
+          authorized: true,
+          role: 'super_admin',
+          email: session.email,
+          name: session.name,
+          uid: session.uid
+        };
+      }
+    }
+
+    // 2. Check Authorization Header (Bearer token) or direct media session token
+    const authHeader = req.headers.authorization;
+    let bearerToken: string | null = null;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      bearerToken = authHeader.split('Bearer ')[1]?.trim() || null;
+    }
+    if (!bearerToken && typeof req.query.adminSessionToken === 'string') {
+      bearerToken = req.query.adminSessionToken.trim();
+    }
+
+    if (bearerToken) {
+      // 2a. Check if it's our HMAC Super Admin session token
+      const session = verifySuperAdminSessionToken(bearerToken);
+      if (session && session.role === 'super_admin') {
+        return {
+          authorized: true,
+          role: 'super_admin',
+          email: session.email,
+          name: session.name,
+          uid: session.uid
+        };
+      }
+
+      // 2b. Check if it's a Firebase ID token
+      try {
+        const decoded = await getAdminAuth().verifyIdToken(bearerToken);
+        const email = (decoded.email || '').toLowerCase().trim();
+        const uid = decoded.uid;
+        const name = decoded.name || email;
+
+        let detectedRole: AdminRole | null = null;
+        let prant: string = (decoded as any).prant || 'All';
+        let city: string | undefined = (decoded as any).city;
+
+        if (AUTHORIZED_SUPER_ADMIN_EMAILS.includes(email)) {
+          detectedRole = 'super_admin';
+        } else if (
+          decoded.role &&
+          ['super_admin', 'state_admin', 'prant_admin', 'city_admin'].includes(decoded.role as string)
+        ) {
+          detectedRole = decoded.role as AdminRole;
+        } else {
+          // Fallback: Check Firestore database records if Admin SDK initialized
+          const adminDb = getAdminFirestore();
+          if (adminDb) {
+            const adminDoc = await adminDb.collection('admins').doc(uid).get().catch(() => null);
+            if (adminDoc && adminDoc.exists) {
+              const aData = adminDoc.data();
+              if (aData?.role && ['super_admin', 'state_admin', 'prant_admin', 'city_admin'].includes(aData.role)) {
+                detectedRole = aData.role as AdminRole;
+                prant = aData.prant || prant;
+                city = aData.city || city;
+              }
+            }
+            if (!detectedRole) {
+              const uSnap = await adminDb.collection('Users').where('email', '==', email).limit(1).get().catch(() => null);
+              if (uSnap && !uSnap.empty) {
+                const uData = uSnap.docs[0].data();
+                if (uData.role && ['super_admin', 'state_admin', 'prant_admin', 'city_admin'].includes(uData.role)) {
+                  detectedRole = uData.role as AdminRole;
+                  prant = uData.prant || prant;
+                  city = uData.city || city;
+                }
+              }
+            }
+          }
+        }
+
+        if (detectedRole) {
+          if (minRole && ROLE_HIERARCHY[detectedRole] < ROLE_HIERARCHY[minRole]) {
+            return {
+              authorized: false,
+              role: detectedRole,
+              email,
+              uid,
+              error: `Forbidden: Requires "${minRole}" role or higher.`
+            };
+          }
+
+          return {
+            authorized: true,
+            role: detectedRole,
+            email,
+            name,
+            uid,
+            prant,
+            city
+          };
+        }
+      } catch {
+        // Firebase ID token verification failed
+      }
+    }
+
+    return {
+      authorized: false,
+      error: 'Unauthorized: Valid administrator authorization token or session required.'
+    };
+  }
+
+  /**
+   * Synchronous identity check strictly for HMAC session cookies or HMAC tokens.
+   * Completely eliminates unverified header and query parameter spoofing.
+   */
+  function getRequesterAdminIdentity(req: express.Request): { isAdmin: boolean; role?: string; email?: string } {
+    const cookieToken = req.cookies && req.cookies[SUPER_ADMIN_COOKIE_NAME];
+    if (cookieToken) {
+      const verified = verifySuperAdminSessionToken(cookieToken);
+      if (verified && verified.role === 'super_admin') {
+        return { isAdmin: true, role: 'super_admin', email: verified.email };
+      }
+    }
+
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const bearer = authHeader.split('Bearer ')[1]?.trim();
+      if (bearer) {
+        const sessionVerified = verifySuperAdminSessionToken(bearer);
+        if (sessionVerified && sessionVerified.role === 'super_admin') {
+          return { isAdmin: true, role: 'super_admin', email: sessionVerified.email };
+        }
+      }
+    }
+
+    return { isAdmin: false };
+  }
+
+  // =========================================================================
+  // Expiring Cryptographically Signed OAuth 2.0 State Tracking
+  // Prevents OAuth CSRF, session fixation, and unauthorized code exchange
+  // =========================================================================
+  const oauthStates = new Map<string, number>();
+  function cleanOauthStates() {
+    const now = Date.now();
+    for (const [state, timestamp] of oauthStates.entries()) {
+      if (now - timestamp > 15 * 60 * 1000) {
+        oauthStates.delete(state);
+      }
+    }
+  }
+  setInterval(cleanOauthStates, 5 * 60 * 1000).unref();
+
+  function generateOAuthState(adminUid: string = 'super_admin'): string {
+    const nonce = crypto.randomBytes(16).toString('hex');
+    const timestamp = Date.now();
+    const payload = `${nonce}:${timestamp}:${adminUid}`;
+    const hmac = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex');
+    oauthStates.set(nonce, timestamp);
+    return `${payload}:${hmac}`;
+  }
+
+  function verifyOAuthState(stateStr?: string): boolean {
+    if (!stateStr || typeof stateStr !== 'string') return false;
+    const parts = stateStr.split(':');
+    if (parts.length !== 4) return false;
+    const [nonce, tsStr, adminUid, hmac] = parts;
+    const ts = Number(tsStr);
+    if (isNaN(ts) || Date.now() - ts > 15 * 60 * 1000) return false;
+    const expectedPayload = `${nonce}:${tsStr}:${adminUid}`;
+    const expectedHmac = crypto.createHmac('sha256', SESSION_SECRET).update(expectedPayload).digest('hex');
+    if (!crypto.timingSafeEqual(Buffer.from(hmac), Buffer.from(expectedHmac))) return false;
+    if (!oauthStates.has(nonce)) return false;
+    oauthStates.delete(nonce); // Enforce single one-time use
+    return true;
+  }
+
+  // =========================================================================
+  // API Health & Service Status Endpoints
+  // Phase 3 Hardening: Public responses expose minimal status only.
+  // Full cloud diagnostics require verified administrator authorization.
+  // =========================================================================
   app.get('/api/health', async (req, res) => {
-    let driveSession: SecureDriveSessionRecord | null = null;
+    const wantsDiagnostics = req.query.diagnostics === 'true';
+
+    // Public minimal health status
+    if (!wantsDiagnostics) {
+      return res.json({
+        status: 'ok',
+        service: 'NMO Gujarat API',
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    // Diagnostics requested: verify administrator identity
+    const authCheck = await verifyAdminAuthorization(req);
+    if (!authCheck.authorized) {
+      return res.status(401).json({
+        status: 'ok',
+        error: 'unauthorized',
+        message: 'Detailed infrastructure diagnostics are restricted to verified administrators.'
+      });
+    }
+
+    let driveSession: any = null;
     try {
       driveSession = await getDurableDriveSession();
     } catch {
@@ -439,10 +743,14 @@ async function startServer() {
       redirectUri = getOAuthRedirectUri(req);
     } catch {}
 
-    res.json({
+    return res.json({
       status: 'ok',
       service: 'NMO Gujarat API',
       timestamp: new Date().toISOString(),
+      admin: {
+        role: authCheck.role,
+        email: authCheck.email
+      },
       firebaseAdmin: {
         projectId: FIREBASE_ADMIN_PROJECT_ID,
         publicTokenVerificationReady: isPublicTokenVerificationReady,
@@ -457,6 +765,55 @@ async function startServer() {
         oauthConfigured: clientId && clientSecret,
         clientIdConfigured: clientId,
         clientSecretConfigured: clientSecret,
+        hasRefreshToken: Boolean(driveSession?.refreshToken || envRefreshToken),
+        redirectUri,
+        status: driveSession?.status || (envRefreshToken ? 'active' : 'disconnected'),
+        durableStorage: Boolean(envRefreshToken || driveSession?.refreshToken),
+        persistedInFirestore: Boolean(driveSession?.persistedInFirestore)
+      }
+    });
+  });
+
+  app.get('/api/health/diagnostics', async (req, res) => {
+    const authCheck = await verifyAdminAuthorization(req);
+    if (!authCheck.authorized) {
+      return res.status(401).json({
+        error: 'unauthorized',
+        message: 'Detailed infrastructure diagnostics are restricted to verified administrators.'
+      });
+    }
+
+    let driveSession: any = null;
+    try {
+      driveSession = await getDurableDriveSession();
+    } catch {
+      driveSession = readSecureDriveSession();
+    }
+
+    const envRefreshToken = Boolean(process.env.GOOGLE_DRIVE_REFRESH_TOKEN);
+    const clientId = Boolean(process.env.GOOGLE_DRIVE_CLIENT_ID || process.env.GOOGLE_CLIENT_ID);
+    const clientSecret = Boolean(process.env.GOOGLE_DRIVE_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET);
+    let redirectUri = '';
+    try {
+      redirectUri = getOAuthRedirectUri(req);
+    } catch {}
+
+    return res.json({
+      status: 'ok',
+      service: 'NMO Gujarat API',
+      timestamp: new Date().toISOString(),
+      admin: {
+        role: authCheck.role,
+        email: authCheck.email
+      },
+      firebaseAdmin: {
+        projectId: FIREBASE_ADMIN_PROJECT_ID,
+        publicTokenVerificationReady: isPublicTokenVerificationReady,
+        hasPrivilegedServiceAccount,
+        authMethod: privilegedAuthType
+      },
+      googleDrive: {
+        oauthConfigured: clientId && clientSecret,
         hasRefreshToken: Boolean(driveSession?.refreshToken || envRefreshToken),
         redirectUri,
         status: driveSession?.status || (envRefreshToken ? 'active' : 'disconnected'),
@@ -777,26 +1134,55 @@ Recipient:        ${RECIPIENT_EMAIL}
     }
   });
 
+  // =========================================================================
+  // Email Service Endpoints (Admin Verified & Sanitized)
+  // Public requests receive minimal sanitized status.
+  // Configuration, tests, pings, and broadcasts require verified admin privileges.
+  // =========================================================================
+
   // Status and Diagnostic endpoint for Email Service configuration
   app.get('/api/email/status', async (req, res) => {
     try {
       const force = req.query.force === 'true';
       const status = await getEmailServiceStatus(force);
+
+      // Verify if requester is an authenticated administrator
+      const auth = await verifyAdminAuthorization(req);
+      if (auth.authorized) {
+        return res.status(200).json({
+          success: true,
+          emailService: status
+        });
+      }
+
+      // Minimal sanitized status for public visitors (zero credentials or internal host leakage)
       return res.status(200).json({
         success: true,
-        emailService: status
+        emailService: {
+          configured: status.configured,
+          verified: status.verified,
+          provider: status.provider
+        }
       });
     } catch (err: any) {
       return res.status(500).json({
         success: false,
-        error: err.message || 'Failed to determine email service status'
+        error: 'Failed to determine email service status'
       });
     }
   });
 
-  // Live TCP/TLS connection ping tester (under 2 seconds, no hanging)
+  // Live TCP/TLS connection ping tester (Restricted to Authorized Admins)
   app.post('/api/email/ping', async (req, res) => {
     try {
+      const auth = await verifyAdminAuthorization(req);
+      if (!auth.authorized) {
+        return res.status(401).json({
+          success: false,
+          error: 'Unauthorized: Administrator authentication required to test mail server connection.'
+        });
+      }
+
       const { host, port } = req.body || {};
       const stored = loadStoredSmtpConfig();
       const targetHost = host?.trim() || stored?.smtpHost || (stored?.gmailUser ? 'smtp.gmail.com' : 'smtp.gmail.com');
@@ -813,7 +1199,7 @@ Recipient:        ${RECIPIENT_EMAIL}
     } catch (err: any) {
       return res.status(500).json({
         success: false,
-        error: err?.message || 'Error executing ping test'
+        error: 'Error executing ping test'
       });
     }
   });
@@ -821,6 +1207,14 @@ Recipient:        ${RECIPIENT_EMAIL}
   // Save SMTP / Gmail configuration securely (Super Admin Only)
   app.post('/api/email/save-config', async (req, res) => {
     try {
+      const auth = await verifyAdminAuthorization(req, 'super_admin');
+      if (!auth.authorized) {
+        return res.status(403).json({
+          success: false,
+          error: auth.error || 'Forbidden: Super Administrator privileges required to configure mail relays.'
+        });
+      }
+
       const {
         provider,
         gmailUser,
@@ -872,7 +1266,7 @@ Recipient:        ${RECIPIENT_EMAIL}
           }, { merge: true });
         }
       } catch (dbErr: any) {
-        console.warn('[Email Config] Settings/smtpConfig persistence notice:', dbErr.message || dbErr);
+        console.warn('[Email Config] Settings/smtpConfig persistence notice:', dbErr?.message);
       }
 
       // Verify connection immediately with forceRefresh
@@ -884,20 +1278,36 @@ Recipient:        ${RECIPIENT_EMAIL}
         message: status.verified
           ? `Transporter verified and activated successfully! (${status.latencyMs ? `${status.latencyMs}ms` : 'Ready'})`
           : `Credentials saved securely! Notice from SMTP relay: ${status.lastError || 'Check credentials'}`,
-        emailService: status
+        emailService: {
+          configured: status.configured,
+          verified: status.verified,
+          provider: status.provider,
+          senderAddress: status.senderAddress,
+          senderName: status.senderName,
+          latencyMs: status.latencyMs,
+          lastError: status.lastError
+        }
       });
     } catch (err: any) {
       console.error('[Email Config] Error saving SMTP configuration:', err);
       return res.status(500).json({
         success: false,
-        error: err.message || 'Failed to save email configuration'
+        error: 'Failed to save email configuration'
       });
     }
   });
 
-  // Dedicated Support Inquiries Status & Resolution Update Endpoint
+  // Dedicated Support Inquiries Status & Resolution Update Endpoint (Admin Only)
   app.post('/api/inquiries/update-status', async (req, res) => {
     try {
+      const auth = await verifyAdminAuthorization(req);
+      if (!auth.authorized) {
+        return res.status(401).json({
+          success: false,
+          error: 'Unauthorized: Administrator authentication required to update inquiry ticket status.'
+        });
+      }
+
       const {
         ticketId,
         status,
@@ -924,13 +1334,13 @@ Recipient:        ${RECIPIENT_EMAIL}
       if (status !== undefined) payload.status = status;
       if (adminSolution !== undefined) payload.adminSolution = adminSolution;
       if (adminNotes !== undefined) payload.adminNotes = adminNotes;
-      if (resolvedBy !== undefined) payload.resolvedBy = resolvedBy;
+      if (resolvedBy !== undefined) payload.resolvedBy = resolvedBy || auth.name || 'Administrator';
       if (userApprovedResolution !== undefined) payload.userApprovedResolution = Boolean(userApprovedResolution);
       if (userFeedback !== undefined) payload.userFeedback = userFeedback;
 
       if (status === 'resolved') {
         payload.resolvedAt = timestamp;
-        payload.resolvedBy = resolvedBy || 'Administrator';
+        payload.resolvedBy = resolvedBy || auth.name || 'Administrator';
       } else if (status === 'closed') {
         payload.closedAt = timestamp;
       }
@@ -949,7 +1359,7 @@ Recipient:        ${RECIPIENT_EMAIL}
       console.error('[Inquiries API] Error updating inquiry status:', err);
       return res.status(500).json({
         success: false,
-        error: err.message || 'Failed to update ticket status on server'
+        error: 'Failed to update ticket status on server'
       });
     }
   });
@@ -957,6 +1367,14 @@ Recipient:        ${RECIPIENT_EMAIL}
   // Send a Live Verification Test Email (Super Admin / Admin Tool)
   app.post('/api/email/test', async (req, res) => {
     try {
+      const auth = await verifyAdminAuthorization(req);
+      if (!auth.authorized) {
+        return res.status(401).json({
+          success: false,
+          error: 'Unauthorized: Administrator authentication required to send test email.'
+        });
+      }
+
       const { to } = req.body || {};
       const targetRecipient = (to || '').trim();
       if (!targetRecipient || !targetRecipient.includes('@')) {
@@ -983,15 +1401,31 @@ Recipient:        ${RECIPIENT_EMAIL}
     } catch (err: any) {
       return res.status(500).json({
         success: false,
-        error: err.message || 'Error occurred while dispatching test email'
+        error: 'Error occurred while dispatching test email'
       });
     }
   });
 
   // Send Bulk Broadcast Email to Multiple Recipients (Super Admin & Authorized Admins)
+  // Protected with role check, payload bounding, and explicit confirmation requirement
   app.post('/api/email/broadcast', async (req, res) => {
     try {
-      const { recipients, subject, message, targetDescription } = req.body || {};
+      const auth = await verifyAdminAuthorization(req);
+      if (!auth.authorized) {
+        return res.status(401).json({
+          success: false,
+          error: 'Unauthorized: Administrator authentication required to dispatch broadcast emails.'
+        });
+      }
+
+      const { recipients, subject, message, targetDescription, confirmation } = req.body || {};
+
+      if (!confirmation && confirmation !== true) {
+        return res.status(400).json({
+          success: false,
+          error: 'Explicit confirmation: true is required in payload to dispatch mass broadcast emails.'
+        });
+      }
 
       if (!subject || !message) {
         return res.status(400).json({
@@ -1004,6 +1438,14 @@ Recipient:        ${RECIPIENT_EMAIL}
         return res.status(400).json({
           success: false,
           error: 'Please provide an array of recipient email addresses.'
+        });
+      }
+
+      // Hard safety limit: max 500 recipients per call
+      if (recipients.length > 500) {
+        return res.status(400).json({
+          success: false,
+          error: `Recipient batch exceeds maximum limit of 500 (received ${recipients.length}). Please dispatch in smaller batches.`
         });
       }
 
@@ -1031,7 +1473,7 @@ Recipient:        ${RECIPIENT_EMAIL}
       console.error('[Broadcast API] Unexpected error dispatching broadcast:', err);
       return res.status(500).json({
         success: false,
-        error: err.message || 'Internal server error while dispatching broadcast'
+        error: 'Internal server error while dispatching broadcast'
       });
     }
   });
@@ -1466,22 +1908,11 @@ Recipient:        ${RECIPIENT_EMAIL}
     return 'http://localhost:3000/api/auth/google/callback';
   }
 
-  const oauthStates = new Map<string, number>();
-  function cleanOauthStates() {
-    const now = Date.now();
-    for (const [state, timestamp] of oauthStates.entries()) {
-      if (now - timestamp > 15 * 60 * 1000) {
-        oauthStates.delete(state);
-      }
-    }
-  }
-  setInterval(cleanOauthStates, 5 * 60 * 1000).unref();
-
   /**
    * GET /api/auth/google/url
-   * Generates the Google OAuth 2.0 authorization URL with offline access and forced consent prompt.
+   * Generates the Google OAuth 2.0 authorization URL with offline access and signed state.
    */
-  app.get('/api/auth/google/url', (req, res) => {
+  app.get('/api/auth/google/url', async (req, res) => {
     const clientId = process.env.GOOGLE_DRIVE_CLIENT_ID || process.env.GOOGLE_CLIENT_ID;
     const redirectUri = getOAuthRedirectUri(req);
 
@@ -1493,8 +1924,8 @@ Recipient:        ${RECIPIENT_EMAIL}
       });
     }
 
-    const state = Math.random().toString(36).substring(2) + Date.now().toString(36);
-    oauthStates.set(state, Date.now());
+    const authCheck = await verifyAdminAuthorization(req).catch(() => ({ authorized: false, uid: 'super_admin' }));
+    const state = generateOAuthState(authCheck.uid || 'super_admin');
 
     const params = new URLSearchParams({
       client_id: clientId,
@@ -1517,9 +1948,9 @@ Recipient:        ${RECIPIENT_EMAIL}
 
   /**
    * GET /api/auth/google/login
-   * Direct redirect endpoint to launch Google OAuth 2.0 flow with offline access.
+   * Direct redirect endpoint to launch Google OAuth 2.0 flow with offline access and signed state.
    */
-  app.get('/api/auth/google/login', (req, res) => {
+  app.get('/api/auth/google/login', async (req, res) => {
     const clientId = process.env.GOOGLE_DRIVE_CLIENT_ID || process.env.GOOGLE_CLIENT_ID;
     const redirectUri = getOAuthRedirectUri(req);
 
@@ -1540,8 +1971,8 @@ Recipient:        ${RECIPIENT_EMAIL}
       `);
     }
 
-    const state = Math.random().toString(36).substring(2) + Date.now().toString(36);
-    oauthStates.set(state, Date.now());
+    const authCheck = await verifyAdminAuthorization(req).catch(() => ({ authorized: false, uid: 'super_admin' }));
+    const state = generateOAuthState(authCheck.uid || 'super_admin');
 
     const params = new URLSearchParams({
       client_id: clientId,
@@ -1559,13 +1990,34 @@ Recipient:        ${RECIPIENT_EMAIL}
 
   /**
    * GET /api/auth/google/callback
-   * OAuth 2.0 authorization code callback. Exchanges code for offline tokens,
-   * stores refresh_token strictly on the server in .credentials/drive_session_secure.json,
-   * and notifies the client.
+   * OAuth 2.0 authorization code callback.
+   * Cryptographically validates the one-time state, exchanges code for offline tokens,
+   * stores refresh_token strictly on the server in durable encrypted storage,
+   * and notifies the client without exposing tokens.
    */
   app.get('/api/auth/google/callback', async (req, res) => {
     const code = req.query.code as string;
+    const stateParam = req.query.state as string;
     const oauthError = req.query.error as string;
+
+    // Validate one-time cryptographically signed OAuth state
+    if (stateParam && !verifyOAuthState(stateParam)) {
+      console.warn('[Google OAuth Callback] Security warning: OAuth state verification failed or state expired.');
+      res.setHeader('Content-Type', 'text/html');
+      return res.status(400).send(`
+        <!DOCTYPE html>
+        <html>
+          <head><title>Authentication Verification Failed</title></head>
+          <body style="font-family: system-ui, sans-serif; padding: 40px; text-align: center; background: #0f172a; color: #f8fafc;">
+            <div style="max-width: 440px; margin: 0 auto; background: #1e293b; padding: 32px; border-radius: 16px; border: 1px solid #334155;">
+              <h3 style="color: #f87171; margin-top: 0;">Security Verification Failed</h3>
+              <p style="color: #94a3b8; font-size: 13px;">The OAuth security token has expired or could not be verified. Please initiate the connection again from the admin panel.</p>
+              <a href="/admin/super" style="display: inline-block; padding: 10px 20px; background: #b91c1c; color: white; text-decoration: none; border-radius: 8px; font-size: 13px; font-weight: bold; margin-top: 12px;">Return to Admin</a>
+            </div>
+          </body>
+        </html>
+      `);
+    }
 
     if (oauthError) {
       console.warn('[Google OAuth Callback] Authorization returned error:', oauthError);
@@ -1938,11 +2390,30 @@ Recipient:        ${RECIPIENT_EMAIL}
    * Exchanges an authorization code from Google OAuth 2.0 offline access flow.
    * Stores the refresh_token securely on the server!
    */
+  /**
+   * POST /api/drive/exchange-code
+   * Exchanges an authorization code from Google OAuth 2.0 offline access flow.
+   * Stores the refresh_token securely on the server!
+   * Protected with OAuth state validation or admin authentication.
+   * Never leaks access_token in JSON response.
+   */
   app.post('/api/drive/exchange-code', async (req, res) => {
     try {
-      const { code, redirectUri, folderId, folderName, folderUrl } = req.body;
+      const { code, redirectUri, folderId, folderName, folderUrl, state } = req.body;
       if (!code) {
         return res.status(400).json({ error: 'Authorization code is required' });
+      }
+
+      // Verify OAuth state OR administrator authorization
+      const isStateValid = state ? verifyOAuthState(state) : false;
+      if (!isStateValid) {
+        const authCheck = await verifyAdminAuthorization(req);
+        if (!authCheck.authorized) {
+          return res.status(401).json({
+            error: 'unauthorized',
+            message: 'Invalid OAuth security state and unauthorized administrator.'
+          });
+        }
       }
 
       const clientId = process.env.GOOGLE_DRIVE_CLIENT_ID || process.env.GOOGLE_CLIENT_ID;
@@ -2022,27 +2493,33 @@ Recipient:        ${RECIPIENT_EMAIL}
       await saveDurableDriveSession(updatedSession);
       console.log(`[Drive Auth] Google Drive session saved securely for ${userEmail}. Has refresh token: ${Boolean(updatedSession.refreshToken)}`);
 
+      // Sanitized response: Never return access_token or refresh_token to client
       return res.json({
         success: true,
         accountEmail: updatedSession.accountEmail,
         accountName: updatedSession.accountName,
         expiresAt: updatedSession.expiresAt,
         folderId: updatedSession.folderId,
-        accessToken: updatedSession.accessToken,
         hasRefreshToken: Boolean(updatedSession.refreshToken)
       });
     } catch (err: any) {
       console.error('[Drive Auth] Exception during code exchange:', err);
-      return res.status(500).json({ error: err.message || 'Internal error during code exchange' });
+      return res.status(500).json({ error: 'Internal error during code exchange' });
     }
   });
 
   /**
    * POST /api/drive/save-session
    * Saves or updates persistent backend session metadata and tokens.
+   * Strictly restricted to Super Administrators.
    */
   app.post('/api/drive/save-session', async (req, res) => {
     try {
+      const auth = await verifyAdminAuthorization(req, 'super_admin');
+      if (!auth.authorized) {
+        return res.status(403).json({ error: auth.error || 'Forbidden: Super Administrator privileges required.' });
+      }
+
       const {
         accessToken,
         refreshToken,
@@ -2090,9 +2567,15 @@ Recipient:        ${RECIPIENT_EMAIL}
   /**
    * POST /api/drive/disconnect
    * Disconnects Google Drive and wipes stored backend tokens.
+   * Strictly restricted to Super Administrators.
    */
-  app.post('/api/drive/disconnect', async (_req, res) => {
+  app.post('/api/drive/disconnect', async (req, res) => {
     try {
+      const auth = await verifyAdminAuthorization(req, 'super_admin');
+      if (!auth.authorized) {
+        return res.status(403).json({ error: auth.error || 'Forbidden: Super Administrator privileges required.' });
+      }
+
       const disconnectedSession: SecureDriveSessionRecord = {
         status: 'disconnected',
         expiresAt: 0,
@@ -2113,13 +2596,15 @@ Recipient:        ${RECIPIENT_EMAIL}
 
   /**
    * POST /api/drive/test-expire-and-refresh
-   * Diagnostic test endpoint:
-   * 1. Expires current access token in the secure session.
-   * 2. Triggers the automatic refresh token flow.
-   * 3. Verifies that the new access token is generated and valid.
+   * Diagnostic test endpoint restricted to Super Administrators.
    */
-  app.post('/api/drive/test-expire-and-refresh', async (_req, res) => {
+  app.post('/api/drive/test-expire-and-refresh', async (req, res) => {
     try {
+      const auth = await verifyAdminAuthorization(req, 'super_admin');
+      if (!auth.authorized) {
+        return res.status(403).json({ error: auth.error || 'Forbidden: Super Administrator privileges required.' });
+      }
+
       const session = await getDurableDriveSession();
       if (!session) {
         return res.status(404).json({ error: 'No stored session found to test' });
@@ -2168,121 +2653,6 @@ Recipient:        ${RECIPIENT_EMAIL}
       return res.status(500).json({ error: err.message || 'Error testing refresh' });
     }
   });
-
-  // =========================================================================
-  // Super Admin Server-Side Session Management & Firebase Admin Verification
-  // Only accessible by verified Super Administrator
-  // =========================================================================
-  const SUPER_ADMIN_EMAIL = (process.env.VITE_SUPER_ADMIN_EMAIL || 'devanshshah768@gmail.com').toLowerCase().trim();
-  const SUPER_ADMIN_COOKIE_NAME = 'nmo_superadmin_session';
-
-  // Secure SESSION_SECRET: Never use an insecure default in production
-  let effectiveSessionSecret = process.env.SESSION_SECRET;
-  if (!effectiveSessionSecret) {
-    if (process.env.NODE_ENV === 'production') {
-      console.error('[Security Warning] SESSION_SECRET is not configured in production environment! Generating an ephemeral secret.');
-      effectiveSessionSecret = crypto.randomBytes(32).toString('hex');
-    } else {
-      effectiveSessionSecret = 'nmo-gujarat-superadmin-secret-2026-secure-key';
-    }
-  }
-  const SESSION_SECRET = effectiveSessionSecret;
-
-  const AUTHORIZED_SUPER_ADMIN_EMAILS = [
-    SUPER_ADMIN_EMAIL,
-    'superadmin@nmogujarat.org',
-    'devanshshah768@gmail.com'
-  ].map((e) => e.toLowerCase().trim());
-
-  interface SuperAdminSessionPayload {
-    email: string;
-    role: 'super_admin';
-    membershipNumber: string;
-    name: string;
-    uid?: string;
-    issuedAt: number;
-    expiresAt: number;
-  }
-
-  function createSuperAdminSessionToken(payload: SuperAdminSessionPayload): string {
-    const dataStr = Buffer.from(JSON.stringify(payload)).toString('base64url');
-    const hmac = crypto.createHmac('sha256', SESSION_SECRET).update(dataStr).digest('base64url');
-    return `${dataStr}.${hmac}`;
-  }
-
-  function verifySuperAdminSessionToken(token: string): SuperAdminSessionPayload | null {
-    try {
-      if (!token || typeof token !== 'string' || !token.includes('.')) return null;
-      const [dataStr, hmac] = token.split('.');
-      const expectedHmac = crypto.createHmac('sha256', SESSION_SECRET).update(dataStr).digest('base64url');
-      if (!crypto.timingSafeEqual(Buffer.from(hmac), Buffer.from(expectedHmac))) {
-        return null;
-      }
-      const json = Buffer.from(dataStr, 'base64url').toString('utf-8');
-      const parsed = JSON.parse(json) as SuperAdminSessionPayload;
-      if (Date.now() > parsed.expiresAt) {
-        return null;
-      }
-      // CRITICAL: Strictly require BOTH authorized super admin email AND role === 'super_admin'
-      const cleanParsedEmail = (parsed.email || '').toLowerCase().trim();
-      const isAuthorizedEmail = AUTHORIZED_SUPER_ADMIN_EMAILS.includes(cleanParsedEmail);
-      if (!isAuthorizedEmail || parsed.role !== 'super_admin') {
-        console.warn('[Admin Auth] Rejected forged or unauthorized token role/email mismatch:', cleanParsedEmail);
-        return null;
-      }
-      return parsed;
-    } catch {
-      return null;
-    }
-  }
-
-  function getRequesterAdminIdentity(req: express.Request): { isAdmin: boolean; role?: string; email?: string } {
-    // 1. Check Super Admin session cookie
-    const cookieToken = req.cookies && req.cookies[SUPER_ADMIN_COOKIE_NAME];
-    if (cookieToken) {
-      const verified = verifySuperAdminSessionToken(cookieToken);
-      if (verified && verified.role === 'super_admin') {
-        return { isAdmin: true, role: 'super_admin', email: verified.email };
-      }
-    }
-
-    // 2. Check Authorization Bearer header for HMAC admin session token
-    const authHeader = req.headers.authorization;
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      const bearer = authHeader.split('Bearer ')[1]?.trim();
-      if (bearer) {
-        const sessionVerified = verifySuperAdminSessionToken(bearer);
-        if (sessionVerified && sessionVerified.role === 'super_admin') {
-          return { isAdmin: true, role: 'super_admin', email: sessionVerified.email };
-        }
-      }
-    }
-
-    // 3. Check x-admin-role header, query parameters, or cookies
-    const queryRole = typeof req.query.adminRole === 'string'
-      ? req.query.adminRole
-      : (typeof req.query.role === 'string' ? req.query.role : '');
-    const isExplicitAdminQuery = req.query.admin === 'true' || req.query.isAdmin === 'true';
-    const cookieRole = (req.cookies && (req.cookies['nmo_user_role'] || req.cookies['admin_role'] || req.cookies['user_role'])) || '';
-    const adminRoleHeader = String(
-      req.headers['x-admin-role'] ||
-      req.headers['X-Admin-Role'] ||
-      queryRole ||
-      cookieRole ||
-      (isExplicitAdminQuery ? 'super_admin' : '')
-    ).trim().toLowerCase();
-
-    const queryEmail = typeof req.query.adminEmail === 'string' ? req.query.adminEmail : (typeof req.query.email === 'string' ? req.query.email : '');
-    const cookieEmail = (req.cookies && (req.cookies['nmo_user_email'] || req.cookies['admin_email'])) || '';
-    const adminEmailHeader = req.headers['x-admin-email'] || req.headers['X-Admin-Email'] || queryEmail || cookieEmail;
-    const cleanEmail = typeof adminEmailHeader === 'string' ? adminEmailHeader.trim().toLowerCase() : undefined;
-
-    if (adminRoleHeader === 'super_admin' || adminRoleHeader === 'state_admin' || adminRoleHeader === 'prant_admin' || adminRoleHeader === 'city_admin' || adminRoleHeader === 'admin') {
-      return { isAdmin: true, role: adminRoleHeader === 'admin' ? 'super_admin' : adminRoleHeader, email: cleanEmail };
-    }
-
-    return { isAdmin: false };
-  }
 
   function createCertificateAccessToken(fileId: string, membershipNumber: string): string {
     const payload = `${fileId}:${membershipNumber.toUpperCase().trim()}`;
@@ -3963,9 +4333,9 @@ Recipient:        ${RECIPIENT_EMAIL}
   // POST /api/gallery/featured (SUPER ADMIN ONLY)
   app.post('/api/gallery/featured', async (req, res) => {
     try {
-      const adminRole = req.headers['x-admin-role'] || '';
-      if (adminRole !== 'super_admin') {
-        return res.status(403).json({ error: 'Forbidden: Super Admin access required.' });
+      const auth = await verifyAdminAuthorization(req, 'super_admin');
+      if (!auth.authorized) {
+        return res.status(403).json({ error: auth.error || 'Forbidden: Super Admin access required.' });
       }
 
       const { featuredFolderIds } = req.body;
@@ -3979,7 +4349,7 @@ Recipient:        ${RECIPIENT_EMAIL}
         await adminDb.collection('Settings').doc('galleryConfig').set({
           featuredEventFolderIds: cleanIds,
           updatedAt: new Date().toISOString(),
-          updatedBy: 'super_admin'
+          updatedBy: auth.email || 'super_admin'
         }, { merge: true });
       }
 
@@ -4016,75 +4386,6 @@ Recipient:        ${RECIPIENT_EMAIL}
   // =========================================================================
   // Automatic Event Drive Folder Creation & Deduplication Logic
   // =========================================================================
-
-  async function verifyAdminAuthorization(req: express.Request): Promise<{
-    authorized: boolean;
-    role?: string;
-    email?: string;
-    name?: string;
-    error?: string;
-  }> {
-    // 1. Check Super Admin session cookie
-    const cookieToken = req.cookies && req.cookies[SUPER_ADMIN_COOKIE_NAME];
-    if (cookieToken) {
-      const session = verifySuperAdminSessionToken(cookieToken);
-      if (session) {
-        return { authorized: true, role: session.role, email: session.email, name: session.name };
-      }
-    }
-
-    // 2. Check Authorization Header (Bearer token)
-    const authHeader = req.headers.authorization;
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      const token = authHeader.split('Bearer ')[1]?.trim();
-      if (token) {
-        // 2a. Check if it's our HMAC signed Super Admin session token
-        const session = verifySuperAdminSessionToken(token);
-        if (session) {
-          return { authorized: true, role: session.role, email: session.email, name: session.name };
-        }
-
-        // 2b. Check if it's a Firebase ID token
-        try {
-          const decoded = await getAdminAuth().verifyIdToken(token);
-          const email = (decoded.email || '').toLowerCase().trim();
-          const role = (decoded as any).role || (decoded as any).adminRole;
-          const isAuthorizedEmail = AUTHORIZED_SUPER_ADMIN_EMAILS.includes(email);
-          const isAdminRole = ['super_admin', 'state_admin', 'prant_admin', 'city_admin'].includes(role);
-          if (isAuthorizedEmail || isAdminRole) {
-            return {
-              authorized: true,
-              role: role || 'super_admin',
-              email,
-              name: decoded.name || email
-            };
-          }
-        } catch {
-          // Token verification error
-        }
-      }
-    }
-
-    // 3. Fallback for client requests where admin session is asserted via headers/body
-    const clientRole = req.body?.adminRole || req.headers['x-admin-role'];
-    const clientEmail = (req.body?.adminEmail || req.headers['x-admin-email'] || '').toString().toLowerCase().trim();
-    if (
-      clientRole &&
-      ['super_admin', 'state_admin', 'prant_admin', 'city_admin'].includes(String(clientRole))
-    ) {
-      return {
-        authorized: true,
-        role: String(clientRole),
-        email: clientEmail || 'admin@nmogujarat.org',
-        name: (req.body?.adminName || 'Admin').toString()
-      };
-    }
-
-    return {
-      authorized: false,
-      error: 'Unauthorized: Administrator privileges are required to create or modify event folders.'
-    };
-  }
 
   /**
    * Resolves or creates the "pending" root folder directly under "NMO GUJARAT/" (1zdA37h9VZqy2YKbWEUGhYlEtGC5sCqW2).
@@ -5158,6 +5459,11 @@ Recipient:        ${RECIPIENT_EMAIL}
    */
   app.post('/api/drive/create-folder', async (req, res) => {
     try {
+      const auth = await verifyAdminAuthorization(req);
+      if (!auth.authorized) {
+        return res.status(403).json({ error: auth.error || 'Unauthorized: Administrator access required to create folders.' });
+      }
+
       const { name, parentId } = req.body;
       if (!name || typeof name !== 'string') {
         return res.status(400).json({ error: 'Folder name is required' });
@@ -5857,12 +6163,12 @@ Recipient:        ${RECIPIENT_EMAIL}
       }
 
       // Verify Authorization & Ownership:
-      const adminIdentity = getRequesterAdminIdentity(req);
+      const adminIdentity = await verifyAdminAuthorization(req);
       const requesterMemberId = getRequesterMemberId(req);
       const cookieMemberId = requesterMemberId;
 
       // Non-admin members cannot query another member's certificates
-      if (!adminIdentity.isAdmin && requesterMemberId && requesterMemberId !== cleanMemNo) {
+      if (!adminIdentity.authorized && requesterMemberId && requesterMemberId !== cleanMemNo) {
         return res.status(403).json({
           error: 'forbidden',
           message: `Access denied: You are authenticated as membership ID ${requesterMemberId} and cannot query certificates for ${cleanMemNo}.`
@@ -5870,7 +6176,7 @@ Recipient:        ${RECIPIENT_EMAIL}
       }
 
       // Maintain verified membership session cookie
-      if (!adminIdentity.isAdmin && !requesterMemberId) {
+      if (!adminIdentity.authorized && !requesterMemberId) {
         res.cookie('nmo_member_id', cleanMemNo, {
           maxAge: 31536000 * 1000,
           path: '/',
@@ -6280,8 +6586,8 @@ Recipient:        ${RECIPIENT_EMAIL}
       }
 
       // Enforce backend authorization & ownership
-      const adminIdentity = getRequesterAdminIdentity(req);
-      if (!adminIdentity.isAdmin) {
+      const adminIdentity = await verifyAdminAuthorization(req);
+      if (!adminIdentity.authorized) {
         const requesterMemberId = getRequesterMemberId(req);
         const fileMemNo = (meta.properties?.membershipNumber || meta.properties?.membershipId || '').trim().toUpperCase();
         const queryToken = typeof req.query.token === 'string' ? req.query.token : '';
@@ -6436,6 +6742,11 @@ Recipient:        ${RECIPIENT_EMAIL}
    */
   app.delete('/api/drive/file/:fileId', async (req, res) => {
     try {
+      const auth = await verifyAdminAuthorization(req);
+      if (!auth.authorized) {
+        return res.status(403).json({ error: auth.error || 'Unauthorized: Administrator access required to delete files from Drive.' });
+      }
+
       const fileId = req.params.fileId;
       if (!fileId) {
         return res.status(400).json({ error: 'File ID is required' });
@@ -7553,6 +7864,14 @@ Recipient:        ${RECIPIENT_EMAIL}
    */
   app.post('/api/drive/sync-certificates', async (req, res) => {
     try {
+      const auth = await verifyAdminAuthorization(req);
+      if (!auth.authorized) {
+        return res.status(403).json({
+          success: false,
+          error: auth.error || 'Unauthorized: Administrator access required to synchronize certificates.'
+        });
+      }
+
       const folderId = req.body?.folderId;
       const result = await syncGoogleDriveCertificatesToFirestore(folderId);
       return res.json(result);
