@@ -351,12 +351,12 @@ export const MemberCertificatesTab: React.FC = () => {
 
       if ((uploaded as any)?.alreadyExisted) {
         setUploadFeedback({
-          message: `Certificate "${uploaded.name}" is already securely stored in Google Drive for this event. Record verified.`,
+          message: `Certificate "${uploaded.name}" is already securely recorded for this event.`,
           type: 'success'
         });
       } else {
         setUploadFeedback({
-          message: `Certificate "${uploaded.name}" successfully uploaded and submitted for Admin Approval! Your submission is now in the review queue. Once verified by an administrator, it will be marked approved and officially certified.`,
+          message: `Certificate "${uploaded.name}" successfully uploaded and submitted for Admin Approval! Your submission is now in the review queue. Once verified by an administrator, it will be approved.`,
           type: 'success'
         });
       }
@@ -369,13 +369,13 @@ export const MemberCertificatesTab: React.FC = () => {
     } catch (err: any) {
       if (err.conflict) {
         setUploadFeedback({
-          message: `A certificate for this event already exists in Google Drive (${err.existingFileName || 'verified file'}). Your certificate is securely stored.`,
+          message: `A certificate for this event is already recorded (${err.existingFileName || 'verified file'}).`,
           type: 'success'
         });
         await loadCertificates();
       } else {
         setUploadFeedback({
-          message: err.message || 'Failed to upload certificate to Google Drive repository.',
+          message: 'Unable to upload certificate at this time. Please check your connection and retry.',
           type: 'error'
         });
       }
@@ -400,7 +400,7 @@ export const MemberCertificatesTab: React.FC = () => {
       const downloadName = cert.name || (cert as any).originalFileName || `${memberNo || 'Certificate'}.pdf`;
       await downloadDriveCertificate(cert.id, downloadName, memberNo, proxyDownloadUrl);
     } catch (err: any) {
-      alert(err.message || 'Failed to download certificate from Google Drive.');
+      alert('Unable to download certificate at this time. Please try again.');
     } finally {
       setDownloadingId(null);
     }
@@ -409,7 +409,7 @@ export const MemberCertificatesTab: React.FC = () => {
   const handleDeleteUserCert = async (cert: DriveCertificateFile) => {
     const certName = cert.name || (cert as any).originalFileName || 'Certificate';
     const confirmDelete = window.confirm(
-      `Are you sure you want to delete your uploaded certificate submission "${certName}"?\n\nThis will remove the file from Google Drive and delete your pending submission.`
+      `Are you sure you want to delete your uploaded certificate submission "${certName}"?\n\nThis will permanently delete your pending submission.`
     );
     if (!confirmDelete) return;
 
@@ -418,7 +418,7 @@ export const MemberCertificatesTab: React.FC = () => {
       await deleteUserUploadedCertificate(cert.id, cert.id, memberNo);
       setCertificates((prev) => prev.filter((c) => c.id !== cert.id));
       setUploadFeedback({
-        message: `Your certificate submission "${certName}" has been permanently removed from Google Drive.`,
+        message: `Your certificate submission "${certName}" has been permanently removed.`,
         type: 'success'
       });
     } catch (err: any) {
@@ -508,14 +508,14 @@ export const MemberCertificatesTab: React.FC = () => {
             <div>
               <div className="flex items-center gap-2">
                 <h3 className="text-xl font-black text-slate-900">
-                  Official Certificate Portal
+                  My Certificates
                 </h3>
                 <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-200">
-                  Verified NMO Digital Archive
+                  Verified Records
                 </span>
               </div>
               <p className="text-xs text-slate-500 mt-1 max-w-xl leading-relaxed">
-                Certificates assigned to your Membership ID (<strong>{memberNo}</strong>) are automatically synchronized from the organization's verified digital repository. You can also upload your verified event attendance or paper presentation certificates below.
+                Certificates assigned to your Membership ID (<strong>{memberNo}</strong>) are displayed below. You can also upload event attendance or presentation certificates for administrative review.
               </p>
             </div>
           </div>
@@ -576,11 +576,11 @@ export const MemberCertificatesTab: React.FC = () => {
             <div className="flex items-center gap-2.5 mb-4 pb-3 border-b border-slate-100">
               <Upload className="w-5 h-5 text-red-700" />
               <h4 className="font-bold text-slate-900 text-sm sm:text-base">
-                Upload Certificate to NMO Repository
+                Upload Certificate
               </h4>
             </div>
             <p className="text-xs text-slate-500 mb-4 leading-relaxed">
-              Upload your event certificate, paper presentation, or workshop completion document. It will be stored securely in the central NMO repository and tagged with your Membership ID: <strong className="text-slate-800">{memberNo}</strong>.
+              Upload your event certificate, paper presentation, or workshop completion document. It will be submitted for review and linked to your Membership ID: <strong className="text-slate-800">{memberNo}</strong>.
             </p>
 
             <form onSubmit={handleUpload} className="space-y-4 text-xs">
@@ -646,7 +646,7 @@ export const MemberCertificatesTab: React.FC = () => {
                   </p>
                   <div className="p-2.5 bg-white/80 rounded-xl border border-purple-200 text-[11px] text-purple-900 font-medium flex items-center gap-2">
                     <Clock className="w-3.5 h-3.5 text-purple-600 shrink-0" />
-                    <span>Please wait for the administrator to issue and publish your certificate to the repository.</span>
+                    <span>Please wait for the administrator to issue and publish your certificate.</span>
                   </div>
                 </div>
               )}
@@ -726,12 +726,12 @@ export const MemberCertificatesTab: React.FC = () => {
                       ) : isUploading ? (
                         <>
                           <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                          <span>Uploading to Official Repository...</span>
+                          <span>Uploading Certificate...</span>
                         </>
                       ) : (
                         <>
                           <Upload className="w-4 h-4" />
-                          <span>Upload Certificate to Repository</span>
+                          <span>Upload Certificate</span>
                         </>
                       )}
                     </button>
@@ -741,13 +741,13 @@ export const MemberCertificatesTab: React.FC = () => {
             </form>
           </div>
 
-          <div className="mt-6 p-4 rounded-xl bg-amber-50/70 border border-amber-200 text-amber-900 text-[11px] space-y-1">
-            <div className="font-bold flex items-center gap-1.5">
-              <Sparkles className="w-3.5 h-3.5 text-amber-600" />
-              <span>Automated Membership Tagging</span>
+          <div className="mt-6 p-4 rounded-xl bg-slate-50 border border-slate-200 text-slate-700 text-[11px] space-y-1">
+            <div className="font-bold flex items-center gap-1.5 text-slate-800">
+              <Sparkles className="w-3.5 h-3.5 text-slate-600" />
+              <span>Submission Guidelines</span>
             </div>
             <p className="leading-relaxed">
-              Files uploaded here are saved into the master NMO Gujarat repository under your Membership ID so they are permanently accessible on your profile.
+              Uploaded certificates are reviewed by administrators before being marked approved and added to your verified records.
             </p>
           </div>
         </div>
@@ -842,14 +842,14 @@ export const MemberCertificatesTab: React.FC = () => {
             {isBackgroundSyncing && displayedCertificates.length > 0 && (
               <div className="flex items-center gap-1.5 px-3 py-1.5 mb-2 bg-slate-50 border border-slate-200 rounded-lg text-[11px] text-slate-500 font-medium animate-pulse">
                 <RefreshCw className="w-3 h-3 text-red-700 animate-spin" />
-                <span>Checking verified repository for recent certificate updates...</span>
+                <span>Checking for recent certificate updates...</span>
               </div>
             )}
 
             {isLoadingCerts && displayedCertificates.length === 0 ? (
               <div className="py-16 text-center text-slate-400">
                 <div className="w-7 h-7 border-2 border-red-700 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-                <p className="text-xs">Searching verified repository for your certificates...</p>
+                <p className="text-xs">Loading certificates...</p>
               </div>
             ) : displayedCertificates.length === 0 ? (
               <div className="py-12 text-center text-slate-400 space-y-3">
@@ -875,8 +875,8 @@ export const MemberCertificatesTab: React.FC = () => {
                     : statusFilter === 'rejected'
                     ? 'You have no rejected certificate submissions.'
                     : statusFilter === 'missing'
-                    ? 'All your certificate files are safely available in the verified repository.'
-                    : `Certificates are retrieved using your Membership ID (${memberNo}). Upload your certificate or wait for organizers to issue your certificate.`}
+                    ? 'All your certificates are available.'
+                    : `Certificates issued to your Membership ID (${memberNo}) will appear here once published.`}
                 </p>
                 <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-100 text-[10px] text-slate-600 font-medium mt-1">
                   <span>🔒 Privacy Protected: Only your own certificates are displayed</span>
@@ -950,7 +950,7 @@ export const MemberCertificatesTab: React.FC = () => {
                         {isMissing && (
                           <div className="p-2 bg-amber-50 border border-amber-200 rounded-lg text-amber-900 text-[11px] font-medium flex items-start gap-1.5 mt-1">
                             <AlertCircle className="w-3.5 h-3.5 text-amber-600 shrink-0 mt-0.5" />
-                            <span>Certificate file requires re-uploading to the verified repository. Please re-upload your certificate to restore it.</span>
+                            <span>Certificate file requires re-uploading. Please submit a new copy.</span>
                           </div>
                         )}
 

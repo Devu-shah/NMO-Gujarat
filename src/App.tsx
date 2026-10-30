@@ -13,15 +13,25 @@ import { AnnouncementsTicker } from './components/AnnouncementsTicker';
 import { EventsSection } from './components/EventsSection';
 import { AboutSection } from './components/AboutSection';
 import { GallerySection } from './components/GallerySection';
-import { DedicatedGalleryPage } from './components/DedicatedGalleryPage';
 import { ActivitiesSection } from './components/ActivitiesSection';
-import { ContactUsPage } from './components/ContactUsPage';
 import { Footer } from './components/Footer';
 import { PublicVerifyModal } from './components/PublicVerifyModal';
-import { MemberDashboard } from './components/MemberDashboard';
-import { AdminPortal } from './components/admin/AdminPortal';
 import { LoginPage } from './components/LoginPage';
 import { LoadingScreen } from './components/LoadingScreen';
+
+// Lazy-loaded routes for code splitting and initial bundle size optimization
+const DedicatedGalleryPage = React.lazy(() =>
+  import('./components/DedicatedGalleryPage').then((m) => ({ default: m.DedicatedGalleryPage }))
+);
+const ContactUsPage = React.lazy(() =>
+  import('./components/ContactUsPage').then((m) => ({ default: m.ContactUsPage }))
+);
+const MemberDashboard = React.lazy(() =>
+  import('./components/MemberDashboard').then((m) => ({ default: m.MemberDashboard }))
+);
+const AdminPortal = React.lazy(() =>
+  import('./components/admin/AdminPortal').then((m) => ({ default: m.AdminPortal }))
+);
 import { UserRole, PrantType } from './types/nmo';
 import { AlertTriangle, X } from 'lucide-react';
 
@@ -245,27 +255,51 @@ function MainLayout() {
 
   // --- ROUTE 2-6: DEDICATED ADMIN PORTALS (/admin/*) ---
   if (currentRoute === '/admin/super') {
-    return <AdminPortal portalScope="super" onBackToSite={() => navigate('/')} />;
+    return (
+      <React.Suspense fallback={<LoadingScreen />}>
+        <AdminPortal portalScope="super" onBackToSite={() => navigate('/')} />
+      </React.Suspense>
+    );
   }
 
   if (currentRoute === '/admin/state') {
-    return <AdminPortal portalScope="state" onBackToSite={() => navigate('/')} />;
+    return (
+      <React.Suspense fallback={<LoadingScreen />}>
+        <AdminPortal portalScope="state" onBackToSite={() => navigate('/')} />
+      </React.Suspense>
+    );
   }
 
   if (currentRoute === '/admin/prant/gujarat') {
-    return <AdminPortal portalScope="prant/gujarat" onBackToSite={() => navigate('/')} />;
+    return (
+      <React.Suspense fallback={<LoadingScreen />}>
+        <AdminPortal portalScope="prant/gujarat" onBackToSite={() => navigate('/')} />
+      </React.Suspense>
+    );
   }
 
   if (currentRoute === '/admin/prant/saurashtra') {
-    return <AdminPortal portalScope="prant/saurashtra" onBackToSite={() => navigate('/')} />;
+    return (
+      <React.Suspense fallback={<LoadingScreen />}>
+        <AdminPortal portalScope="prant/saurashtra" onBackToSite={() => navigate('/')} />
+      </React.Suspense>
+    );
   }
 
   if (currentRoute === '/admin/city' || currentRoute.startsWith('/admin/city/')) {
-    return <AdminPortal portalScope="city" onBackToSite={() => navigate('/')} />;
+    return (
+      <React.Suspense fallback={<LoadingScreen />}>
+        <AdminPortal portalScope="city" onBackToSite={() => navigate('/')} />
+      </React.Suspense>
+    );
   }
 
   if (currentRoute.startsWith('/admin')) {
-    return <AdminPortal onBackToSite={() => navigate('/')} />;
+    return (
+      <React.Suspense fallback={<LoadingScreen />}>
+        <AdminPortal onBackToSite={() => navigate('/')} />
+      </React.Suspense>
+    );
   }
 
   // --- ROUTE 7: MEMBER DASHBOARD (/dashboard) ---
@@ -279,10 +313,12 @@ function MainLayout() {
           onOpenVerify={() => setIsVerifyOpen(true)}
         />
         <main className="flex-1">
-          <MemberDashboard
-            initialTab={memberActiveTab}
-            onTabChange={(t) => setMemberActiveTab(t as any)}
-          />
+          <React.Suspense fallback={<LoadingScreen />}>
+            <MemberDashboard
+              initialTab={memberActiveTab}
+              onTabChange={(t) => setMemberActiveTab(t as any)}
+            />
+          </React.Suspense>
         </main>
         <Footer
           onNavigate={handleNavigate}
@@ -308,13 +344,15 @@ function MainLayout() {
           onOpenVerify={() => setIsVerifyOpen(true)}
         />
         <main className="flex-1">
-          <ContactUsPage
-            onNavigateHome={() => {
-              setActiveTab('home');
-              navigate('/');
-            }}
-            onNavigate={handleNavigate}
-          />
+          <React.Suspense fallback={<LoadingScreen />}>
+            <ContactUsPage
+              onNavigateHome={() => {
+                setActiveTab('home');
+                navigate('/');
+              }}
+              onNavigate={handleNavigate}
+            />
+          </React.Suspense>
         </main>
         <Footer
           onNavigate={handleNavigate}
@@ -340,12 +378,14 @@ function MainLayout() {
           onOpenVerify={() => setIsVerifyOpen(true)}
         />
         <main className="flex-1">
-          <DedicatedGalleryPage
-            onBackToHome={() => {
-              setActiveTab('home');
-              navigate('/');
-            }}
-          />
+          <React.Suspense fallback={<LoadingScreen />}>
+            <DedicatedGalleryPage
+              onBackToHome={() => {
+                setActiveTab('home');
+                navigate('/');
+              }}
+            />
+          </React.Suspense>
         </main>
         <Footer
           onNavigate={handleNavigate}

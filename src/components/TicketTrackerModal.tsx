@@ -77,7 +77,7 @@ export const TicketTrackerModal: React.FC<TicketTrackerModalProps> = ({
         );
       }
     } catch (err: any) {
-      setSearchError('Search failed: ' + err.message);
+      setSearchError('Unable to verify ticket at this time. Please check your Reference ID and email, or try again later.');
     } finally {
       setIsSearching(false);
     }
@@ -98,10 +98,10 @@ export const TicketTrackerModal: React.FC<TicketTrackerModalProps> = ({
           closedAt: new Date().toISOString()
         });
       } else {
-        alert('Failed to record approval: ' + res.error);
+        alert('Unable to record solution approval at this time. Please retry.');
       }
     } catch (err: any) {
-      alert('Error approving solution: ' + err.message);
+      alert('Unable to record solution approval at this time. Please retry.');
     } finally {
       setIsApproving(false);
     }

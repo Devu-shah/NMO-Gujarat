@@ -1111,19 +1111,15 @@ Recipient:        ${RECIPIENT_EMAIL}
         }
       }
 
-      // 9. Return response with comprehensive status
+      // 9. Return sanitized response (strip internal recipients, message IDs, and relay status)
+      console.log(`[Contact API] Inquiry ${inquiryId} processed. Delivered: ${emailResult.delivered}. Recipient: ${RECIPIENT_EMAIL}. MessageId: ${emailResult.messageId || 'none'}. Error: ${emailResult.error || 'none'}`);
+
       return res.status(200).json({
         success: true,
         inquiryId,
-        recipient: RECIPIENT_EMAIL,
-        emailDelivered: emailResult.delivered,
-        messageId: emailResult.messageId || undefined,
-        previewUrl: emailResult.previewUrl || undefined,
-        emailError: emailResult.error || undefined,
-        timestamp: serverTimestamp,
-        message: emailResult.delivered
-          ? 'Your inquiry has been successfully sent to the NMO Gujarat administration.'
-          : 'Your inquiry has been securely recorded. Notice: Outgoing email delivery is queued pending SMTP/Gmail configuration.'
+        ticketId: inquiryId,
+        status: 'received',
+        message: 'Your inquiry has been received by NMO Gujarat. A representative will review it shortly.'
       });
     } catch (err: any) {
       console.error('[Contact API] Unexpected error handling contact inquiry:', err);
@@ -3027,7 +3023,7 @@ Recipient:        ${RECIPIENT_EMAIL}
       });
     } catch (err: any) {
       console.error('[Track Inquiry API] Error:', err);
-      return res.status(500).json({ error: 'internal_error', message: err.message });
+      return res.status(500).json({ error: 'internal_error', message: 'Unable to retrieve ticket details. Please try again later.' });
     }
   });
 
@@ -7932,9 +7928,19 @@ Recipient:        ${RECIPIENT_EMAIL}
     });
     app.use(vite.middlewares);
   } else {
-    // Serve pre-built static files in production
-    app.use(express.static(distPath));
+    // Serve pre-built static files in production with optimized asset caching
+    app.use(express.static(distPath, {
+      maxAge: '1d',
+      setHeaders: (res, filePath) => {
+        if (filePath.endsWith('.html')) {
+          res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        } else if (/\.(js|css|woff2?|png|jpg|jpeg|gif|ico|svg|webp)$/i.test(filePath)) {
+          res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        }
+      }
+    }));
     app.get('*', (_req, res) => {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.sendFile(path.resolve(distPath, 'index.html'));
     });
   }

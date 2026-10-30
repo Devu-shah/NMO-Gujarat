@@ -231,7 +231,7 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
         currentMember.name
       );
       setRsvpFeedback({
-        message: `Registration Confirmed for "${eventTitle}"! Registration recorded with status: Pending Review in Firestore ('event_registrations').`,
+        message: `Registration submitted for "${eventTitle}". Your registration is awaiting administrator review.`,
         type: 'success'
       });
       setTimeout(() => setRsvpFeedback(null), 6000);
@@ -305,10 +305,10 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
                 setIsUploadModalOpen(true);
               }}
               className="px-3 py-2 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-xs cursor-pointer"
-              title="Upload your certificate (JPG/PNG) to NMO Repository"
+              title="Upload your certificate"
             >
               <Award className="w-4 h-4 text-emerald-200" />
-              <span>Upload Certificate (JPG/PNG)</span>
+              <span>Upload Certificate</span>
             </button>
             <button
               type="button"
@@ -442,11 +442,11 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
                 </div>
                 <div>
                   <h4 className="font-bold text-sm tracking-tight text-white flex items-center gap-2">
-                    <span>Official Certificate Repository</span>
+                    <span>My Certificates</span>
                     <span className="text-[10px] bg-amber-400 text-slate-950 font-extrabold px-2 py-0.5 rounded-full">Verified Record</span>
                   </h4>
                   <p className="text-xs text-slate-300 mt-0.5">
-                    Upload your participation certificates (JPG/PNG only) or retrieve your official certificates issued to Membership ID: <strong className="font-mono text-amber-300">{currentMember.membershipNumber}</strong>.
+                    Upload your participation certificates or view official certificates issued to Membership ID: <strong className="font-mono text-amber-300">{currentMember.membershipNumber}</strong>.
                   </p>
                 </div>
               </div>

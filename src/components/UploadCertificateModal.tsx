@@ -179,7 +179,7 @@ export const UploadCertificateModal: React.FC<UploadCertificateModalProps> = ({
       }, 1500);
     } catch (err: any) {
       console.error('Certificate upload error:', err);
-      setErrorMessage(err.message || 'Failed to upload certificate to Google Drive. Please retry.');
+      setErrorMessage('Unable to upload certificate at this time. Please check your connection and retry.');
     } finally {
       setIsUploading(false);
     }
@@ -203,9 +203,9 @@ export const UploadCertificateModal: React.FC<UploadCertificateModalProps> = ({
               <Upload className="w-5 h-5 text-amber-300" />
             </div>
             <div>
-              <h3 className="text-lg font-black tracking-tight">Upload Certificate to NMO Repository</h3>
+              <h3 className="text-lg font-black tracking-tight">Upload Certificate</h3>
               <p className="text-xs text-amber-200">
-                Official JPG / PNG format · Tagged to Membership ID
+                Supported formats: PDF, JPG, PNG (Max 1 MB)
               </p>
             </div>
           </div>
@@ -381,11 +381,11 @@ export const UploadCertificateModal: React.FC<UploadCertificateModalProps> = ({
               />
             </div>
 
-            {/* Storage Mechanism Note */}
-            <div className="p-3 bg-amber-50/80 border border-amber-200 rounded-xl text-[11px] text-amber-900 flex items-start gap-2">
-              <Sparkles className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+            {/* Upload Guidelines Note */}
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-[11px] text-slate-700 flex items-start gap-2">
+              <Sparkles className="w-4 h-4 text-slate-500 shrink-0 mt-0.5" />
               <p className="leading-relaxed">
-                <strong>Storage Policy:</strong> Max size 1 MB. The certificate will be saved using your Membership ID only (<code>{memberNo ? `${memberNo}.${selectedFile?.name.split('.').pop()?.toLowerCase() || 'jpg'}` : 'MEMBERSHIP_ID'}</code>) directly into the official repository and submitted for admin review.
+                <strong>Upload Guidelines:</strong> Supported formats are PDF, JPG, JPEG, and PNG (maximum 1 MB). Your submission will be securely linked to your profile and reviewed by an administrator.
               </p>
             </div>
 
@@ -428,12 +428,12 @@ export const UploadCertificateModal: React.FC<UploadCertificateModalProps> = ({
                     ) : isUploading ? (
                       <>
                         <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                        <span>Uploading to Repository...</span>
+                        <span>Uploading Certificate...</span>
                       </>
                     ) : (
                       <>
                         <Upload className="w-4 h-4" />
-                        <span>Upload to Repository</span>
+                        <span>Upload Certificate</span>
                       </>
                     )}
                   </button>

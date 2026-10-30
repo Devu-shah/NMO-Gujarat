@@ -72,7 +72,7 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ member }) => {
       setSavedSuccess(true);
       setTimeout(() => setSavedSuccess(false), 3000);
     } catch (err: any) {
-      alert('Error updating profile: ' + err.message);
+      alert('Unable to update contact information at this time. Please retry.');
     } finally {
       setIsSaving(false);
     }
@@ -197,9 +197,9 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ member }) => {
             </div>
 
             <div>
-              <label className="block text-slate-500 mb-1">State Secretary Email</label>
+              <label className="block text-slate-500 mb-1">Official Secretariat Contact</label>
               <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-slate-700">
-                {member.stateSecretaryEmail || 'secretary.gujarat@nmogujarat.org'}
+                contact@nmogujarat.org
               </div>
             </div>
 
