@@ -18,6 +18,7 @@ import { Footer } from './components/Footer';
 import { PublicVerifyModal } from './components/PublicVerifyModal';
 import { LoginPage } from './components/LoginPage';
 import { LoadingScreen } from './components/LoadingScreen';
+import { ServerError500Page } from './components/ServerError500Page';
 
 // Lazy-loaded routes for code splitting and initial bundle size optimization
 const DedicatedGalleryPage = React.lazy(() =>
@@ -47,7 +48,7 @@ export function getRedirectRouteForUser(role?: UserRole, prant?: PrantType): str
 }
 
 function MainLayout() {
-  const { isLoadingAuth, currentUser, currentMember } = useNMO();
+  const { isLoadingAuth, currentUser, currentMember, emergencyLockdown } = useNMO();
 
   // Current client route: '/', '/login', '/dashboard', '/admin/super', '/admin/state', '/admin/prant/gujarat', '/admin/prant/saurashtra'
   const [currentRoute, setCurrentRoute] = useState<string>(() => {
@@ -84,6 +85,13 @@ function MainLayout() {
   useEffect(() => {
     if (isLoadingAuth) return;
 
+    // During emergency lockdown, non-superadmin users stay on current URL to see 500 page or superadmin login
+    if (emergencyLockdown) {
+      if (currentUser?.role !== 'super_admin') {
+        return;
+      }
+    }
+
     // 1. If at login and already authenticated, auto-redirect to designated dashboard
     if (currentRoute === '/login' && currentUser) {
       const destination = getRedirectRouteForUser(currentUser.role, currentUser.prant);
@@ -91,14 +99,8 @@ function MainLayout() {
       return;
     }
 
-    // 2. If accessing protected admin route
-    if (currentRoute.startsWith('/admin')) {
-      if (!currentUser) {
-        setUnauthorizedMessage('Authentication required to access the Administrative Console. Please sign in.');
-        navigate('/login');
-        return;
-      }
-
+    // 2. If authenticated user attempts to access an administrative tier they are not permitted for
+    if (currentUser && currentRoute.startsWith('/admin')) {
       // Check Super Admin route protection
       if (currentRoute === '/admin/super' && currentUser.role !== 'super_admin') {
         setUnauthorizedMessage(`Unauthorized access to /admin/super. Your account role (${currentUser.role}) has been redirected to your permitted console.`);
@@ -142,6 +144,12 @@ function MainLayout() {
       }
     }
 
+    // Generic protected admin path without specific subpath
+    if (currentRoute === '/admin' && !currentUser) {
+      navigate('/login');
+      return;
+    }
+
     // 3. If accessing /dashboard
     if (currentRoute.startsWith('/dashboard')) {
       if (!currentUser && !currentMember) {
@@ -149,7 +157,7 @@ function MainLayout() {
         navigate('/login');
       }
     }
-  }, [currentRoute, currentUser, currentMember, isLoadingAuth]);
+  }, [currentRoute, currentUser, currentMember, isLoadingAuth, emergencyLockdown]);
 
   // Determine active tab for common Navbar (Must be called before any early return)
   const currentActiveNavTab = useMemo(() => {
@@ -224,6 +232,42 @@ function MainLayout() {
     }
   };
 
+  // --- EMERGENCY 500 SERVER ERROR LOCKDOWN INTERCEPTOR ---
+  // When active, all website URLs dynamically redirect to / display an authentic 500 Server Error page.
+  // ONLY the explicit Super Administrator URL ({website}/admin/super) can bypass the 500 error and view the login page.
+  // Normal users and other admins are unable to access the website.
+  if (emergencyLockdown) {
+    const isSuperAdminLoggedIn = currentUser?.role === 'super_admin';
+
+    // If Super Admin is already authenticated, allow normal administrative portal access
+    if (!isSuperAdminLoggedIn) {
+      if (currentRoute === '/admin/super') {
+        return (
+          <div className="min-h-screen flex flex-col bg-slate-900">
+            <LoginPage
+              portalContext="super_admin"
+              isEmergencyLockdownActive={true}
+              onSuccessRedirect={(resolvedRole) => {
+                if (resolvedRole === 'super_admin') {
+                  navigate('/admin/super');
+                } else {
+                  navigate('/');
+                }
+              }}
+              onNavigateHome={() => navigate('/')}
+            />
+          </div>
+        );
+      }
+
+      return (
+        <ServerError500Page
+          onBypassLogin={() => navigate('/admin/super')}
+        />
+      );
+    }
+  }
+
   // --- ROUTE 1: UNIFIED LOGIN PAGE (/login) ---
   if (currentRoute === '/login') {
     return (
@@ -253,8 +297,23 @@ function MainLayout() {
     );
   }
 
-  // --- ROUTE 2-6: DEDICATED ADMIN PORTALS (/admin/*) ---
+  // --- ROUTE 2-6: DEDICATED ADMIN PORTALS WITH DIRECT ENTRANCE URLS (/admin/*) ---
+  // 1. {website}/admin/super
   if (currentRoute === '/admin/super') {
+    if (!currentUser) {
+      return (
+        <div className="min-h-screen flex flex-col">
+          <LoginPage
+            portalContext="super_admin"
+            onSuccessRedirect={(resolvedRole) => {
+              const dest = getRedirectRouteForUser(resolvedRole);
+              navigate(dest);
+            }}
+            onNavigateHome={() => navigate('/')}
+          />
+        </div>
+      );
+    }
     return (
       <React.Suspense fallback={<LoadingScreen />}>
         <AdminPortal portalScope="super" onBackToSite={() => navigate('/')} />
@@ -262,7 +321,22 @@ function MainLayout() {
     );
   }
 
+  // 2. {website}/admin/state
   if (currentRoute === '/admin/state') {
+    if (!currentUser) {
+      return (
+        <div className="min-h-screen flex flex-col">
+          <LoginPage
+            portalContext="state_admin"
+            onSuccessRedirect={(resolvedRole) => {
+              const dest = getRedirectRouteForUser(resolvedRole);
+              navigate(dest);
+            }}
+            onNavigateHome={() => navigate('/')}
+          />
+        </div>
+      );
+    }
     return (
       <React.Suspense fallback={<LoadingScreen />}>
         <AdminPortal portalScope="state" onBackToSite={() => navigate('/')} />
@@ -270,7 +344,45 @@ function MainLayout() {
     );
   }
 
+  // 3. {website}/admin/prant, /admin/prant/gujarat, /admin/prant/saurashtra
+  if (currentRoute === '/admin/prant') {
+    if (!currentUser) {
+      return (
+        <div className="min-h-screen flex flex-col">
+          <LoginPage
+            portalContext="prant_admin"
+            onSuccessRedirect={(resolvedRole) => {
+              const dest = getRedirectRouteForUser(resolvedRole);
+              navigate(dest);
+            }}
+            onNavigateHome={() => navigate('/')}
+          />
+        </div>
+      );
+    }
+    const prantScope = currentUser?.prant === 'Saurashtra' ? 'prant/saurashtra' : 'prant/gujarat';
+    return (
+      <React.Suspense fallback={<LoadingScreen />}>
+        <AdminPortal portalScope={prantScope} onBackToSite={() => navigate('/')} />
+      </React.Suspense>
+    );
+  }
+
   if (currentRoute === '/admin/prant/gujarat') {
+    if (!currentUser) {
+      return (
+        <div className="min-h-screen flex flex-col">
+          <LoginPage
+            portalContext="prant_admin"
+            onSuccessRedirect={(resolvedRole) => {
+              const dest = getRedirectRouteForUser(resolvedRole);
+              navigate(dest);
+            }}
+            onNavigateHome={() => navigate('/')}
+          />
+        </div>
+      );
+    }
     return (
       <React.Suspense fallback={<LoadingScreen />}>
         <AdminPortal portalScope="prant/gujarat" onBackToSite={() => navigate('/')} />
@@ -279,6 +391,20 @@ function MainLayout() {
   }
 
   if (currentRoute === '/admin/prant/saurashtra') {
+    if (!currentUser) {
+      return (
+        <div className="min-h-screen flex flex-col">
+          <LoginPage
+            portalContext="prant_admin"
+            onSuccessRedirect={(resolvedRole) => {
+              const dest = getRedirectRouteForUser(resolvedRole);
+              navigate(dest);
+            }}
+            onNavigateHome={() => navigate('/')}
+          />
+        </div>
+      );
+    }
     return (
       <React.Suspense fallback={<LoadingScreen />}>
         <AdminPortal portalScope="prant/saurashtra" onBackToSite={() => navigate('/')} />
@@ -286,7 +412,22 @@ function MainLayout() {
     );
   }
 
+  // 4. {website}/admin/city
   if (currentRoute === '/admin/city' || currentRoute.startsWith('/admin/city/')) {
+    if (!currentUser) {
+      return (
+        <div className="min-h-screen flex flex-col">
+          <LoginPage
+            portalContext="city_admin"
+            onSuccessRedirect={(resolvedRole) => {
+              const dest = getRedirectRouteForUser(resolvedRole);
+              navigate(dest);
+            }}
+            onNavigateHome={() => navigate('/')}
+          />
+        </div>
+      );
+    }
     return (
       <React.Suspense fallback={<LoadingScreen />}>
         <AdminPortal portalScope="city" onBackToSite={() => navigate('/')} />

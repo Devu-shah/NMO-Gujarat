@@ -7,9 +7,16 @@ import { UserRole } from '../types/nmo';
 interface LoginPageProps {
   onSuccessRedirect: (role: UserRole, prant?: string) => void;
   onNavigateHome: () => void;
+  portalContext?: 'super_admin' | 'state_admin' | 'prant_admin' | 'city_admin' | 'general';
+  isEmergencyLockdownActive?: boolean;
 }
 
-export const LoginPage: React.FC<LoginPageProps> = ({ onSuccessRedirect, onNavigateHome }) => {
+export const LoginPage: React.FC<LoginPageProps> = ({
+  onSuccessRedirect,
+  onNavigateHome,
+  portalContext = 'general',
+  isEmergencyLockdownActive = false
+}) => {
   const { loginWithEmail, resetPassword } = useNMO();
 
   const [email, setEmail] = useState('');
@@ -43,6 +50,13 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onSuccessRedirect, onNavig
 
       // Single Unified Authentication
       const resolvedRole = await loginWithEmail(email.trim(), password);
+
+      // In emergency lockdown, ONLY super_admin is allowed
+      if (isEmergencyLockdownActive && resolvedRole !== 'super_admin') {
+        throw new Error(
+          'EMERGENCY LOCKDOWN ACTIVE: Only Super Administrators can access the system at this time. Access denied.'
+        );
+      }
 
       // Determine redirect path
       onSuccessRedirect(resolvedRole);
@@ -82,11 +96,30 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onSuccessRedirect, onNavig
         {/* Logo & Portal Branding */}
         <div className="text-center mb-8">
           <NmoLogo size="lg" className="mx-auto mb-4" />
+
+          {isEmergencyLockdownActive && (
+            <div className="mb-3 inline-flex items-center gap-1.5 px-3 py-1 bg-rose-100 border border-rose-300 text-rose-800 rounded-full text-[11px] font-bold animate-pulse">
+              <span>Emergency 500 Lockdown Active (Super Admin Access Only)</span>
+            </div>
+          )}
+
           <h2 className="text-2xl font-black text-slate-900 tracking-tight">
-            NMO Gujarat Unified Portal
+            {portalContext === 'super_admin'
+              ? 'Super Administrator Console'
+              : portalContext === 'state_admin'
+              ? 'State Administrator Portal'
+              : portalContext === 'prant_admin'
+              ? 'Prant Administrator Portal'
+              : portalContext === 'city_admin'
+              ? 'City Administrator Portal'
+              : 'NMO Gujarat Unified Portal'}
           </h2>
           <p className="text-xs text-slate-500 font-medium mt-1.5">
-            Single secure entry for Members, State & Prant Administration
+            {isEmergencyLockdownActive
+              ? 'Emergency Recovery Mode: Restricted exclusively to Super Administrator authentication'
+              : portalContext === 'super_admin'
+              ? 'Secured Secretariat access for master system administration'
+              : 'Single secure entry for Members, State & Prant Administration'}
           </p>
         </div>
 

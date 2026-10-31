@@ -1,16 +1,31 @@
 import React, { useState } from 'react';
 import { useNMO, isProtectedAdminUser } from '../../context/NMOContext';
-import { Settings, RefreshCw, CheckCircle2, ShieldAlert, Save, Trash2, AlertTriangle, ShieldCheck } from 'lucide-react';
+import {
+  Settings,
+  RefreshCw,
+  CheckCircle2,
+  ShieldAlert,
+  Save,
+  Trash2,
+  AlertTriangle,
+  ShieldCheck,
+  ServerCrash,
+  Lock,
+  Unlock,
+  Power
+} from 'lucide-react';
 import { firebaseConfig } from '../../lib/firebase';
 import { AdminGalleryShowcaseManager } from './AdminGalleryShowcaseManager';
 
 export const AdminSettings: React.FC = () => {
-  const { currentUser, users, clearNonAdminUsers } = useNMO();
+  const { currentUser, users, clearNonAdminUsers, emergencyLockdown, setEmergencyLockdown } = useNMO();
 
   const [siteTitle, setSiteTitle] = useState('National Medicos Organisation Gujarat');
   const [secretaryEmail, setSecretaryEmail] = useState('secretary.gujarat@nmogujarat.org');
   const [helpline, setHelpline] = useState('+91 79 2658 0000');
   const [savedSuccess, setSavedSuccess] = useState(false);
+  const [isTogglingLockdown, setIsTogglingLockdown] = useState(false);
+  const [lockdownFeedback, setLockdownFeedback] = useState<string | null>(null);
 
   // Clear Non-Admin state
   const [showClearModal, setShowClearModal] = useState(false);
@@ -36,6 +51,30 @@ export const AdminSettings: React.FC = () => {
       alert('Error during user clearance: ' + e.message);
     } finally {
       setIsClearing(false);
+    }
+  };
+
+  const handleToggleEmergencyLockdown = async () => {
+    const nextState = !emergencyLockdown;
+    const confirmMessage = nextState
+      ? 'WARNING: Are you sure you want to activate EMERGENCY 500 SERVER ERROR LOCKDOWN?\n\n- All public pages, member portal, and other administrator URLs will immediately show an authentic HTTP 500 Server Error.\n- Only the explicit Super Admin URL (/admin/super) will allow access and authentication.'
+      : 'Are you sure you want to deactivate Emergency 500 Lockdown and restore normal website access?';
+
+    if (!window.confirm(confirmMessage)) return;
+
+    setIsTogglingLockdown(true);
+    setLockdownFeedback(null);
+    try {
+      await setEmergencyLockdown(nextState);
+      setLockdownFeedback(
+        nextState
+          ? 'Emergency 500 Server Error Lockdown ACTIVATED! All general URLs now return 500 Server Error. Only /admin/super is accessible.'
+          : 'Emergency 500 Server Error Lockdown DEACTIVATED. Normal portal access restored.'
+      );
+    } catch (e: any) {
+      alert('Failed to update lockdown state: ' + e.message);
+    } finally {
+      setIsTogglingLockdown(false);
     }
   };
 
@@ -139,9 +178,90 @@ export const AdminSettings: React.FC = () => {
         </div>
       </div>
 
-      {/* Database Maintenance Card */}
+      {/* Super Admin Exclusive System Controls */}
       {currentUser?.role === 'super_admin' && (
-        <div className="space-y-4">
+        <div className="space-y-6">
+          {/* Emergency 500 Server Error Lockdown Toggle */}
+          <div className={`rounded-xl border p-6 shadow-sm space-y-4 text-xs transition-all ${
+            emergencyLockdown
+              ? 'bg-rose-950/10 border-rose-500 shadow-rose-100'
+              : 'bg-white border-slate-200'
+          }`}>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <div className={`p-3 rounded-xl shrink-0 ${
+                  emergencyLockdown ? 'bg-rose-600 text-white animate-pulse' : 'bg-slate-100 text-slate-700'
+                }`}>
+                  <ServerCrash className="w-6 h-6" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h4 className="font-black text-sm text-slate-900">
+                      Emergency 500 Server Error Lockdown
+                    </h4>
+                    {emergencyLockdown ? (
+                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-rose-600 text-white animate-pulse">
+                        <Lock className="w-3 h-3" />
+                        <span>Active (500 Enforced)</span>
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold text-emerald-800 bg-emerald-100 border border-emerald-300">
+                        <Unlock className="w-3 h-3 text-emerald-700" />
+                        <span>Portal Normal (Site Online)</span>
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-slate-600 text-xs mt-1 leading-relaxed">
+                    Instantly forces all visitor, member, and non-superadmin URLs to render an authentic HTTP 500 Internal Server Error page.
+                    Only the dedicated Super Admin URL (<span className="font-mono font-bold text-slate-900">/admin/super</span>) can bypass the 500 error page to authenticate and access this console.
+                  </p>
+                </div>
+              </div>
+
+              {/* Toggle Switch */}
+              <div className="flex items-center gap-3 shrink-0 sm:self-center">
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={emergencyLockdown}
+                  onClick={handleToggleEmergencyLockdown}
+                  disabled={isTogglingLockdown}
+                  className={`relative inline-flex h-8 w-16 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-hidden focus:ring-2 focus:ring-red-600 focus:ring-offset-2 ${
+                    emergencyLockdown ? 'bg-rose-600' : 'bg-slate-300'
+                  }`}
+                >
+                  <span
+                    aria-hidden="true"
+                    className={`pointer-events-none inline-block h-7 w-7 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
+                      emergencyLockdown ? 'translate-x-8' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+              </div>
+            </div>
+
+            {lockdownFeedback && (
+              <div className={`p-3 rounded-lg text-xs font-semibold flex items-center gap-2 ${
+                emergencyLockdown
+                  ? 'bg-rose-100 border border-rose-300 text-rose-950'
+                  : 'bg-emerald-50 border border-emerald-300 text-emerald-900'
+              }`}>
+                {emergencyLockdown ? <ShieldAlert className="w-4 h-4 text-rose-700 shrink-0" /> : <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />}
+                <span>{lockdownFeedback}</span>
+              </div>
+            )}
+
+            <div className="pt-2 border-t border-slate-200/60 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500 font-mono">
+              <div>
+                Exclusive Super Admin Entry: <span className="text-slate-800 font-bold">/admin/super</span>
+              </div>
+              <div>
+                Target Isolation: <span className="text-rose-700 font-semibold">500 Server Error Simulation</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Database Maintenance Card */}
           <div className="bg-slate-50 rounded-xl border border-slate-200 p-6 shadow-xs space-y-4 text-xs">
             <div className="flex items-center gap-2 text-slate-900 font-bold text-sm">
               <RefreshCw className="w-5 h-5 text-red-700" />

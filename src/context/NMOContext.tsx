@@ -8,7 +8,9 @@ import {
   ApprovalStatus,
   AttendanceStatus,
   NMOImportLog,
-  NMOAuditLog
+  NMOAuditLog,
+  NMOErrorLog,
+  WebsiteMaintenanceSettings
 } from '../types/nmo';
 import { auth, db, TARGET_FIRESTORE_DATABASE, TARGET_FIREBASE_PROJECT_ID } from '../lib/firebase';
 import { secureRandomInt } from '../lib/safeUrl';
@@ -157,8 +159,19 @@ interface NMOContextType {
   importLogs: NMOImportLog[];
   auditLogs: NMOAuditLog[];
   logAudit: (action: string, targetType: string, targetId: string, details: string) => Promise<void>;
+  logMemberActivity: (action: string, memberInfo: { membershipNumber?: string; name?: string; email?: string }, details: string) => Promise<void>;
   exportUsersToCSV: (filterPrant?: PrantType, selectedOnly?: string[]) => void;
   exportEventParticipantsToCSV: (eventId: string) => void;
+
+  // Emergency Maintenance & 500 Server Error Lockdown
+  emergencyLockdown: boolean;
+  setEmergencyLockdown: (enabled: boolean) => Promise<boolean>;
+
+  // Error Logging
+  errorLogs: NMOErrorLog[];
+  logError: (error: Partial<NMOErrorLog>) => Promise<void>;
+  resolveErrorLog: (id: string) => Promise<void>;
+  clearResolvedErrorLogs: () => Promise<void>;
 
   // Cities list from Database
   cities: string[];
@@ -347,6 +360,24 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return [];
   });
 
+  // Emergency Maintenance / 500 Server Error Lockdown State
+  const [emergencyLockdown, setEmergencyLockdownState] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('nmo_emergency_lockdown_v1');
+      return saved === 'true';
+    } catch {}
+    return false;
+  });
+
+  // Application Error Logs State
+  const [errorLogs, setErrorLogs] = useState<NMOErrorLog[]>(() => {
+    try {
+      const saved = localStorage.getItem('nmo_error_logs_v1');
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return [];
+  });
+
   // Collection: "Cities" state from Database
   const [dbCities, setDbCities] = useState<string[]>(() => {
     try {
@@ -416,6 +447,72 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       localStorage.setItem(LOCAL_STORAGE_AUDIT_KEY, JSON.stringify(auditLogs));
     } catch {}
   }, [auditLogs]);
+
+  // Real-time synchronization of emergency maintenance / 500 lockdown status
+  useEffect(() => {
+    let unsub: (() => void) | undefined;
+    try {
+      unsub = onSnapshot(doc(db, 'Settings', 'websiteSettings'), (snap) => {
+        if (snap.exists()) {
+          const data = snap.data();
+          const isLockdown = Boolean(data?.emergencyLockdown);
+          setEmergencyLockdownState(isLockdown);
+          try {
+            localStorage.setItem('nmo_emergency_lockdown_v1', String(isLockdown));
+          } catch {}
+        }
+      }, () => {});
+    } catch {}
+
+    // Initial check from backend endpoint
+    fetch(apiUrl('/api/settings/maintenance')).then(async (res) => {
+      if (res.ok) {
+        const data = await res.json();
+        if (typeof data.emergencyLockdown === 'boolean') {
+          setEmergencyLockdownState(data.emergencyLockdown);
+          try {
+            localStorage.setItem('nmo_emergency_lockdown_v1', String(data.emergencyLockdown));
+          } catch {}
+        }
+      }
+    }).catch(() => {});
+
+    return () => {
+      if (unsub) unsub();
+    };
+  }, []);
+
+  // Global browser error listeners for automatic error logging
+  useEffect(() => {
+    const handleGlobalError = (event: ErrorEvent) => {
+      if (event.message && (event.message.includes('WebSocket') || event.message.includes('ws://'))) return;
+      logError({
+        message: event.message || 'Unhandled Client Script Error',
+        stack: event.error?.stack || `${event.filename || 'unknown'}:${event.lineno || 0}:${event.colno || 0}`,
+        url: window.location.pathname,
+        source: 'runtime',
+        severity: 'error'
+      });
+    };
+
+    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+      if (event.reason && String(event.reason).includes('WebSocket')) return;
+      logError({
+        message: event.reason?.message || String(event.reason) || 'Unhandled Promise Rejection',
+        stack: event.reason?.stack,
+        url: window.location.pathname,
+        source: 'runtime',
+        severity: 'warning'
+      });
+    };
+
+    window.addEventListener('error', handleGlobalError);
+    window.addEventListener('unhandledrejection', handleUnhandledRejection);
+    return () => {
+      window.removeEventListener('error', handleGlobalError);
+      window.removeEventListener('unhandledrejection', handleUnhandledRejection);
+    };
+  }, [currentUser]);
 
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [lastSyncTime, setLastSyncTime] = useState<string | null>(() => {
@@ -939,6 +1036,14 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       officialMemNo,
       `User ${updatedMemberRecord.name} (${officialMemNo}) logged in as ${resolvedRole}`
     );
+
+    if (resolvedRole === 'member') {
+      await logMemberActivity(
+        'MEMBER_LOGIN',
+        { membershipNumber: officialMemNo, name: updatedMemberRecord.name, email: updatedMemberRecord.email },
+        `Member ${updatedMemberRecord.name} (${officialMemNo}) authenticated into Member Portal.`
+      );
+    }
 
     return resolvedRole;
   };
@@ -2311,9 +2416,186 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       targetType,
       targetId,
       details,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      category: 'admin'
     };
-    setAuditLogs((prev) => [newLog, ...prev]);
+    setAuditLogs((prev) => {
+      const updated = [newLog, ...prev.slice(0, 499)];
+      try {
+        localStorage.setItem(LOCAL_STORAGE_AUDIT_KEY, JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+
+    try {
+      await setDoc(doc(db, 'AuditLogs', newLog.id), newLog, { merge: true });
+    } catch {}
+  };
+
+  const logMemberActivity = async (
+    action: string,
+    memberInfo: { membershipNumber?: string; name?: string; email?: string },
+    details: string
+  ) => {
+    const newLog: NMOAuditLog = {
+      id: `MEM-${Date.now()}-${secureRandomInt(100, 999)}`,
+      action,
+      performedBy: memberInfo.name || memberInfo.email || memberInfo.membershipNumber || 'Member',
+      targetType: 'MEMBER_ACTIVITY',
+      targetId: memberInfo.membershipNumber || 'UNKNOWN',
+      details,
+      timestamp: new Date().toISOString(),
+      category: 'member_activity',
+      membershipNumber: memberInfo.membershipNumber,
+      memberEmail: memberInfo.email
+    };
+    setAuditLogs((prev) => {
+      const updated = [newLog, ...prev.slice(0, 499)];
+      try {
+        localStorage.setItem(LOCAL_STORAGE_AUDIT_KEY, JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+
+    try {
+      await setDoc(doc(db, 'AuditLogs', newLog.id), newLog, { merge: true });
+    } catch {}
+  };
+
+  const setEmergencyLockdown = async (enabled: boolean): Promise<boolean> => {
+    setEmergencyLockdownState(enabled);
+    try {
+      localStorage.setItem('nmo_emergency_lockdown_v1', String(enabled));
+    } catch {}
+
+    // Save to Firestore websiteSettings
+    try {
+      await setDoc(doc(db, 'Settings', 'websiteSettings'), {
+        emergencyLockdown: enabled,
+        lockdownUpdatedAt: new Date().toISOString(),
+        lockdownUpdatedBy: currentUser?.email || 'Super Admin'
+      }, { merge: true });
+    } catch (e) {
+      console.warn('Notice saving lockdown to Firestore:', e);
+    }
+
+    // Also persist through backend endpoint
+    try {
+      await fetch(apiUrl('/api/settings/maintenance'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-role': currentUser?.role || 'super_admin'
+        },
+        credentials: 'include',
+        body: JSON.stringify({
+          emergencyLockdown: enabled,
+          adminEmail: currentUser?.email || 'Super Admin'
+        })
+      });
+    } catch {}
+
+    logAudit(
+      enabled ? 'EMERGENCY_LOCKDOWN_ENABLED' : 'EMERGENCY_LOCKDOWN_DISABLED',
+      'SYSTEM',
+      '500_LOCKDOWN',
+      enabled
+        ? 'Emergency 500 Server Error Lockdown activated by Super Admin. All non-superadmin URLs restricted.'
+        : 'Emergency 500 Server Error Lockdown deactivated by Super Admin. Normal portal access restored.'
+    );
+
+    return true;
+  };
+
+  const logError = async (errData: Partial<NMOErrorLog>) => {
+    const errorRecord: NMOErrorLog = {
+      id: `ERR-${Date.now()}-${secureRandomInt(100, 999)}`,
+      timestamp: new Date().toISOString(),
+      message: errData.message || 'Unknown Application Error',
+      stack: errData.stack,
+      url: errData.url || (typeof window !== 'undefined' ? window.location.pathname : '/'),
+      source: errData.source || 'runtime',
+      severity: errData.severity || 'error',
+      resolved: false,
+      userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : undefined,
+      userEmail: currentUser?.email,
+      userRole: currentUser?.role || 'guest'
+    };
+
+    setErrorLogs((prev) => {
+      const updated = [errorRecord, ...prev.slice(0, 149)];
+      try {
+        localStorage.setItem('nmo_error_logs_v1', JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+
+    try {
+      await setDoc(doc(db, 'ErrorLogs', errorRecord.id), errorRecord, { merge: true });
+    } catch {}
+
+    try {
+      await fetch(apiUrl('/api/errors'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(errorRecord)
+      });
+    } catch {}
+  };
+
+  const resolveErrorLog = async (id: string) => {
+    setErrorLogs((prev) => {
+      const updated = prev.map((err) =>
+        err.id === id
+          ? { ...err, resolved: true, resolvedAt: new Date().toISOString(), resolvedBy: currentUser?.name || 'Super Admin' }
+          : err
+      );
+      try {
+        localStorage.setItem('nmo_error_logs_v1', JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+
+    try {
+      await updateDoc(doc(db, 'ErrorLogs', id), {
+        resolved: true,
+        resolvedAt: new Date().toISOString(),
+        resolvedBy: currentUser?.name || 'Super Admin'
+      });
+    } catch {}
+
+    try {
+      await fetch(apiUrl('/api/errors/resolve'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-role': currentUser?.role || 'super_admin'
+        },
+        credentials: 'include',
+        body: JSON.stringify({ id })
+      });
+    } catch {}
+  };
+
+  const clearResolvedErrorLogs = async () => {
+    setErrorLogs((prev) => {
+      const updated = prev.filter((err) => !err.resolved);
+      try {
+        localStorage.setItem('nmo_error_logs_v1', JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+
+    try {
+      await fetch(apiUrl('/api/errors/clear-resolved'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-role': currentUser?.role || 'super_admin'
+        },
+        credentials: 'include'
+      });
+    } catch {}
   };
 
   // CSV Export utility for Users
@@ -2500,6 +2782,13 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         importLogs,
         auditLogs,
         logAudit,
+        logMemberActivity,
+        emergencyLockdown,
+        setEmergencyLockdown,
+        errorLogs,
+        logError,
+        resolveErrorLog,
+        clearResolvedErrorLogs,
         exportUsersToCSV,
         exportEventParticipantsToCSV,
         refreshFromDatabase,

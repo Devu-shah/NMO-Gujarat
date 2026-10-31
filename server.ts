@@ -893,6 +893,167 @@ async function startServer() {
     });
   });
 
+  // =========================================================================
+  // EMERGENCY WEBSITE MAINTENANCE / 500 LOCKDOWN SETTINGS
+  // =========================================================================
+  let cachedEmergencyLockdown = false;
+  let cachedLockdownUpdatedAt: string | null = null;
+  let cachedLockdownUpdatedBy: string | null = null;
+
+  app.get('/api/settings/maintenance', async (_req, res) => {
+    try {
+      const adminDb = getAdminFirestore();
+      if (adminDb) {
+        const snap = await adminDb.collection('Settings').doc('websiteSettings').get();
+        if (snap.exists) {
+          const data = snap.data();
+          cachedEmergencyLockdown = Boolean(data?.emergencyLockdown);
+          cachedLockdownUpdatedAt = data?.lockdownUpdatedAt || null;
+          cachedLockdownUpdatedBy = data?.lockdownUpdatedBy || null;
+        }
+      }
+    } catch {}
+
+    return res.json({
+      emergencyLockdown: cachedEmergencyLockdown,
+      lockdownUpdatedAt: cachedLockdownUpdatedAt,
+      lockdownUpdatedBy: cachedLockdownUpdatedBy
+    });
+  });
+
+  app.post('/api/settings/maintenance', async (req, res) => {
+    const authCheck = await verifyAdminAuthorization(req);
+    if (!authCheck.authorized || authCheck.role !== 'super_admin') {
+      return res.status(403).json({
+        error: 'forbidden',
+        message: 'Only Super Administrators can modify emergency website maintenance and 500 lockdown settings.'
+      });
+    }
+
+    const { emergencyLockdown, adminEmail } = req.body;
+    cachedEmergencyLockdown = Boolean(emergencyLockdown);
+    cachedLockdownUpdatedAt = new Date().toISOString();
+    cachedLockdownUpdatedBy = adminEmail || authCheck.email || 'Super Admin';
+
+    try {
+      const adminDb = getAdminFirestore();
+      if (adminDb) {
+        await adminDb.collection('Settings').doc('websiteSettings').set({
+          emergencyLockdown: cachedEmergencyLockdown,
+          lockdownUpdatedAt: cachedLockdownUpdatedAt,
+          lockdownUpdatedBy: cachedLockdownUpdatedBy
+        }, { merge: true });
+      }
+    } catch (err: any) {
+      console.warn('[Maintenance] Notice saving lockdown to Firestore:', err?.message);
+    }
+
+    return res.json({
+      success: true,
+      emergencyLockdown: cachedEmergencyLockdown,
+      lockdownUpdatedAt: cachedLockdownUpdatedAt,
+      lockdownUpdatedBy: cachedLockdownUpdatedBy
+    });
+  });
+
+  // =========================================================================
+  // WEBSITE ERROR LOGGING ENDPOINTS
+  // =========================================================================
+  app.get('/api/errors', async (req, res) => {
+    const authCheck = await verifyAdminAuthorization(req);
+    if (!authCheck.authorized) {
+      return res.status(403).json({ error: 'unauthorized', message: 'Admin access required to view error logs.' });
+    }
+
+    try {
+      const adminDb = getAdminFirestore();
+      if (!adminDb) {
+        return res.json({ success: true, count: 0, errors: [] });
+      }
+
+      const snap = await adminDb.collection('ErrorLogs').orderBy('timestamp', 'desc').limit(150).get().catch(() => null);
+      if (!snap) {
+        return res.json({ success: true, count: 0, errors: [] });
+      }
+      const errors = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      return res.json({ success: true, count: errors.length, errors });
+    } catch {
+      return res.json({ success: true, count: 0, errors: [] });
+    }
+  });
+
+  app.post('/api/errors', async (req, res) => {
+    try {
+      const { message, stack, url, source, severity, userAgent, userEmail, userRole } = req.body;
+      const errorRecord = {
+        id: `ERR-${Date.now()}-${crypto.randomInt(100, 999)}`,
+        timestamp: new Date().toISOString(),
+        message: String(message || 'Unknown Application Error').slice(0, 1000),
+        stack: stack ? String(stack).slice(0, 4000) : undefined,
+        url: String(url || '/').slice(0, 500),
+        source: source || 'runtime',
+        severity: severity || 'error',
+        resolved: false,
+        userAgent: userAgent ? String(userAgent).slice(0, 500) : undefined,
+        userEmail: userEmail ? String(userEmail).slice(0, 120) : undefined,
+        userRole: userRole || 'guest'
+      };
+
+      const adminDb = getAdminFirestore();
+      if (adminDb) {
+        await adminDb.collection('ErrorLogs').doc(errorRecord.id).set(errorRecord, { merge: true });
+      }
+      return res.json({ success: true, errorId: errorRecord.id });
+    } catch (err: any) {
+      return res.status(500).json({ error: 'Failed to record error log' });
+    }
+  });
+
+  app.post('/api/errors/resolve', async (req, res) => {
+    const authCheck = await verifyAdminAuthorization(req);
+    if (!authCheck.authorized) {
+      return res.status(403).json({ error: 'unauthorized' });
+    }
+
+    const { id } = req.body;
+    if (!id) return res.status(400).json({ error: 'id required' });
+
+    try {
+      const adminDb = getAdminFirestore();
+      if (adminDb) {
+        await adminDb.collection('ErrorLogs').doc(id).set({
+          resolved: true,
+          resolvedAt: new Date().toISOString(),
+          resolvedBy: authCheck.email || 'Administrator'
+        }, { merge: true });
+      }
+      return res.json({ success: true });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/errors/clear-resolved', async (req, res) => {
+    const authCheck = await verifyAdminAuthorization(req);
+    if (!authCheck.authorized || authCheck.role !== 'super_admin') {
+      return res.status(403).json({ error: 'forbidden', message: 'Only Super Admin can purge resolved error logs.' });
+    }
+
+    try {
+      const adminDb = getAdminFirestore();
+      if (adminDb) {
+        const snap = await adminDb.collection('ErrorLogs').where('resolved', '==', true).get();
+        const batch = adminDb.batch();
+        snap.forEach((d) => batch.delete(d.ref));
+        await batch.commit();
+        return res.json({ success: true, deletedCount: snap.size });
+      }
+      return res.json({ success: true, deletedCount: 0 });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
   // Contact Us & Public Support Inquiry API Endpoints
   app.post(['/api/contact', '/api/contact/send', '/api/contact/submit'], async (req, res) => {
     try {

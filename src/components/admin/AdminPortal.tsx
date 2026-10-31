@@ -21,8 +21,10 @@ import { AdminSettings } from './AdminSettings';
 import { AdminGalleryShowcaseManager } from './AdminGalleryShowcaseManager';
 import { AdminQRScannerModal } from './AdminQRScannerModal';
 import { AdminInquiriesManager } from './AdminInquiriesManager';
+import { AdminErrorLogs } from './AdminErrorLogs';
 import {
   LayoutDashboard,
+  AlertOctagon,
   Database,
   Inbox,
   FileSpreadsheet,
@@ -58,7 +60,7 @@ interface AdminPortalProps {
 }
 
 export const AdminPortal: React.FC<AdminPortalProps> = ({ onBackToSite, portalScope }) => {
-  const { currentUser, logout, eventRegistrations } = useNMO();
+  const { currentUser, logout, eventRegistrations, errorLogs } = useNMO();
 
   // Read URL query parameters for deep linking (e.g. ?section=events&eventId=...)
   const urlParams = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
@@ -164,6 +166,8 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ onBackToSite, portalSc
         return 'Activity Log';
       case 'gallery-showcase':
         return 'Gallery Showcase';
+      case 'error-logs':
+        return 'Website Error Logs';
       case 'settings':
         return 'Website Settings';
       default:
@@ -532,6 +536,31 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ onBackToSite, portalSc
         </button>
       )}
 
+      {/* Website Error Logs (Super Admin) */}
+      {isSuperAdmin && (
+        <button
+          onClick={() => {
+            setActiveSection('error-logs');
+            if (isMobile) setMobileNavOpen(false);
+          }}
+          className={`w-full flex items-center justify-between px-3 py-2 rounded-lg font-semibold transition-colors cursor-pointer ${
+            activeSection === 'error-logs'
+              ? 'bg-red-700 text-white shadow-xs'
+              : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+          }`}
+        >
+          <div className="flex items-center gap-2.5">
+            <AlertOctagon className="w-4 h-4 text-rose-400" />
+            <span>Website Error Logs</span>
+          </div>
+          {errorLogs.filter((e) => !e.resolved).length > 0 && (
+            <span className="text-[10px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40 px-1.5 py-0.5 rounded">
+              {errorLogs.filter((e) => !e.resolved).length}
+            </span>
+          )}
+        </button>
+      )}
+
       {/* 12. Settings (Super Admin) */}
       {isSuperAdmin && (
         <button
@@ -743,6 +772,7 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({ onBackToSite, portalSc
         {activeSection === 'import-history' && <AdminImportHistory />}
         {activeSection === 'data-validation' && <MemberDataImport initialMode="validate_only" />}
         {activeSection === 'gallery-showcase' && isSuperAdmin && <AdminGalleryShowcaseManager />}
+        {activeSection === 'error-logs' && isSuperAdmin && <AdminErrorLogs />}
         {activeSection === 'settings' && <AdminSettings />}
       </main>
 

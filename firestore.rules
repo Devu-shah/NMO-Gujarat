@@ -193,12 +193,14 @@ service cloud.firestore {
         allow read, write: if false;
       }
 
-      // Non-sensitive settings: Super Admin only
-      allow read: if isSuperAdmin() &&
+      // Non-sensitive settings: Public read for websiteSettings (lockdown check); Super Admin for others
+      allow read: if settingId == 'websiteSettings' || (
+                     isSuperAdmin() &&
                      settingId != 'smtpConfig' &&
                      settingId != 'emailConfig' &&
                      settingId != 'googleDriveAuth' &&
-                     settingId != 'secrets';
+                     settingId != 'secrets'
+                   );
       allow write: if isSuperAdmin() &&
                       settingId != 'smtpConfig' &&
                       settingId != 'emailConfig' &&
@@ -504,6 +506,12 @@ service cloud.firestore {
 
     match /ImportHistory/{historyId} {
       allow read, write: if isStateAdmin() || isAdmin();
+    }
+
+    match /ErrorLogs/{errorId} {
+      allow read: if isAdmin();
+      allow create: if true;
+      allow update, delete: if isSuperAdmin();
     }
 
     // =========================================================================

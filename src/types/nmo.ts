@@ -192,6 +192,33 @@ export interface NMOAuditLog {
   targetId: string;
   details: string;
   timestamp: string;
+  category?: 'admin' | 'member_activity' | 'system';
+  membershipNumber?: string;
+  memberEmail?: string;
+  ipAddress?: string;
+}
+
+export interface NMOErrorLog {
+  id: string;
+  timestamp: string;
+  message: string;
+  stack?: string;
+  url: string;
+  source: 'api' | 'runtime' | 'auth' | 'drive' | 'ui' | 'network';
+  severity: 'critical' | 'error' | 'warning';
+  resolved: boolean;
+  resolvedAt?: string;
+  resolvedBy?: string;
+  userAgent?: string;
+  userEmail?: string;
+  userRole?: string;
+}
+
+export interface WebsiteMaintenanceSettings {
+  emergencyLockdown: boolean;
+  lockdownMessage?: string;
+  updatedAt?: string;
+  updatedBy?: string;
 }
 
 export type CertificateUploadSource = 'admin' | 'user';
