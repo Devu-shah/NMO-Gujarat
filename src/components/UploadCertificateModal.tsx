@@ -21,6 +21,7 @@ import {
   Lock,
   Clock
 } from 'lucide-react';
+import { sanitizeImageUrl } from '../lib/safeUrl';
 
 interface UploadCertificateModalProps {
   isOpen: boolean;
@@ -288,7 +289,7 @@ export const UploadCertificateModal: React.FC<UploadCertificateModalProps> = ({
                 </span>
                 <div className="relative max-h-48 overflow-hidden rounded-xl border border-slate-200 bg-black/5 flex items-center justify-center">
                   <img
-                    src={previewUrl}
+                    src={sanitizeImageUrl(previewUrl)}
                     alt="Certificate Preview"
                     className="max-h-44 w-auto object-contain rounded-lg shadow-xs"
                   />

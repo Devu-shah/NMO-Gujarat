@@ -30,6 +30,7 @@ import {
   Sparkles,
   Check
 } from 'lucide-react';
+import { sanitizeMailto } from '../../lib/safeUrl';
 
 const CATEGORIES: ('All' | InquiryCategory)[] = [
   'All',
@@ -479,7 +480,7 @@ export const AdminInquiriesManager: React.FC = () => {
               <div>
                 <span className="text-slate-400 font-medium block">Email:</span>
                 <a
-                  href={`mailto:${selectedTicket.email}`}
+                  href={sanitizeMailto(selectedTicket.email)}
                   className="font-bold text-blue-700 hover:underline flex items-center gap-1"
                 >
                   <Mail className="w-3.5 h-3.5" />
@@ -614,11 +615,10 @@ export const AdminInquiriesManager: React.FC = () => {
               </div>
 
               <a
-                href={`mailto:${selectedTicket.email}?subject=${encodeURIComponent(
-                  `[${selectedTicket.ticketId}] NMO Gujarat Support: ${selectedTicket.subject}`
-                )}&body=${encodeURIComponent(
-                  `Namaste ${selectedTicket.name},\n\nRegarding your inquiry (${selectedTicket.ticketId}):\n\n${solutionText}\n\nWarm regards,\nNational Medicos Organisation Gujarat`
-                )}`}
+                href={sanitizeMailto(selectedTicket.email, {
+                  subject: `[${selectedTicket.ticketId}] NMO Gujarat Support: ${selectedTicket.subject}`,
+                  body: `Namaste ${selectedTicket.name},\n\nRegarding your inquiry (${selectedTicket.ticketId}):\n\n${solutionText}\n\nWarm regards,\nNational Medicos Organisation Gujarat`
+                })}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg font-semibold text-xs transition-colors cursor-pointer"
               >
                 <Send className="w-3.5 h-3.5" />

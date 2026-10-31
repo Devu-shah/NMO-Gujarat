@@ -38,29 +38,20 @@ const DRIVE_STORAGE_KEY = 'nmo_saved_google_drive_session_v1';
 /**
  * Helper to safely read saved session from browser persistent storage
  */
+let inMemoryClientDriveSession: SavedDriveSession | null = null;
+
 export const loadStoredDriveSession = (): SavedDriveSession | null => {
-  try {
-    const raw = localStorage.getItem(DRIVE_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as SavedDriveSession;
-    if (parsed && parsed.accessToken) {
-      return parsed;
-    }
-  } catch (err) {
-    console.warn('Notice reading stored Google Drive session:', err);
-  }
-  return null;
+  return inMemoryClientDriveSession;
 };
 
 /**
- * Helper to save drive session in browser persistent storage
+ * Helper to save drive session in secure client memory
  */
 export const saveDriveSessionLocally = (session: SavedDriveSession) => {
+  inMemoryClientDriveSession = session;
   try {
-    localStorage.setItem(DRIVE_STORAGE_KEY, JSON.stringify(session));
-  } catch (err) {
-    console.warn('Notice saving Google Drive session to localStorage:', err);
-  }
+    localStorage.removeItem(DRIVE_STORAGE_KEY);
+  } catch {}
 };
 
 /**
@@ -625,6 +616,7 @@ export const disconnectGoogleDrive = async () => {
 
 export interface DriveCertificateFile {
   id: string;
+  certId?: string;
   name: string;
   mimeType: string;
   size?: string;
@@ -1525,7 +1517,7 @@ export const approveCertificate = async (
   certId: string,
   adminInfo?: { uid?: string; name?: string },
   driveFileId?: string,
-  eventInfo?: { eventId?: string; eventTitle?: string }
+  eventInfo?: { eventId?: string; eventTitle?: string; membershipNumber?: string; memberName?: string }
 ): Promise<void> => {
   let backendSucceeded = false;
   if (driveFileId) {
@@ -1551,6 +1543,8 @@ export const approveCertificate = async (
         certId,
         eventId: eventInfo?.eventId,
         eventTitle: eventInfo?.eventTitle,
+        membershipNumber: (eventInfo as any)?.membershipNumber,
+        memberName: (eventInfo as any)?.memberName,
         adminUid: adminInfo?.uid || auth?.currentUser?.uid || '',
         adminName: adminInfo?.name || auth?.currentUser?.displayName || 'Administrator'
       })
@@ -1565,19 +1559,27 @@ export const approveCertificate = async (
   }
 
   try {
-    await setDoc(
-      doc(db, 'Certificates', certId),
-      {
-        approvalStatus: 'approved',
-        status: 'approved',
-        decisionByAdminUid: adminInfo?.uid || auth?.currentUser?.uid || 'admin',
-        decisionByAdminName: adminInfo?.name || auth?.currentUser?.displayName || 'Administrator',
-        decisionAt: new Date().toISOString(),
-        approvedAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      },
-      { merge: true }
-    );
+    const approvalPayload = {
+      approvalStatus: 'approved',
+      status: 'approved',
+      decisionByAdminUid: adminInfo?.uid || auth?.currentUser?.uid || 'admin',
+      decisionByAdminName: adminInfo?.name || auth?.currentUser?.displayName || 'Administrator',
+      decisionAt: new Date().toISOString(),
+      approvedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+
+    const docUpdates: Promise<void>[] = [
+      setDoc(doc(db, 'Certificates', certId), approvalPayload, { merge: true }),
+      setDoc(doc(db, 'certificates', certId), approvalPayload, { merge: true })
+    ];
+    if (driveFileId && driveFileId !== certId) {
+      docUpdates.push(
+        setDoc(doc(db, 'Certificates', driveFileId), approvalPayload, { merge: true }),
+        setDoc(doc(db, 'certificates', driveFileId), approvalPayload, { merge: true })
+      );
+    }
+    await Promise.all(docUpdates);
   } catch (err: any) {
     console.warn('Notice updating approved certificate in client Firestore:', err);
     if (!backendSucceeded) {
@@ -1731,14 +1733,24 @@ export const fetchSubmissionLists = async (): Promise<SubmissionListsResult> => 
       if (rawStatus === 'pending' || rawStatus === 'pending_approval') {
         if (!pendingMap.has(fileId)) pendingMap.set(fileId, certObj);
       } else if (rawStatus === 'approved') {
-        if (!approvedMap.has(fileId)) approvedMap.set(fileId, certObj);
+        approvedMap.set(fileId, certObj);
+        pendingMap.delete(fileId);
       } else if (rawStatus === 'rejected') {
-        if (!rejectedMap.has(fileId)) rejectedMap.set(fileId, certObj);
+        rejectedMap.set(fileId, certObj);
+        pendingMap.delete(fileId);
       }
     });
   } catch (err: any) {
     console.warn('Notice loading member submissions from Firestore:', err);
   }
+
+  // Authoritative precedence: Approved or Rejected decisions MUST NEVER appear in pending
+  approvedMap.forEach((_, id) => {
+    pendingMap.delete(id);
+  });
+  rejectedMap.forEach((_, id) => {
+    pendingMap.delete(id);
+  });
 
   return {
     pending: Array.from(pendingMap.values()),

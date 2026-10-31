@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useMemo } from 'react';
+import React, { createContext, useContext, useState, useEffect, useMemo, useRef } from 'react';
 import {
   NMOUserRecord,
   NMOEvent,
@@ -11,6 +11,7 @@ import {
   NMOAuditLog
 } from '../types/nmo';
 import { auth, db, TARGET_FIRESTORE_DATABASE, TARGET_FIREBASE_PROJECT_ID } from '../lib/firebase';
+import { secureRandomInt } from '../lib/safeUrl';
 
 // Explicitly export target database instance and project for runtime verification
 export { TARGET_FIRESTORE_DATABASE, TARGET_FIREBASE_PROJECT_ID };
@@ -164,7 +165,7 @@ interface NMOContextType {
   addCityToDatabase: (cityName: string) => Promise<void>;
 
   // Local caching & manual database sync (quota-optimized: users fetched only on admin demand)
-  refreshFromDatabase: (force?: boolean, includeUsers?: boolean) => Promise<{ usersCount: number; eventsCount: number; registrationsCount: number }>;
+  refreshFromDatabase: (force?: boolean, includeUsers?: boolean, silent?: boolean) => Promise<{ usersCount: number; eventsCount: number; registrationsCount: number }>;
   isSyncing: boolean;
   lastSyncTime: string | null;
   addEventRSVPManually: (eventId: string, participantData: Partial<EventParticipant>) => Promise<void>;
@@ -312,6 +313,13 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return [];
   });
 
+  const usersRef = useRef<NMOUserRecord[]>(users);
+  useEffect(() => {
+    usersRef.current = users;
+  }, [users]);
+
+  const hasInitialAdminSyncedRef = useRef<boolean>(false);
+
   // Collection 2: "Events" (Empty clean initial state, no random fake records)
   const [events, setEvents] = useState<NMOEvent[]>(() => {
     try {
@@ -424,14 +432,18 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Client-Side Caching & Fast Manual Syncing (Quota Optimized):
   // Instead of querying all collections on every public visit, public users only load Events.
   // The full Users master directory is only queried when an administrator requests it or enters Admin Console.
-  const refreshFromDatabase = async (force: boolean = false, includeUsers: boolean = false): Promise<{
+  const refreshFromDatabase = async (
+    force: boolean = false,
+    includeUsers: boolean = false,
+    silent: boolean = false
+  ): Promise<{
     usersCount: number;
     eventsCount: number;
     registrationsCount: number;
   }> => {
-    setIsSyncing(true);
+    if (!silent) setIsSyncing(true);
     try {
-      let fetchedUsers: NMOUserRecord[] = [...users];
+      let fetchedUsers: NMOUserRecord[] = [...usersRef.current];
 
       // 1. Fetch Users collection ONLY when requested for Administrative purposes
       if (includeUsers) {
@@ -447,7 +459,21 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           });
 
           if (fetchedUsers.length > 0 || force) {
-            setUsers(fetchedUsers);
+            setUsers((prevUsers) => {
+              if (prevUsers.length === fetchedUsers.length) {
+                const isIdentical = prevUsers.every((u, i) => {
+                  const fu = fetchedUsers[i];
+                  return (
+                    u.membershipNumber === fu?.membershipNumber &&
+                    u.role === fu?.role &&
+                    u.accountStatus === fu?.accountStatus &&
+                    u.updatedAt === fu?.updatedAt
+                  );
+                });
+                if (isIdentical) return prevUsers;
+              }
+              return fetchedUsers;
+            });
             try {
               localStorage.setItem(LOCAL_STORAGE_USERS_KEY, JSON.stringify(fetchedUsers));
             } catch {}
@@ -516,9 +542,23 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
       }
 
-      // Update events state and cache
+      // Update events state and cache silently if identical
       if (fetchedEvents.length > 0 || force) {
-        setEvents(fetchedEvents);
+        setEvents((prevEvents) => {
+          if (prevEvents.length === fetchedEvents.length) {
+            const isIdentical = prevEvents.every((e, i) => {
+              const fe = fetchedEvents[i];
+              return (
+                e.eventId === fe?.eventId &&
+                e.updatedAt === fe?.updatedAt &&
+                e.title === fe?.title &&
+                (e.participants?.length || 0) === (fe?.participants?.length || 0)
+              );
+            });
+            if (isIdentical) return prevEvents;
+          }
+          return fetchedEvents;
+        });
         try {
           localStorage.setItem(LOCAL_STORAGE_EVENTS_KEY, JSON.stringify(fetchedEvents));
         } catch {}
@@ -554,7 +594,7 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       console.warn('Error refreshing from database:', err);
       throw err;
     } finally {
-      setIsSyncing(false);
+      if (!silent) setIsSyncing(false);
     }
   };
 
@@ -564,7 +604,7 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const hasCachedEvents = cachedEventsStr && JSON.parse(cachedEventsStr).length > 0;
 
     if (!hasCachedEvents) {
-      refreshFromDatabase(false, false);
+      refreshFromDatabase(false, false, true);
     }
   }, []);
 
@@ -578,14 +618,14 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           emailLower === 'devanshshah768@gmail.com' ||
           emailLower === 'superadmin@nmogujarat.org';
 
-        // 1. Look for matching user in existing state
-        let matched = users.find(
+        // 1. Look for matching user in existing state via ref
+        let matched = usersRef.current.find(
           (u) =>
             (u.email && u.email.toLowerCase() === emailLower) ||
             u.uid === user.uid
         );
 
-        // 2. Targeted single document lookup if not in state (1 read max instead of 10,000)
+        // 2. Targeted single document lookup if not in state (1 read max instead of full collection)
         if (!matched && !isSuperAdminEmail) {
           try {
             const qEmail = query(collection(db, 'Users'), where('email', '==', emailLower), limit(1));
@@ -630,22 +670,20 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (matched) {
           setCurrentUser(matched);
 
-          // If logged-in user is an administrator, fetch full administrative users list
+          // If logged-in user is an administrator, fetch full administrative users list ONCE silently
           if (matched.role && matched.role !== 'member') {
-            refreshFromDatabase(false, true).catch(() => {});
+            if (!hasInitialAdminSyncedRef.current) {
+              hasInitialAdminSyncedRef.current = true;
+              refreshFromDatabase(false, true, true).catch(() => {});
+            }
           }
         }
       } else {
-        // Maintain admin login: Check if Super Admin server-side cookie or session token exists
+        hasInitialAdminSyncedRef.current = false;
+        // Maintain admin login: Check if Super Admin server-side HttpOnly cookie session exists
         try {
-          const storedToken = localStorage.getItem('nmo_superadmin_session_token');
-          const headers: Record<string, string> = {};
-          if (storedToken) {
-            headers['Authorization'] = `Bearer ${storedToken}`;
-          }
           const resp = await fetch(apiUrl('/api/admin/session'), {
-            credentials: 'include',
-            headers
+            credentials: 'include'
           });
           if (resp.ok) {
             const data = await resp.json();
@@ -665,8 +703,6 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               };
               setCurrentUser(sessionAdmin);
             }
-          } else if (storedToken) {
-            localStorage.removeItem('nmo_superadmin_session_token');
           }
         } catch (cookieErr) {
           // Silently proceed if server session check unavailable
@@ -676,7 +712,7 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
 
     return () => unsubscribe();
-  }, [users]);
+  }, []);
 
   // Unified login portal handler:
   // Login ID: Email Address (or Membership Number)
@@ -787,10 +823,8 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           })
         });
         if (loginResp.ok) {
-          const loginData = await loginResp.json().catch(() => null);
-          if (loginData?.sessionToken) {
-            localStorage.setItem('nmo_superadmin_session_token', loginData.sessionToken);
-          }
+          // Server sets secure HttpOnly cookie nmo_superadmin_session automatically
+          console.debug('[Auth] Super admin session established securely via server cookie.');
         }
       } catch (cookieErr) {
         console.warn('Notice setting server-side admin cookie:', cookieErr);
@@ -1720,7 +1754,7 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const addEvent = async (
     eventData: Omit<NMOEvent, 'eventId' | 'createdAt' | 'updatedAt' | 'participants'>
   ): Promise<string> => {
-    const newId = `EVT-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
+    const newId = `EVT-${new Date().getFullYear()}-${secureRandomInt(1000, 9999)}`;
     const fullEvent: NMOEvent = {
       ...eventData,
       eventId: newId,
@@ -2271,7 +2305,7 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     details: string
   ) => {
     const newLog: NMOAuditLog = {
-      id: `LOG-${Date.now()}-${Math.floor(100 + Math.random() * 900)}`,
+      id: `LOG-${Date.now()}-${secureRandomInt(100, 999)}`,
       action,
       performedBy: currentUser?.name || currentUser?.email || 'System',
       targetType,

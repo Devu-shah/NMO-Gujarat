@@ -22,6 +22,7 @@ import {
   FileCheck,
   Scissors
 } from 'lucide-react';
+import { sanitizeImageUrl } from '../lib/safeUrl';
 
 interface MemberIdCardProps {
   member: NMOMember;
@@ -241,7 +242,7 @@ export const MemberIdCard: React.FC<MemberIdCardProps> = ({ member }) => {
             <div className="w-22 h-26 rounded-xl bg-slate-100 border-2 border-slate-300 overflow-hidden shrink-0 flex flex-col items-center justify-center text-center p-1 relative shadow-inner">
               {member.photoUrl || member.profilePhoto ? (
                 <img
-                  src={member.photoUrl || member.profilePhoto}
+                  src={sanitizeImageUrl(member.photoUrl || member.profilePhoto)}
                   alt={member.name}
                   className="w-full h-full object-cover rounded-lg"
                 />
@@ -337,7 +338,7 @@ export const MemberIdCard: React.FC<MemberIdCardProps> = ({ member }) => {
           <div className="flex items-center gap-2">
             <div className="p-1 bg-white rounded-lg border border-slate-200 shadow-xs">
               {qrDataUrl ? (
-                <img src={qrDataUrl} alt="Verification QR" className="w-14 h-14" />
+                <img src={sanitizeImageUrl(qrDataUrl)} alt="Verification QR" className="w-14 h-14" />
               ) : (
                 <div className="w-14 h-14 bg-slate-100 flex items-center justify-center">
                   <QrCode className="w-6 h-6 text-slate-400" />

@@ -82,12 +82,33 @@ export const isFilenameMatchingMembershipId = (
 
   if (base === targetId) return true;
 
+  if (!targetId || targetId.length > 40) return false;
+  if (/[\r\n\0]/.test(targetId)) return false;
+
   // Delimited prefix, suffix, and token formats (e.g. 9521_EVT, EVT_9521, 9521-EVT, 9521 (1))
   // Strict requirement: "9521" must match "9521.pdf", "9521_CME.pdf", "EVT_9521.pdf"
   // but NEVER match "95210.pdf" or "19521.pdf"
-  const escaped = targetId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const tokenRegex = new RegExp(`(?:^|[_\\s\\-(])${escaped}(?:[_\\s\\-().]|$)`, 'i');
-  return tokenRegex.test(base);
+  const delimitersBefore = new Set(['_', ' ', '-', '(']);
+  const delimitersAfter = new Set(['_', ' ', '-', '(', ')', '.']);
+
+  let searchStart = 0;
+  while (searchStart < base.length) {
+    const pos = base.indexOf(targetId, searchStart);
+    if (pos === -1) break;
+
+    const charBefore = pos === 0 ? null : base[pos - 1];
+    const charAfter = pos + targetId.length >= base.length ? null : base[pos + targetId.length];
+
+    const validBefore = charBefore === null || delimitersBefore.has(charBefore);
+    const validAfter = charAfter === null || delimitersAfter.has(charAfter);
+
+    if (validBefore && validAfter) {
+      return true;
+    }
+
+    searchStart = pos + 1;
+  }
+  return false;
 };
 
 /**
@@ -166,6 +187,9 @@ export const extractMembershipIdFromFilename = (
         return id;
       }
     }
+
+    // When known IDs are supplied and none match, return null to avoid false positive guessing
+    return null;
   }
 
   // 2. Pattern-based extraction when knownMembershipIds is not provided:

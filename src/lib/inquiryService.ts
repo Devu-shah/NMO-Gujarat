@@ -48,11 +48,13 @@ export interface SupportInquiry {
   source?: string;
 }
 
+import { secureRandomInt } from './safeUrl';
+
 /**
  * Generate human-friendly Ticket Reference ID e.g. NMO-TKT-489215
  */
 export function generateTicketReferenceId(): string {
-  const randomSuffix = Math.floor(100000 + Math.random() * 900000).toString();
+  const randomSuffix = secureRandomInt(100000, 999999).toString();
   return `NMO-TKT-${randomSuffix}`;
 }
 

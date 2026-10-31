@@ -31,6 +31,7 @@ import {
   Edit3,
   Lock
 } from 'lucide-react';
+import { sanitizeUrl, sanitizeImageUrl } from '../lib/safeUrl';
 
 interface ShowCertificateModalProps {
   isOpen: boolean;
@@ -573,7 +574,7 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
                         {isPdf ? (
                           <div className="w-full h-[460px] flex flex-col items-center justify-center">
                             <iframe
-                              src={imageUrl}
+                              src={sanitizeUrl(imageUrl)}
                               title={`PDF Certificate for ${targetMemberNo}`}
                               className="w-full h-full rounded-xl border border-slate-700 bg-white"
                               onLoad={() => setImageLoaded(true)}
@@ -582,14 +583,14 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
                         ) : imageError ? (
                           <div className="w-full flex flex-col items-center justify-center p-2">
                             <iframe
-                              src={`https://drive.google.com/file/d/${currentCert.id}/preview`}
+                              src={sanitizeUrl(`https://drive.google.com/file/d/${encodeURIComponent(currentCert.id)}/preview`)}
                               title={`Certificate for ${targetMemberNo}`}
                               className="w-full h-[400px] rounded-xl border border-slate-700 bg-white"
                               onLoad={() => setImageLoaded(true)}
                             />
                             <div className="mt-3 flex items-center justify-center gap-3">
                               <a
-                                href={currentCert.webViewLink || `https://drive.google.com/file/d/${currentCert.id}/view`}
+                                href={sanitizeUrl(currentCert.webViewLink || `https://drive.google.com/file/d/${encodeURIComponent(currentCert.id)}/view`)}
                                 target="_blank"
                                 rel="noreferrer"
                                 className="inline-flex items-center gap-1.5 px-4 py-2 bg-white text-slate-900 rounded-xl text-xs font-bold hover:bg-slate-100 transition-colors shadow-xs"
@@ -602,7 +603,7 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
                         ) : (
                           /* Main Certificate High-Res Image */
                           <img
-                            src={imageUrl}
+                            src={sanitizeImageUrl(imageUrl)}
                             alt={`NMO Certificate for ${targetMemberNo}`}
                             onLoad={() => setImageLoaded(true)}
                             onError={() => {
@@ -670,7 +671,7 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
                       <div className="flex flex-wrap items-center gap-2 shrink-0">
                         {imageUrl && !isCurrentCertMissing && (
                           <a
-                            href={imageUrl}
+                            href={sanitizeUrl(imageUrl)}
                             target="_blank"
                             rel="noreferrer"
                             className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
@@ -683,7 +684,7 @@ export const ShowCertificateModal: React.FC<ShowCertificateModalProps> = ({
 
                         {currentCert.webViewLink && !isCurrentCertMissing && (
                           <a
-                            href={currentCert.webViewLink}
+                            href={sanitizeUrl(currentCert.webViewLink)}
                             target="_blank"
                             rel="noreferrer"
                             className="px-3 py-2 bg-slate-200 hover:bg-slate-300 text-slate-800 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"

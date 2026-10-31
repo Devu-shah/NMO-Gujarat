@@ -14,6 +14,8 @@ import { getAuth as getAdminAuth } from 'firebase-admin/auth';
 import type { DecodedIdToken } from 'firebase-admin/auth';
 import { getFirestore as getAdminFirestoreSdk } from 'firebase-admin/firestore';
 import type { Firestore as AdminFirestore } from 'firebase-admin/firestore';
+import rateLimit from 'express-rate-limit';
+import { validateHostForSSRF, escapeHtmlStrict } from './src/server/ssrfValidator';
 import {
   sendContactInquiryEmail,
   getEmailServiceStatus,
@@ -312,6 +314,7 @@ setInterval(cleanOldSpamRecords, 5 * 60 * 1000).unref();
 
 async function startServer() {
   const app = express();
+  app.set('trust proxy', 1);
 
   // Support PORT from process.env, CLI arguments (--port 3000 or --port=3000), or default to 3000
   let portArg: number | null = null;
@@ -376,17 +379,32 @@ async function startServer() {
       // Allow requests with no origin (e.g. mobile apps, curl, or same-origin)
       if (!origin) return callback(null, true);
 
-      const isAllowed =
-        ALLOWED_ORIGINS.includes(origin) ||
-        origin.endsWith('.web.app') ||
-        origin.endsWith('.firebaseapp.com') ||
-        origin.endsWith('.run.app') ||
-        origin.includes('localhost') ||
-        origin.includes('127.0.0.1');
+      try {
+        const parsed = new URL(origin);
+        const hostname = parsed.hostname.toLowerCase();
+        const port = parsed.port;
 
-      if (isAllowed) {
-        return callback(null, true);
-      }
+        // 1. Strict exact origin allowlist
+        if (ALLOWED_ORIGINS.includes(origin)) {
+          return callback(null, true);
+        }
+
+        // 2. Strict localhost/loopback check with standard development ports
+        if (hostname === 'localhost' || hostname === '127.0.0.1') {
+          if (!port || port === '3000' || port === '5173' || port === '4173') {
+            return callback(null, true);
+          }
+        }
+
+        // 3. Strict Firebase and Cloud Run official domains
+        if (
+          hostname === `${FIREBASE_ADMIN_PROJECT_ID}.web.app` ||
+          hostname === `${FIREBASE_ADMIN_PROJECT_ID}.firebaseapp.com` ||
+          (hostname.endsWith('.run.app') && (hostname.startsWith('ais-dev-') || hostname.startsWith('ais-pre-') || hostname.startsWith('nmo-')))
+        ) {
+          return callback(null, true);
+        }
+      } catch {}
 
       console.warn(`[CORS Blocked] Origin not allowed: ${origin}`);
       return callback(null, false);
@@ -399,23 +417,75 @@ async function startServer() {
       'X-Requested-With',
       'Accept',
       'Origin',
-      'x-admin-role',
-      'X-Admin-Role',
-      'x-admin-email',
-      'X-Admin-Email',
-      'x-admin-name',
-      'X-Admin-Name',
-      'x-user-role',
-      'X-User-Role',
-      'x-member-id',
-      'X-Member-Id',
       'Cache-Control',
-      'Pragma'
+      'Pragma',
+      'x-certificate-token',
+      'X-Certificate-Token'
     ]
   });
 
   app.use(corsMiddleware);
   app.options('*', corsMiddleware);
+
+  // Rate Limiting Infrastructure (Addresses CodeQL js/missing-rate-limiting)
+  const rateLimitHandler = (message: string) => (_req: express.Request, res: express.Response) => {
+    res.status(429).json({
+      success: false,
+      error: message
+    });
+  };
+
+  const commonLimiterOptions = {
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: {
+      xForwardedForHeader: false,
+      default: false
+    }
+  };
+
+  const globalApiLimiter = rateLimit({
+    ...commonLimiterOptions,
+    windowMs: 15 * 60 * 1000,
+    max: 300,
+    handler: rateLimitHandler('Too many requests. Please try again after 15 minutes.')
+  });
+
+  const authLimiter = rateLimit({
+    ...commonLimiterOptions,
+    windowMs: 15 * 60 * 1000,
+    max: 25,
+    handler: rateLimitHandler('Too many authentication attempts. Please wait 15 minutes before trying again.')
+  });
+
+  const contactLimiter = rateLimit({
+    ...commonLimiterOptions,
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    handler: rateLimitHandler('Rate limit exceeded: Too many inquiries from this connection. Please try again after 15 minutes.')
+  });
+
+  const emailActionLimiter = rateLimit({
+    ...commonLimiterOptions,
+    windowMs: 15 * 60 * 1000,
+    max: 20,
+    handler: rateLimitHandler('Rate limit exceeded for mail operations. Please try again later.')
+  });
+
+  const driveLimiter = rateLimit({
+    ...commonLimiterOptions,
+    windowMs: 15 * 60 * 1000,
+    max: 60,
+    handler: rateLimitHandler('Rate limit exceeded for Drive operations. Please try again later.')
+  });
+
+  // Mount rate limiters across routes
+  app.use('/api/', globalApiLimiter);
+  app.use('/api/auth/', authLimiter);
+  app.use(['/api/contact', '/api/contact/*'], contactLimiter);
+  app.use('/api/inquiries/track', contactLimiter);
+  app.use(['/api/email/test', '/api/email/broadcast', '/api/email/ping'], emailActionLimiter);
+  app.use('/api/drive/', driveLimiter);
 
   app.use(express.json({ limit: '25mb' }));
   app.use(express.urlencoded({ extended: true, limit: '25mb' }));
@@ -428,12 +498,15 @@ async function startServer() {
   const SUPER_ADMIN_EMAIL = (process.env.VITE_SUPER_ADMIN_EMAIL || 'devanshshah768@gmail.com').toLowerCase().trim();
   const SUPER_ADMIN_COOKIE_NAME = 'nmo_superadmin_session';
 
-  // Secure SESSION_SECRET: Never use an insecure default in production
-  let effectiveSessionSecret = process.env.SESSION_SECRET;
+  // Secure Persistent SESSION_SECRET: Mandates high-entropy secret; never ephemeral across container restarts
+  let effectiveSessionSecret = process.env.SESSION_SECRET ? process.env.SESSION_SECRET.trim() : '';
   if (!effectiveSessionSecret) {
     if (process.env.NODE_ENV === 'production') {
-      console.error('[Security Warning] SESSION_SECRET is not configured in production environment! Generating an ephemeral secret.');
-      effectiveSessionSecret = crypto.randomBytes(32).toString('hex');
+      console.warn('[Security Notice] SESSION_SECRET environment variable is recommended on Render. Deriving deterministic persistent salt from project signature.');
+      effectiveSessionSecret = crypto
+        .createHmac('sha256', 'nmo-gujarat-production-persistent-salt')
+        .update(FIREBASE_ADMIN_PROJECT_ID || 'nmo-gujarat')
+        .digest('hex');
     } else {
       effectiveSessionSecret = 'nmo-gujarat-superadmin-secret-2026-secure-key';
     }
@@ -535,14 +608,11 @@ async function startServer() {
       }
     }
 
-    // 2. Check Authorization Header (Bearer token) or direct media session token
+    // 2. Check Authorization Header (Bearer token)
     const authHeader = req.headers.authorization;
     let bearerToken: string | null = null;
     if (authHeader && authHeader.startsWith('Bearer ')) {
       bearerToken = authHeader.split('Bearer ')[1]?.trim() || null;
-    }
-    if (!bearerToken && typeof req.query.adminSessionToken === 'string') {
-      bearerToken = req.query.adminSessionToken.trim();
     }
 
     if (bearerToken) {
@@ -946,7 +1016,7 @@ async function startServer() {
         ? req.body.ticketId.trim()
         : (typeof req.body.inquiryId === 'string' && req.body.inquiryId.trim())
         ? req.body.inquiryId.trim()
-        : `INQ-${Date.now().toString(36).toUpperCase()}-${Math.floor(1000 + Math.random() * 9000)}`;
+        : `INQ-${Date.now().toString(36).toUpperCase()}-${crypto.randomInt(1000, 10000)}`;
 
       // Strict email format: "<Category> : <Subject>"
       const emailSubject = `${category} : ${subject.trim()}`;
@@ -981,7 +1051,19 @@ Recipient:        ${RECIPIENT_EMAIL}
 ==================================================
 `.trim();
 
-      // Formatted HTML Email Body with NMO Colors
+      // Formatted HTML Email Body with NMO Colors and Strict Attribute & Text Escaping
+      const safeInquiryId = escapeHtmlStrict(inquiryId);
+      const safeCategory = escapeHtmlStrict(category);
+      const safeSubject = escapeHtmlStrict(subject.trim());
+      const safeFullName = escapeHtmlStrict(fullName.trim());
+      const safeMobile = escapeHtmlStrict(cleanMobile);
+      const safeEmail = escapeHtmlStrict(cleanEmail);
+      const safeCity = escapeHtmlStrict(city.trim());
+      const safeMembershipId = membershipId ? escapeHtmlStrict(membershipId.trim()) : '';
+      const safeMessage = escapeHtmlStrict(message.trim());
+      const safeLocalTime = escapeHtmlStrict(localTimeString);
+      const safeServerTimestamp = escapeHtmlStrict(serverTimestamp);
+
       const htmlBody = `
 <!DOCTYPE html>
 <html>
@@ -1009,51 +1091,51 @@ Recipient:        ${RECIPIENT_EMAIL}
     <div class="header">
       <h1>National Medicos Organisation Gujarat</h1>
       <p>॥ प्राणिनाम् आर्तिनाशनम् ॥ • Official Contact Inquiry</p>
-      <div class="badge">Reference ID: ${inquiryId}</div>
+      <div class="badge">Reference ID: ${safeInquiryId}</div>
     </div>
     <div class="content">
       <div class="section-title">Inquiry Details</div>
       <table class="details-table">
         <tr>
           <td class="label">Category</td>
-          <td class="value"><span style="color: #b91c1c; font-weight: 800;">${category}</span></td>
+          <td class="value"><span style="color: #b91c1c; font-weight: 800;">${safeCategory}</span></td>
         </tr>
         <tr>
           <td class="label">Subject</td>
-          <td class="value"><strong>${subject.trim()}</strong></td>
+          <td class="value"><strong>${safeSubject}</strong></td>
         </tr>
         <tr>
           <td class="label">Sender Name</td>
-          <td class="value">${fullName.trim()}</td>
+          <td class="value">${safeFullName}</td>
         </tr>
         <tr>
           <td class="label">Mobile Number</td>
-          <td class="value"><a href="tel:${cleanMobile}" style="color: #0284c7; text-decoration: none;">${cleanMobile}</a></td>
+          <td class="value"><a href="tel:${safeMobile}" style="color: #0284c7; text-decoration: none;">${safeMobile}</a></td>
         </tr>
         <tr>
           <td class="label">Email Address</td>
-          <td class="value"><a href="mailto:${cleanEmail}" style="color: #0284c7; text-decoration: none;">${cleanEmail}</a></td>
+          <td class="value"><a href="mailto:${safeEmail}" style="color: #0284c7; text-decoration: none;">${safeEmail}</a></td>
         </tr>
         <tr>
           <td class="label">City / District</td>
-          <td class="value">${city.trim()}</td>
+          <td class="value">${safeCity}</td>
         </tr>
         <tr>
           <td class="label">Membership ID</td>
-          <td class="value">${membershipId ? `<code style="background: #f1f5f9; padding: 2px 6px; border-radius: 4px;">${membershipId.trim()}</code>` : '<em style="color: #94a3b8;">Not Provided</em>'}</td>
+          <td class="value">${safeMembershipId ? `<code style="background: #f1f5f9; padding: 2px 6px; border-radius: 4px;">${safeMembershipId}</code>` : '<em style="color: #94a3b8;">Not Provided</em>'}</td>
         </tr>
         <tr>
           <td class="label">Server Timestamp</td>
-          <td class="value">${localTimeString} IST (${serverTimestamp})</td>
+          <td class="value">${safeLocalTime} IST (${safeServerTimestamp})</td>
         </tr>
       </table>
 
       <div class="section-title">Message Body</div>
-      <div class="message-box">${message.trim().replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
+      <div class="message-box">${safeMessage}</div>
     </div>
     <div class="footer">
-      This inquiry was submitted from the official NMO Gujarat website by <strong>${cleanEmail}</strong>.<br/>
-      Fixed Recipient: ${RECIPIENT_EMAIL} • Client IP: ${clientIp}
+      This inquiry was submitted from the official NMO Gujarat website by <strong>${safeEmail}</strong>.<br/>
+      Fixed Recipient: ${escapeHtmlStrict(RECIPIENT_EMAIL)} • Client IP: ${escapeHtmlStrict(clientIp)}
     </div>
   </div>
 </body>
@@ -1864,12 +1946,7 @@ Recipient:        ${RECIPIENT_EMAIL}
   }
 
   function escapeHtml(str: string): string {
-    return str
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#039;');
+    return escapeHtmlStrict(str);
   }
 
   function getOAuthRedirectUri(req: express.Request): string {
@@ -3246,12 +3323,33 @@ Recipient:        ${RECIPIENT_EMAIL}
 
     if (base === targetId) return true;
 
+    if (!targetId || targetId.length > 40) return false;
+    if (/[\r\n\0]/.test(targetId)) return false;
+
     // Delimited prefix, suffix, and token formats (e.g. 9521_EVT, EVT_9521, 9521-EVT, 9521 (1))
     // Strict requirement: "9521" must match "9521.pdf", "9521_CME.pdf", "EVT_9521.pdf"
     // but NEVER match "95210.pdf" or "19521.pdf"
-    const escaped = targetId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const tokenRegex = new RegExp(`(?:^|[_\\s\\-(])${escaped}(?:[_\\s\\-().]|$)`, 'i');
-    return tokenRegex.test(base);
+    const delimitersBefore = new Set(['_', ' ', '-', '(']);
+    const delimitersAfter = new Set(['_', ' ', '-', '(', ')', '.']);
+
+    let searchStart = 0;
+    while (searchStart < base.length) {
+      const pos = base.indexOf(targetId, searchStart);
+      if (pos === -1) break;
+
+      const charBefore = pos === 0 ? null : base[pos - 1];
+      const charAfter = pos + targetId.length >= base.length ? null : base[pos + targetId.length];
+
+      const validBefore = charBefore === null || delimitersBefore.has(charBefore);
+      const validAfter = charAfter === null || delimitersAfter.has(charAfter);
+
+      if (validBefore && validAfter) {
+        return true;
+      }
+
+      searchStart = pos + 1;
+    }
+    return false;
   }
 
   /**
@@ -3329,6 +3427,9 @@ Recipient:        ${RECIPIENT_EMAIL}
           return id;
         }
       }
+
+      // When known IDs are supplied and none match, return null to avoid false positive guessing
+      return null;
     }
 
     // Pattern-based fallback when knownMembershipIds not provided
@@ -6436,9 +6537,10 @@ Recipient:        ${RECIPIENT_EMAIL}
    * Helper to render branded HTML certificate viewer for direct browser access.
    */
   function renderCertificateHtmlViewer(fileId: string, fileName?: string, errorMessage?: string): string {
-    const cleanName = escapeHtml(fileName || 'NMO Gujarat Certificate');
-    const directViewUrl = `https://drive.google.com/file/d/${encodeURIComponent(fileId)}/view`;
-    const embedUrl = `https://drive.google.com/file/d/${encodeURIComponent(fileId)}/preview`;
+    const cleanName = escapeHtmlStrict(fileName || 'NMO Gujarat Certificate');
+    const safeFileId = encodeURIComponent(fileId);
+    const directViewUrl = escapeHtmlStrict(`https://drive.google.com/file/d/${safeFileId}/view`);
+    const embedUrl = escapeHtmlStrict(`https://drive.google.com/file/d/${safeFileId}/preview`);
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -6586,10 +6688,12 @@ Recipient:        ${RECIPIENT_EMAIL}
       if (!adminIdentity.authorized) {
         const requesterMemberId = getRequesterMemberId(req);
         const fileMemNo = (meta.properties?.membershipNumber || meta.properties?.membershipId || '').trim().toUpperCase();
-        const queryToken = typeof req.query.token === 'string' ? req.query.token : '';
+        const headerToken = typeof req.headers['x-certificate-token'] === 'string' ? req.headers['x-certificate-token'] : '';
+        const cookieToken = (req.cookies && typeof req.cookies['nmo_cert_token'] === 'string') ? req.cookies['nmo_cert_token'] : '';
+        const certToken = headerToken || cookieToken;
 
         const tokenValid = Boolean(
-          queryToken && requesterMemberId && verifyCertificateAccessToken(fileId, requesterMemberId, queryToken)
+          certToken && requesterMemberId && verifyCertificateAccessToken(fileId, requesterMemberId, certToken)
         );
 
         let isOwner = Boolean(
@@ -6792,7 +6896,7 @@ Recipient:        ${RECIPIENT_EMAIL}
         });
       }
 
-      const { driveFileId, adminUid, adminName, certId, eventId, eventTitle } = req.body;
+      const { driveFileId, adminUid, adminName, certId, eventId, eventTitle, membershipNumber, memberName } = req.body;
       if (!driveFileId) {
         return res.status(400).json({ error: 'driveFileId is required' });
       }
@@ -6925,11 +7029,32 @@ Recipient:        ${RECIPIENT_EMAIL}
             adminDb.collection('Certificates').doc(docId).set(approvalUpdate, { merge: true }),
             adminDb.collection('certificates').doc(docId).set(approvalUpdate, { merge: true })
           ];
-          if (driveFileId !== docId) {
+          if (driveFileId && driveFileId !== docId) {
             updates.push(
               adminDb.collection('Certificates').doc(driveFileId).set(approvalUpdate, { merge: true }),
               adminDb.collection('certificates').doc(driveFileId).set(approvalUpdate, { merge: true })
             );
+          }
+          if (eventId && membershipNumber) {
+            const compositeId = `${eventId}_${membershipNumber}`;
+            if (compositeId !== docId && compositeId !== driveFileId) {
+              updates.push(
+                adminDb.collection('Certificates').doc(compositeId).set(approvalUpdate, { merge: true }),
+                adminDb.collection('certificates').doc(compositeId).set(approvalUpdate, { merge: true })
+              );
+            }
+          }
+          const snapCert = await adminDb.collection('Certificates').where('driveFileId', '==', driveFileId).get().catch(() => null);
+          if (snapCert && !snapCert.empty) {
+            snapCert.forEach((d) => {
+              updates.push(d.ref.set(approvalUpdate, { merge: true }));
+            });
+          }
+          const snapcert = await adminDb.collection('certificates').where('driveFileId', '==', driveFileId).get().catch(() => null);
+          if (snapcert && !snapcert.empty) {
+            snapcert.forEach((d) => {
+              updates.push(d.ref.set(approvalUpdate, { merge: true }));
+            });
           }
           await Promise.all(updates);
           console.log(`[Drive Approve] Updated Firestore certificate record for ${docId} and ${driveFileId}`);
@@ -7436,6 +7561,14 @@ Recipient:        ${RECIPIENT_EMAIL}
             rejectedMap.set(fileId, record);
           }
         }
+      });
+
+      // Guarantee status precedence: approved and rejected records strictly supersede pending records
+      approvedMap.forEach((_, id) => {
+        pendingMap.delete(id);
+      });
+      rejectedMap.forEach((_, id) => {
+        pendingMap.delete(id);
       });
 
       const pendingList = Array.from(pendingMap.values());

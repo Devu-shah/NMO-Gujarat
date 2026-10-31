@@ -3,6 +3,7 @@ import path from 'path';
 import net from 'net';
 import nodemailer from 'nodemailer';
 import type { Transporter, SendMailOptions } from 'nodemailer';
+import { validateHostForSSRF } from './ssrfValidator';
 
 export interface ContactInquiryPayload {
   inquiryId: string;
@@ -350,11 +351,23 @@ export async function getTransporter(forceRefresh: boolean = false): Promise<Tra
 
 /**
  * Lightweight TCP connection latency tester for SMTP hosts (587, 465, 2525)
+ * Protected against SSRF and DNS rebinding by validating against private, loopback, and metadata ranges.
  */
 export async function pingSmtpConnection(host: string, port: number = 587): Promise<{ success: boolean; latencyMs: number; error?: string }> {
+  const ssrfCheck = await validateHostForSSRF(host, port);
+  if (!ssrfCheck.safe) {
+    return {
+      success: false,
+      latencyMs: 0,
+      error: ssrfCheck.error || 'Blocked by SSRF security policy.'
+    };
+  }
+
+  const targetConnectHost = ssrfCheck.resolvedIp || host;
+
   return new Promise((resolve) => {
     const start = Date.now();
-    const sock = net.createConnection({ host, port, timeout: 5000 }, () => {
+    const sock = net.createConnection({ host: targetConnectHost, port, timeout: 5000 }, () => {
       const latency = Date.now() - start;
       sock.end();
       resolve({ success: true, latencyMs: latency });
@@ -364,7 +377,7 @@ export async function pingSmtpConnection(host: string, port: number = 587): Prom
       resolve({ success: false, latencyMs: Date.now() - start, error: `Connection to ${host}:${port} timed out after 5000ms.` });
     });
     sock.on('error', (err: any) => {
-      resolve({ success: false, latencyMs: Date.now() - start, error: err?.message || 'Connection refused or blocked by firewall' });
+      resolve({ success: false, latencyMs: Date.now() - start, error: 'Connection refused or blocked by firewall' });
     });
   });
 }

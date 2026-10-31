@@ -1097,6 +1097,9 @@ export const AdminCertificatesManager: React.FC = () => {
 
     setProcessingPendingId(cert.id);
 
+    const certLookupId = cert.certId || cert.id;
+    const isTargetCert = (c: DriveCertificateFile) => c.id === cert.id || (c.certId && c.certId === certLookupId);
+
     // Optimistically update local panel state immediately
     const approvedCertObj: DriveCertificateFile = {
       ...cert,
@@ -1105,20 +1108,25 @@ export const AdminCertificatesManager: React.FC = () => {
       decisionByAdminName: currentUser?.name || 'Administrator',
       decisionAt: new Date().toISOString()
     };
-    setApprovedCertificates((prev) => [approvedCertObj, ...prev.filter((c) => c.id !== cert.id)]);
-    setPendingCertificates((prev) => prev.filter((c) => c.id !== cert.id));
-    setRejectedCertificates((prev) => prev.filter((c) => c.id !== cert.id));
+    setApprovedCertificates((prev) => [approvedCertObj, ...prev.filter((c) => !isTargetCert(c))]);
+    setPendingCertificates((prev) => prev.filter((c) => !isTargetCert(c)));
+    setRejectedCertificates((prev) => prev.filter((c) => !isTargetCert(c)));
 
     if (cert.eventId && cert.eventId === selectedEvent?.eventId) {
-      setEventDriveFiles((prev) => [approvedCertObj, ...prev.filter((c) => c.id !== cert.id)]);
+      setEventDriveFiles((prev) => [approvedCertObj, ...prev.filter((c) => !isTargetCert(c))]);
     }
 
     try {
       await approveCertificate(
         cert.id,
         { uid: currentUser?.uid, name: currentUser?.name || 'Administrator' },
-        cert.id,
-        { eventId: cert.eventId || selectedEvent?.eventId, eventTitle: cert.eventTitle || selectedEvent?.title }
+        certLookupId,
+        {
+          eventId: cert.eventId || selectedEvent?.eventId,
+          eventTitle: cert.eventTitle || selectedEvent?.title,
+          membershipNumber: cert.membershipNumber || (cert as any).membershipId,
+          memberName: cert.memberName
+        }
       );
 
       setFeedback({
@@ -1169,6 +1177,9 @@ export const AdminCertificatesManager: React.FC = () => {
     setProcessingPendingId(rejectModalCert.id);
 
     const reason = rejectionReasonText.trim() || 'Certificate submission could not be verified by administrator.';
+    const certLookupId = rejectModalCert.certId || rejectModalCert.id;
+    const isTargetCert = (c: DriveCertificateFile) => c.id === rejectModalCert.id || (c.certId && c.certId === certLookupId);
+
     const rejectedCertObj: DriveCertificateFile = {
       ...rejectModalCert,
       approvalStatus: 'rejected',
@@ -1179,13 +1190,13 @@ export const AdminCertificatesManager: React.FC = () => {
     };
 
     // Optimistically update local panel state immediately: move from pending to rejected
-    setRejectedCertificates((prev) => [rejectedCertObj, ...prev.filter((c) => c.id !== rejectModalCert.id)]);
-    setPendingCertificates((prev) => prev.filter((c) => c.id !== rejectModalCert.id));
-    setApprovedCertificates((prev) => prev.filter((c) => c.id !== rejectModalCert.id));
+    setRejectedCertificates((prev) => [rejectedCertObj, ...prev.filter((c) => !isTargetCert(c))]);
+    setPendingCertificates((prev) => prev.filter((c) => !isTargetCert(c)));
+    setApprovedCertificates((prev) => prev.filter((c) => !isTargetCert(c)));
 
     try {
       await rejectAndDeleteCertificate(
-        rejectModalCert.id,
+        certLookupId,
         rejectModalCert.id,
         reason,
         { uid: currentUser?.uid, name: currentUser?.name || 'Administrator' },

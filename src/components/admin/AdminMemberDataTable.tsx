@@ -28,6 +28,7 @@ import {
   LifeBuoy,
   Heart
 } from 'lucide-react';
+import { secureRandomInt, sanitizeMailto, sanitizeTel, sanitizeUrl } from '../../lib/safeUrl';
 
 interface AdminMemberDataTableProps {
   onExportSelected?: (selected: NMOMember[]) => void;
@@ -805,14 +806,14 @@ export const AdminMemberDataTable: React.FC<AdminMemberDataTableProps> = ({
                           {m.phone ? (
                             <div className="flex items-center gap-1.5">
                               <a
-                                href={`tel:${m.phone}`}
+                                href={sanitizeTel(m.phone)}
                                 className="text-slate-800 hover:text-red-700 font-bold hover:underline"
                                 title="Click to Call"
                               >
                                 {m.phone}
                               </a>
                               <a
-                                href={`https://wa.me/${m.phone.replace(/[^0-9]/g, '')}`}
+                                href={sanitizeUrl(`https://wa.me/${m.phone.replace(/[^0-9]/g, '')}`)}
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 className="p-1 text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50 rounded"
@@ -831,7 +832,7 @@ export const AdminMemberDataTable: React.FC<AdminMemberDataTableProps> = ({
                         <td className="p-3.5 font-mono text-slate-600 whitespace-nowrap text-xs max-w-xs truncate">
                           {m.email ? (
                             <a
-                              href={`mailto:${m.email}`}
+                              href={sanitizeMailto(m.email)}
                               className="text-slate-700 hover:text-red-700 hover:underline"
                               title={m.email}
                             >
@@ -1065,7 +1066,7 @@ export const AdminMemberDataTable: React.FC<AdminMemberDataTableProps> = ({
                       <button
                         type="button"
                         onClick={() => {
-                          const autoNo = `NMO-${isPrantAdmin && assignedPrant === 'Saurashtra' ? 'SAU' : 'GUJ'}-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
+                          const autoNo = `NMO-${isPrantAdmin && assignedPrant === 'Saurashtra' ? 'SAU' : 'GUJ'}-${new Date().getFullYear()}-${secureRandomInt(1000, 9999)}`;
                           setEditingMember({ ...editingMember, membershipNumber: autoNo });
                         }}
                         className="text-[10px] text-red-700 hover:text-red-900 font-semibold hover:underline cursor-pointer"
@@ -1380,16 +1381,16 @@ export const AdminMemberDataTable: React.FC<AdminMemberDataTableProps> = ({
               {emergencyMemberModal.phone ? (
                 <>
                   <a
-                    href={`tel:${emergencyMemberModal.phone}`}
+                    href={sanitizeTel(emergencyMemberModal.phone)}
                     className="p-3 bg-red-700 hover:bg-red-800 text-white rounded-xl font-bold text-xs flex items-center justify-center gap-2 shadow-xs transition-colors"
                   >
                     <Phone className="w-4 h-4" />
                     <span>Call Mobile</span>
                   </a>
                   <a
-                    href={`https://wa.me/${emergencyMemberModal.phone.replace(/[^0-9]/g, '')}?text=${encodeURIComponent(
+                    href={sanitizeUrl(`https://wa.me/${emergencyMemberModal.phone.replace(/[^0-9]/g, '')}?text=${encodeURIComponent(
                       `Hello Dr. ${emergencyMemberModal.name}, this is an urgent communication from NMO Gujarat regarding a medical seva emergency.`
-                    )}`}
+                    )}`)}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="p-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold text-xs flex items-center justify-center gap-2 shadow-xs transition-colors"
@@ -1418,7 +1419,7 @@ export const AdminMemberDataTable: React.FC<AdminMemberDataTableProps> = ({
                 <span className="font-semibold text-slate-500">Email Address:</span>
                 <span className="font-mono font-bold text-slate-800">
                   {emergencyMemberModal.email ? (
-                    <a href={`mailto:${emergencyMemberModal.email}`} className="text-red-700 hover:underline">
+                    <a href={sanitizeMailto(emergencyMemberModal.email)} className="text-red-700 hover:underline">
                       {emergencyMemberModal.email}
                     </a>
                   ) : (
@@ -1460,7 +1461,7 @@ export const AdminMemberDataTable: React.FC<AdminMemberDataTableProps> = ({
                     <span>{emergencyMemberModal.refPerson || 'Reference Contact'}</span>
                     {emergencyMemberModal.refPersonPhone && (
                       <a
-                        href={`tel:${emergencyMemberModal.refPersonPhone}`}
+                        href={sanitizeTel(emergencyMemberModal.refPersonPhone)}
                         className="font-mono font-bold text-red-700 hover:underline flex items-center gap-1"
                       >
                         <Phone className="w-3 h-3" />
