@@ -38,7 +38,10 @@ import {
   FolderOpen,
   ShieldAlert,
   Award,
-  ScanLine
+  ScanLine,
+  Link as LinkIcon,
+  FolderPlus,
+  Images
 } from 'lucide-react';
 import {
   connectGoogleDrive,
@@ -47,6 +50,7 @@ import {
   reconcileAllEventDriveFolders,
   ensureEventDriveFolders
 } from '../../lib/googleDrive';
+import { apiUrl } from '../../lib/api';
 import { CityDropdown } from '../common/CityDropdown';
 
 interface AdminEventsManagerProps {
@@ -148,6 +152,93 @@ export const AdminEventsManager: React.FC<AdminEventsManagerProps> = ({
   const [deleteDriveFoldersChecked, setDeleteDriveFoldersChecked] = useState(true);
   const [isDeletingEvent, setIsDeletingEvent] = useState(false);
   const [qrScannerEventId, setQrScannerEventId] = useState<string | null>(null);
+
+  // Link Google Drive Folder Modal State
+  const [linkingFolderEvent, setLinkingFolderEvent] = useState<NMOEvent | null>(null);
+  const [linkFolderType, setLinkFolderType] = useState<'gallery' | 'approved' | 'pending'>('gallery');
+  const [linkFolderInput, setLinkFolderInput] = useState<string>('');
+  const [linkFolderName, setLinkFolderName] = useState<string>('');
+  const [isLinkingFolder, setIsLinkingFolder] = useState<boolean>(false);
+  const [linkFolderFeedback, setLinkFolderFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+
+  const handleOpenLinkFolderModal = (evt: NMOEvent, defaultType: 'gallery' | 'approved' | 'pending' = 'gallery') => {
+    setLinkingFolderEvent(evt);
+    setLinkFolderType(defaultType);
+    if (defaultType === 'gallery') {
+      setLinkFolderInput(evt.galleryFolderLink || evt.galleryFolderId || '');
+      setLinkFolderName(evt.galleryFolderName || '');
+    } else if (defaultType === 'approved') {
+      setLinkFolderInput(evt.driveFolderLink || evt.driveFolderId || '');
+      setLinkFolderName(evt.driveFolderName || '');
+    } else {
+      setLinkFolderInput(evt.pendingDriveFolderLink || evt.pendingDriveFolderId || '');
+      setLinkFolderName(evt.pendingDriveFolderName || '');
+    }
+    setLinkFolderFeedback(null);
+  };
+
+  const handleSaveLinkedFolder = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!linkingFolderEvent || !linkFolderInput.trim()) return;
+
+    setIsLinkingFolder(true);
+    setLinkFolderFeedback(null);
+
+    try {
+      const resp = await fetch(apiUrl(`/api/events/${linkingFolderEvent.eventId}/link-drive-folder`), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          folderType: linkFolderType,
+          folderInput: linkFolderInput.trim(),
+          customName: linkFolderName.trim()
+        })
+      });
+
+      const data = await resp.json();
+      if (!resp.ok || !data.success) {
+        throw new Error(data.error || 'Failed to link Google Drive folder');
+      }
+
+      // Update local event in context
+      const updatedEvt: NMOEvent = { ...linkingFolderEvent };
+      if (linkFolderType === 'gallery') {
+        updatedEvt.galleryFolderId = data.folderId;
+        updatedEvt.galleryFolderLink = data.folderLink;
+        if (data.folderName) updatedEvt.galleryFolderName = data.folderName;
+      } else if (linkFolderType === 'approved') {
+        updatedEvt.driveFolderId = data.folderId;
+        updatedEvt.driveFolderLink = data.folderLink;
+        if (data.folderName) updatedEvt.driveFolderName = data.folderName;
+      } else if (linkFolderType === 'pending') {
+        updatedEvt.pendingDriveFolderId = data.folderId;
+        updatedEvt.pendingDriveFolderLink = data.folderLink;
+        if (data.folderName) updatedEvt.pendingDriveFolderName = data.folderName;
+      }
+
+      await updateEvent(updatedEvt);
+      await refreshFromDatabase();
+
+      setLinkFolderFeedback({
+        type: 'success',
+        message: `Linked ${linkFolderType === 'gallery' ? 'Gallery Photos' : linkFolderType === 'approved' ? 'Approved Certificates' : 'Pending Submissions'} folder successfully! Gallery updated.`
+      });
+
+      setTimeout(() => {
+        setLinkingFolderEvent(null);
+        setLinkFolderFeedback(null);
+      }, 1500);
+    } catch (err: any) {
+      setLinkFolderFeedback({
+        type: 'error',
+        message: err.message || 'Error linking folder'
+      });
+    } finally {
+      setIsLinkingFolder(false);
+    }
+  };
 
   const handleCreateDriveSubfolder = async (evt: NMOEvent) => {
     setDriveActionId(evt.eventId);
@@ -500,9 +591,10 @@ export const AdminEventsManager: React.FC<AdminEventsManagerProps> = ({
 
               {/* NMO Gujarat Dual Google Drive Subfolder Status */}
               <div className="pt-2 border-t border-slate-100 space-y-1.5 text-[11px]">
+                {/* Approved Certificates Folder */}
                 <div className="flex items-center justify-between">
                   <span className="flex items-center gap-1.5 font-medium text-slate-600">
-                    <FolderOpen className="w-3.5 h-3.5 text-emerald-600" />
+                    <FolderOpen className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
                     <span>Approved Folder:</span>
                   </span>
                   {evt.driveFolderId ? (
@@ -521,9 +613,10 @@ export const AdminEventsManager: React.FC<AdminEventsManagerProps> = ({
                   )}
                 </div>
 
+                {/* Pending Verification Folder */}
                 <div className="flex items-center justify-between">
                   <span className="flex items-center gap-1.5 font-medium text-slate-600">
-                    <FolderOpen className="w-3.5 h-3.5 text-amber-600" />
+                    <FolderOpen className="w-3.5 h-3.5 text-amber-600 shrink-0" />
                     <span>Pending Folder:</span>
                   </span>
                   {evt.pendingDriveFolderId ? (
@@ -542,19 +635,52 @@ export const AdminEventsManager: React.FC<AdminEventsManagerProps> = ({
                   )}
                 </div>
 
-                {(!evt.driveFolderId || !evt.pendingDriveFolderId) && (
-                  <div className="pt-1 flex justify-end">
+                {/* Gallery Photos Folder */}
+                <div className="flex items-center justify-between">
+                  <span className="flex items-center gap-1.5 font-medium text-slate-600">
+                    <Images className="w-3.5 h-3.5 text-purple-600 shrink-0" />
+                    <span>Gallery Folder:</span>
+                  </span>
+                  {evt.galleryFolderId ? (
+                    <a
+                      href={evt.galleryFolderLink || `https://drive.google.com/drive/folders/${evt.galleryFolderId}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1 text-[10px] font-bold text-purple-800 bg-purple-50 hover:bg-purple-100 border border-purple-200 px-2 py-0.5 rounded-md transition-colors"
+                      title="Open Gallery Photos Folder in Google Drive"
+                    >
+                      <span className="truncate max-w-[130px]">gallery/{evt.galleryFolderName || evt.title}</span>
+                      <ExternalLink className="w-2.5 h-2.5 shrink-0" />
+                    </a>
+                  ) : (
+                    <span className="text-[10px] font-medium text-slate-400 italic">Not linked</span>
+                  )}
+                </div>
+
+                {/* Folder Action Controls */}
+                <div className="pt-1.5 flex items-center justify-between gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => handleOpenLinkFolderModal(evt, 'gallery')}
+                    className="inline-flex items-center gap-1 text-[10px] font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 px-2 py-1 rounded-md transition-colors cursor-pointer"
+                    title="Link a specific Google Drive folder (Gallery photos or Certificates) to this event"
+                  >
+                    <LinkIcon className="w-3 h-3 text-indigo-600" />
+                    <span>Link Drive Folder</span>
+                  </button>
+
+                  {(!evt.driveFolderId || !evt.pendingDriveFolderId) && (
                     <button
                       type="button"
                       onClick={() => handleCreateDriveSubfolder(evt)}
                       disabled={driveActionId === evt.eventId}
-                      className="inline-flex items-center gap-1 text-[10px] font-bold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 px-2 py-0.5 rounded-md transition-colors cursor-pointer disabled:opacity-50"
+                      className="inline-flex items-center gap-1 text-[10px] font-bold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 px-2 py-1 rounded-md transition-colors cursor-pointer disabled:opacity-50"
                     >
                       <RefreshCw className={`w-3 h-3 ${driveActionId === evt.eventId ? 'animate-spin' : ''}`} />
-                      <span>{driveActionId === evt.eventId ? 'Initializing...' : '+ Initialize Drive Folders'}</span>
+                      <span>{driveActionId === evt.eventId ? 'Initializing...' : '+ Auto-Create'}</span>
                     </button>
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
             </div>
 
@@ -881,6 +1007,67 @@ export const AdminEventsManager: React.FC<AdminEventsManagerProps> = ({
                     </div>
                   </div>
                 )}
+              </div>
+
+              {/* Google Drive Folders Configuration (Optional) */}
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
+                <div className="flex items-center gap-2">
+                  <FolderOpen className="w-4 h-4 text-indigo-600" />
+                  <span className="font-bold text-slate-800 text-xs uppercase tracking-wider">
+                    Google Drive Folder Links (Optional)
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                  <div>
+                    <label className="block text-slate-700 font-semibold mb-1">
+                      📸 Gallery Photos Folder URL / ID
+                    </label>
+                    <input
+                      type="text"
+                      value={editingEvent.galleryFolderLink || editingEvent.galleryFolderId || ''}
+                      onChange={(e) => {
+                        const val = e.target.value.trim();
+                        const match = val.match(/\/folders\/([a-zA-Z0-9_-]+)/);
+                        const id = match ? match[1] : val;
+                        setEditingEvent({
+                          ...editingEvent,
+                          galleryFolderId: id,
+                          galleryFolderLink: val.startsWith('http') ? val : id ? `https://drive.google.com/drive/folders/${id}` : ''
+                        });
+                      }}
+                      placeholder="https://drive.google.com/drive/folders/..."
+                      className="w-full px-3 py-1.5 border border-slate-300 rounded-lg bg-white font-mono text-[11px]"
+                    />
+                    <span className="text-[10px] text-slate-400 mt-0.5 block">
+                      Photos here appear on homepage gallery & /gallery.
+                    </span>
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-700 font-semibold mb-1">
+                      📜 Approved Certificates Folder URL / ID
+                    </label>
+                    <input
+                      type="text"
+                      value={editingEvent.driveFolderLink || editingEvent.driveFolderId || ''}
+                      onChange={(e) => {
+                        const val = e.target.value.trim();
+                        const match = val.match(/\/folders\/([a-zA-Z0-9_-]+)/);
+                        const id = match ? match[1] : val;
+                        setEditingEvent({
+                          ...editingEvent,
+                          driveFolderId: id,
+                          driveFolderLink: val.startsWith('http') ? val : id ? `https://drive.google.com/drive/folders/${id}` : ''
+                        });
+                      }}
+                      placeholder="https://drive.google.com/drive/folders/..."
+                      className="w-full px-3 py-1.5 border border-slate-300 rounded-lg bg-white font-mono text-[11px]"
+                    />
+                    <span className="text-[10px] text-slate-400 mt-0.5 block">
+                      Target folder for verified event certificates.
+                    </span>
+                  </div>
+                </div>
               </div>
 
               <div className="flex items-center justify-end gap-2 pt-4 border-t border-slate-100">
@@ -1428,6 +1615,171 @@ export const AdminEventsManager: React.FC<AdminEventsManagerProps> = ({
                 <span>{isDeletingEvent ? 'Deleting...' : 'Confirm & Delete'}</span>
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Link Google Drive Folder to Event Modal */}
+      {linkingFolderEvent && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/70 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-5 sm:p-6 shadow-2xl border border-slate-200 animate-in zoom-in-95 duration-200">
+            <div className="flex items-start justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-indigo-50 text-indigo-700 flex items-center justify-center">
+                  <FolderPlus className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-slate-900 text-sm sm:text-base">
+                    Link Google Drive Folder
+                  </h3>
+                  <p className="text-[11px] text-slate-500 truncate max-w-xs">
+                    Event: {linkingFolderEvent.title}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setLinkingFolderEvent(null)}
+                className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveLinkedFolder} className="space-y-4 pt-4 text-xs">
+              {/* Folder Type Selector */}
+              <div>
+                <label className="block text-slate-700 font-bold mb-1.5 uppercase tracking-wider text-[10px]">
+                  Select Folder Purpose
+                </label>
+                <div className="grid grid-cols-3 gap-1.5 p-1 bg-slate-100 rounded-xl">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setLinkFolderType('gallery');
+                      setLinkFolderInput(linkingFolderEvent.galleryFolderLink || linkingFolderEvent.galleryFolderId || '');
+                      setLinkFolderName(linkingFolderEvent.galleryFolderName || '');
+                    }}
+                    className={`py-1.5 px-2 rounded-lg font-bold text-center transition-all cursor-pointer ${
+                      linkFolderType === 'gallery'
+                        ? 'bg-white text-purple-700 shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    📸 Gallery Photos
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setLinkFolderType('approved');
+                      setLinkFolderInput(linkingFolderEvent.driveFolderLink || linkingFolderEvent.driveFolderId || '');
+                      setLinkFolderName(linkingFolderEvent.driveFolderName || '');
+                    }}
+                    className={`py-1.5 px-2 rounded-lg font-bold text-center transition-all cursor-pointer ${
+                      linkFolderType === 'approved'
+                        ? 'bg-white text-emerald-700 shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    📜 Approved
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setLinkFolderType('pending');
+                      setLinkFolderInput(linkingFolderEvent.pendingDriveFolderLink || linkingFolderEvent.pendingDriveFolderId || '');
+                      setLinkFolderName(linkingFolderEvent.pendingDriveFolderName || '');
+                    }}
+                    className={`py-1.5 px-2 rounded-lg font-bold text-center transition-all cursor-pointer ${
+                      linkFolderType === 'pending'
+                        ? 'bg-white text-amber-700 shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    ⏳ Pending
+                  </button>
+                </div>
+                <p className="text-[11px] text-slate-500 mt-1">
+                  {linkFolderType === 'gallery' && 'Photos from this folder will be displayed in the Homepage Gallery and /gallery archive.'}
+                  {linkFolderType === 'approved' && 'Folder for storing verified attendee certificates.'}
+                  {linkFolderType === 'pending' && 'Folder for participant submissions awaiting approval.'}
+                </p>
+              </div>
+
+              {/* Folder URL or ID input */}
+              <div>
+                <label className="block text-slate-700 font-bold mb-1">
+                  Google Drive Folder Link or Folder ID *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={linkFolderInput}
+                  onChange={(e) => setLinkFolderInput(e.target.value)}
+                  placeholder="https://drive.google.com/drive/folders/1abc... or 1abc..."
+                  className="w-full px-3 py-2 border border-slate-300 rounded-xl bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-600 outline-hidden font-mono text-[11px]"
+                />
+                <span className="text-[10px] text-slate-400 mt-0.5 block">
+                  Paste the full Google Drive folder link or the alphanumeric folder ID.
+                </span>
+              </div>
+
+              {/* Optional Custom Display Name */}
+              <div>
+                <label className="block text-slate-700 font-bold mb-1">
+                  Custom Folder Label (Optional)
+                </label>
+                <input
+                  type="text"
+                  value={linkFolderName}
+                  onChange={(e) => setLinkFolderName(e.target.value)}
+                  placeholder={`e.g. ${linkingFolderEvent.title} Gallery`}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-xl bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-600 outline-hidden text-xs"
+                />
+              </div>
+
+              {/* Feedback Alert */}
+              {linkFolderFeedback && (
+                <div
+                  className={`p-3 rounded-xl flex items-center gap-2 text-xs font-semibold ${
+                    linkFolderFeedback.type === 'success'
+                      ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                      : 'bg-red-50 text-red-800 border border-red-200'
+                  }`}
+                >
+                  {linkFolderFeedback.type === 'success' ? (
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                  ) : (
+                    <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+                  )}
+                  <span>{linkFolderFeedback.message}</span>
+                </div>
+              )}
+
+              {/* Action Buttons */}
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setLinkingFolderEvent(null)}
+                  disabled={isLinkingFolder}
+                  className="px-4 py-2 border border-slate-300 rounded-xl font-bold text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isLinkingFolder || !linkFolderInput.trim()}
+                  className="px-5 py-2 bg-indigo-700 hover:bg-indigo-800 text-white rounded-xl font-bold transition-all shadow-sm flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  {isLinkingFolder ? (
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Save className="w-3.5 h-3.5" />
+                  )}
+                  <span>{isLinkingFolder ? 'Linking...' : 'Save & Link Folder'}</span>
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

@@ -53,6 +53,14 @@ export const UploadCertificateModal: React.FC<UploadCertificateModalProps> = ({
 
   if (!isOpen) return null;
 
+  React.useEffect(() => {
+    return () => {
+      if (previewUrl && previewUrl.startsWith('blob:')) {
+        URL.revokeObjectURL(previewUrl);
+      }
+    };
+  }, [previewUrl]);
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setErrorMessage(null);
     setSuccessMessage(null);
@@ -67,6 +75,9 @@ export const UploadCertificateModal: React.FC<UploadCertificateModalProps> = ({
     if (!validExtensions.includes(rawExt) && !validMimes.includes(file.type)) {
       setErrorMessage('Security & Format Policy: Only PDF, JPG, JPEG, and PNG files are supported for certificate upload.');
       setSelectedFile(null);
+      if (previewUrl && previewUrl.startsWith('blob:')) {
+        URL.revokeObjectURL(previewUrl);
+      }
       setPreviewUrl(null);
       return;
     }
@@ -74,23 +85,24 @@ export const UploadCertificateModal: React.FC<UploadCertificateModalProps> = ({
     if (file.size > 1 * 1024 * 1024) {
       setErrorMessage('File size exceeds the 1 MB limit for member uploads. Please compress your certificate file to under 1 MB.');
       setSelectedFile(null);
+      if (previewUrl && previewUrl.startsWith('blob:')) {
+        URL.revokeObjectURL(previewUrl);
+      }
       setPreviewUrl(null);
       return;
     }
 
     setSelectedFile(file);
     if (file.type.startsWith('image/')) {
-      const reader = new FileReader();
-      reader.onload = (loadEvt) => {
-        const result = loadEvt.target?.result;
-        if (typeof result === 'string' && /^data:image\/(?:png|jpeg|jpg);base64,[A-Za-z0-9+/=]+$/.test(result)) {
-          setPreviewUrl(result);
-        } else {
-          setPreviewUrl(null);
-        }
-      };
-      reader.readAsDataURL(file);
+      if (previewUrl && previewUrl.startsWith('blob:')) {
+        URL.revokeObjectURL(previewUrl);
+      }
+      const safeBlobUrl = URL.createObjectURL(file);
+      setPreviewUrl(safeBlobUrl);
     } else {
+      if (previewUrl && previewUrl.startsWith('blob:')) {
+        URL.revokeObjectURL(previewUrl);
+      }
       setPreviewUrl(null);
     }
   };

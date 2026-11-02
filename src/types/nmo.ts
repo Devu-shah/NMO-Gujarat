@@ -134,6 +134,11 @@ export interface NMOEvent {
   driveFolderCreated?: boolean;
   driveFolderError?: string;
 
+  // Gallery / Photos folder integration
+  galleryFolderId?: string;
+  galleryFolderLink?: string;
+  galleryFolderName?: string;
+
   // Embedded participants array
   participants: EventParticipant[];
 

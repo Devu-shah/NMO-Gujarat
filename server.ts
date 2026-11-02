@@ -4470,7 +4470,7 @@ Recipient:        ${RECIPIENT_EMAIL}
               mimeType: f.mimeType,
               size: f.size ? `${(Number(f.size) / (1024 * 1024)).toFixed(2)} MB` : undefined,
               createdTime: f.createdTime,
-              proxyUrl: `/api/drive/file/${f.id}`,
+              proxyUrl: `/api/gallery/photo/${f.id}`,
               webViewLink: f.webViewLink || `https://drive.google.com/file/d/${f.id}/view`,
               thumbnailLink: f.thumbnailLink
             });
@@ -4595,13 +4595,16 @@ Recipient:        ${RECIPIENT_EMAIL}
               const eventsSnap = await adminDb.collection('Events').get();
               for (const docSnap of eventsSnap.docs) {
                 const evtData = docSnap.data();
-                const folderIdFromEvent = evtData.driveFolderId ||
+                // Prioritize dedicated public gallery photo folder, then fall back to driveFolderId
+                const folderIdFromEvent = evtData.galleryFolderId ||
+                  (evtData.galleryFolderLink && evtData.galleryFolderLink.match(/folders\/([a-zA-Z0-9_-]+)/)?.[1]) ||
+                  evtData.driveFolderId ||
                   (evtData.driveFolderLink && evtData.driveFolderLink.match(/folders\/([a-zA-Z0-9_-]+)/)?.[1]);
 
                 if (folderIdFromEvent && typeof folderIdFromEvent === 'string' && !folderCandidatesMap.has(folderIdFromEvent)) {
                   folderCandidatesMap.set(folderIdFromEvent, {
                     id: folderIdFromEvent,
-                    name: evtData.title || evtData.driveFolderName || docSnap.id,
+                    name: evtData.galleryFolderName || evtData.title || evtData.driveFolderName || docSnap.id,
                     createdTime: evtData.createdAt || new Date().toISOString(),
                     category: evtData.category || (evtData.title?.includes('Camp') ? 'Camps' : evtData.title?.includes('CME') ? 'CMEs' : 'General'),
                     location: evtData.city ? `${evtData.city}, Gujarat` : evtData.venue,
@@ -4832,6 +4835,167 @@ Recipient:        ${RECIPIENT_EMAIL}
       return res.json({ success: true, config: { featuredEventFolderIds: [] } });
     } catch (err: any) {
       return res.status(500).json({ error: err.message || 'Failed to read gallery config' });
+    }
+  });
+
+  /**
+   * GET /api/gallery/photo/:fileId
+   * Public image streaming endpoint for event photos hosted on Google Drive.
+   * Enables unauthenticated visitors to view gallery event images with caching headers.
+   */
+  app.get('/api/gallery/photo/:fileId', async (req, res) => {
+    try {
+      const fileId = (req.params.fileId || '').trim();
+      if (!fileId || !/^[a-zA-Z0-9_-]{5,100}$/.test(fileId)) {
+        return res.status(400).send('Invalid photo file ID');
+      }
+
+      const token = await getValidServerDriveToken();
+      if (!token) {
+        return res.status(503).send('Drive service unavailable');
+      }
+
+      // Check metadata
+      const metaUrl = buildSafeDriveApiUrl(fileId, { fields: 'id,name,mimeType,size,trashed' });
+      const metaResp = await fetch(metaUrl, { headers: { Authorization: `Bearer ${token}` } });
+      if (!metaResp.ok) {
+        return res.status(404).send('Photo not found in Drive');
+      }
+      const meta = await metaResp.json();
+      if (meta.trashed) {
+        return res.status(404).send('Photo was trashed');
+      }
+
+      const mimeType = meta.mimeType || 'image/jpeg';
+      const isImage = mimeType.startsWith('image/') || /\.(jpe?g|png|webp|gif|svg)$/i.test(meta.name);
+      if (!isImage) {
+        return res.status(403).send('Requested file is not an image');
+      }
+
+      // Stream binary from Google Drive
+      const mediaUrl = buildSafeDriveApiUrl(fileId, { alt: 'media' });
+      const mediaResp = await fetch(mediaUrl, { headers: { Authorization: `Bearer ${token}` } });
+      if (!mediaResp.ok) {
+        return res.status(mediaResp.status).send('Failed to stream photo binary');
+      }
+
+      res.setHeader('Content-Type', mimeType);
+      res.setHeader('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
+      res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+      res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(meta.name)}"`);
+
+      const arrayBuffer = await mediaResp.arrayBuffer();
+      return res.send(Buffer.from(arrayBuffer));
+    } catch (err: any) {
+      console.error('[Gallery Photo Streaming] Error:', err);
+      return res.status(500).send('Error serving gallery photo');
+    }
+  });
+
+  /**
+   * POST /api/events/:eventId/link-drive-folder
+   * Admin endpoint to link a specific Google Drive folder to an event
+   * (e.g. Gallery photo folder, Approved certificates folder, Pending submissions folder).
+   * Verifies folder existence, resolves its real name, updates Firestore, and clears gallery cache.
+   */
+  app.post('/api/events/:eventId/link-drive-folder', async (req, res) => {
+    try {
+      const auth = await verifyAdminAuthorization(req);
+      if (!auth.authorized) {
+        return res.status(403).json({ error: auth.error || 'Admin authorization required.' });
+      }
+
+      const { eventId } = req.params;
+      const { folderType, folderInput, customName } = req.body;
+
+      if (!eventId) {
+        return res.status(400).json({ error: 'eventId parameter is required.' });
+      }
+      if (!folderInput || typeof folderInput !== 'string') {
+        return res.status(400).json({ error: 'folderInput (folder URL or ID) is required.' });
+      }
+
+      const cleanInput = folderInput.trim();
+      let folderId = '';
+      const urlMatch = cleanInput.match(/\/folders\/([a-zA-Z0-9_-]+)/);
+      if (urlMatch) {
+        folderId = urlMatch[1];
+      } else if (/^[a-zA-Z0-9_-]{10,100}$/.test(cleanInput)) {
+        folderId = cleanInput;
+      } else {
+        return res.status(400).json({ error: 'Invalid Google Drive folder URL or ID format.' });
+      }
+
+      // Query Drive with server token to verify folder and get its display name
+      const token = await getValidServerDriveToken();
+      let resolvedFolderName = (customName || '').trim();
+      let webViewLink = `https://drive.google.com/drive/folders/${folderId}`;
+
+      if (token) {
+        try {
+          const folderMetaUrl = buildSafeDriveApiUrl(folderId, { fields: 'id,name,mimeType,webViewLink,trashed' });
+          const folderMetaResp = await fetch(folderMetaUrl, { headers: { Authorization: `Bearer ${token}` } });
+          if (folderMetaResp.ok) {
+            const folderMeta = await folderMetaResp.json();
+            if (!resolvedFolderName && folderMeta.name) {
+              resolvedFolderName = folderMeta.name;
+            }
+            if (folderMeta.webViewLink) {
+              webViewLink = folderMeta.webViewLink;
+            }
+          }
+        } catch (driveErr) {
+          console.warn('[Link Drive Folder] Drive lookup notice:', driveErr);
+        }
+      }
+
+      const adminDb = getAdminFirestore();
+      if (!adminDb) {
+        return res.status(503).json({ error: 'Database service unavailable' });
+      }
+
+      const eventRef = adminDb.collection('Events').doc(eventId);
+      const eventSnap = await eventRef.get();
+      if (!eventSnap.exists) {
+        return res.status(404).json({ error: `Event with ID "${eventId}" not found.` });
+      }
+
+      const type = folderType || 'gallery';
+      const updateData: any = {
+        updatedAt: new Date().toISOString()
+      };
+
+      if (type === 'gallery') {
+        updateData.galleryFolderId = folderId;
+        updateData.galleryFolderLink = webViewLink;
+        if (resolvedFolderName) updateData.galleryFolderName = resolvedFolderName;
+      } else if (type === 'approved') {
+        updateData.driveFolderId = folderId;
+        updateData.driveFolderLink = webViewLink;
+        if (resolvedFolderName) updateData.driveFolderName = resolvedFolderName;
+      } else if (type === 'pending') {
+        updateData.pendingDriveFolderId = folderId;
+        updateData.pendingDriveFolderLink = webViewLink;
+        if (resolvedFolderName) updateData.pendingDriveFolderName = resolvedFolderName;
+      }
+
+      await eventRef.update(updateData);
+
+      // Invalidate gallery cache so newly linked folder photos appear immediately
+      cachedGalleryEvents = null;
+      cachedGalleryTimestamp = 0;
+
+      return res.json({
+        success: true,
+        message: `Successfully linked ${type} folder to event.`,
+        folderId,
+        folderName: resolvedFolderName,
+        folderLink: webViewLink,
+        folderType: type
+      });
+    } catch (err: any) {
+      console.error('[Link Drive Folder] Error:', err);
+      return res.status(500).json({ error: err.message || 'Failed to link Google Drive folder to event' });
     }
   });
 
@@ -7089,8 +7253,32 @@ Recipient:        ${RECIPIENT_EMAIL}
         }
 
         if (!isOwner) {
-          if (acceptsHtml) {
-            return res.status(403).send(`<!DOCTYPE html>
+          // If this is a general/gallery image and not a confidential member certificate, allow streaming as public media
+          const isGeneralImage = meta.mimeType?.startsWith('image/') || /\.(jpe?g|png|webp|gif|svg)$/i.test(meta.name);
+          const hasCertProps = Boolean(
+            meta.properties?.membershipNumber ||
+            meta.properties?.membershipId ||
+            meta.properties?.certificateId
+          );
+          let isRegisteredCert = false;
+          if (isGeneralImage && !hasCertProps) {
+            try {
+              const adminDb = getAdminFirestore();
+              if (adminDb) {
+                const [cCap, cLow] = await Promise.all([
+                  adminDb.collection('Certificates').doc(fileId).get().catch(() => null),
+                  adminDb.collection('certificates').doc(fileId).get().catch(() => null)
+                ]);
+                if (cCap?.exists || cLow?.exists) {
+                  isRegisteredCert = true;
+                }
+              }
+            } catch {}
+          }
+
+          if (!isGeneralImage || hasCertProps || isRegisteredCert) {
+            if (acceptsHtml) {
+              return res.status(403).send(`<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -7115,12 +7303,13 @@ Recipient:        ${RECIPIENT_EMAIL}
   </div>
 </body>
 </html>`);
-          }
+            }
 
-          return res.status(403).json({
-            error: 'forbidden',
-            message: 'Access denied: You are only authorized to access your own certificates.'
-          });
+            return res.status(403).json({
+              error: 'forbidden',
+              message: 'Access denied: You are only authorized to access your own certificates.'
+            });
+          }
         }
       }
 
