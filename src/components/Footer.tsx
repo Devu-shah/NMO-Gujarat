@@ -1,6 +1,6 @@
 import React from 'react';
 import { NmoLogo } from './NmoLogo';
-import { MapPin, Phone, Mail, CheckCircle2, Shield } from 'lucide-react';
+import { MapPin, Phone, Mail } from 'lucide-react';
 
 interface FooterProps {
   onNavigate: (tab: string) => void;
@@ -23,23 +23,6 @@ export const Footer: React.FC<FooterProps> = ({ onNavigate, onOpenVerify, onOpen
 
             <div className="pt-2 text-xs font-serif italic text-amber-300">
               ॥ प्राणिनाम् आर्तिनाशनम् ॥ — Relief to the suffering of living beings
-            </div>
-
-            <div className="pt-2 flex items-center gap-3">
-              <button
-                onClick={onOpenVerify}
-                className="px-3 py-1.5 rounded-lg bg-emerald-950/80 border border-emerald-500/40 text-emerald-300 hover:bg-emerald-900/60 text-xs font-semibold flex items-center gap-1.5 transition-colors"
-              >
-                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                <span>Verify Member ID</span>
-              </button>
-              <button
-                onClick={onOpenAuth}
-                className="px-3 py-1.5 rounded-lg bg-red-950/80 border border-red-500/40 text-red-300 hover:bg-red-900/60 text-xs font-semibold flex items-center gap-1.5 transition-colors"
-              >
-                <Shield className="w-3.5 h-3.5 text-red-400" />
-                <span>Member Portal</span>
-              </button>
             </div>
           </div>
 

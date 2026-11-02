@@ -8,7 +8,6 @@ import {
   Phone,
   MapPin,
   Clock,
-  ShieldCheck,
   Send,
   CheckCircle2,
   AlertCircle,
@@ -255,18 +254,9 @@ export const ContactUsPage: React.FC<ContactUsPageProps> = ({
                 <p className="text-xs text-slate-500">Official Secretariat Helpdesk</p>
               </div>
             </div>
-            <div className="p-3.5 rounded-2xl bg-amber-100/60 border border-amber-200 text-xs text-amber-950 font-medium space-y-1">
-              <div className="flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
-                <span>Central Secretariat: <strong>secretariat@nmogujarat.org</strong></span>
-              </div>
-              <p className="text-[11px] text-amber-800/80 pl-4">
-                Submissions automatically generate a unique Ticket Reference ID for tracking and user solution approval.
-              </p>
-            </div>
 
             {/* Quick Track Ticket Button */}
-            <div className="mt-4 pt-3 border-t border-amber-200/60">
+            <div className="pt-2">
               <button
                 type="button"
                 onClick={() => setShowTrackerModal(true)}
@@ -344,17 +334,6 @@ export const ContactUsPage: React.FC<ContactUsPageProps> = ({
                 <span className="font-bold text-slate-800 text-[11px] text-orange-700">Profile & Correction:</span>
                 <span className="text-slate-600 text-[11px] block mt-0.5">Spelling updates, medical college / hospital changes, phone/email correction.</span>
               </div>
-            </div>
-          </div>
-
-          {/* Privacy & Anti-Spam Guarantee */}
-          <div className="bg-slate-900 rounded-3xl p-5 text-white shadow-lg flex items-start gap-3">
-            <ShieldCheck className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
-            <div className="text-xs space-y-1">
-              <span className="font-bold text-slate-100 block">Security & Spam Protection</span>
-              <p className="text-slate-300 text-[11px] leading-relaxed">
-                No user login required. Submissions undergo server-side rate-limiting and duplicate validation to maintain official integrity.
-              </p>
             </div>
           </div>
         </div>
@@ -682,9 +661,6 @@ export const ContactUsPage: React.FC<ContactUsPageProps> = ({
                       </>
                     )}
                   </button>
-                  <p className="text-center text-[11px] text-slate-400 mt-2.5">
-                    Secure transmission • Direct delivery to NMO Gujarat Central Secretariat
-                  </p>
                 </div>
               </form>
             )}

@@ -334,7 +334,7 @@ export const DedicatedGalleryPage: React.FC<DedicatedGalleryPageProps> = ({ onBa
                     key={photo.id || idx}
                     type="button"
                     onClick={() => setCurrentPhotoIndex(idx)}
-                    className={`h-14 w-20 shrink-0 rounded-lg overflow-hidden border-2 transition-all cursor-pointer ${
+                    className={`relative h-14 w-20 shrink-0 rounded-lg overflow-hidden border-2 transition-all cursor-pointer ${
                       currentPhotoIndex === idx
                         ? 'border-red-600 scale-105 shadow-md shadow-red-700/50'
                         : 'border-slate-700 opacity-60 hover:opacity-100 hover:border-slate-500'
@@ -349,6 +349,9 @@ export const DedicatedGalleryPage: React.FC<DedicatedGalleryPageProps> = ({ onBa
                         e.currentTarget.src = '/assets/nmo/backgrounds/hero-fallback.svg';
                       }}
                     />
+                    <span className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-black/80 text-[9px] font-mono text-white font-bold leading-none">
+                      {photo.photoNumber || idx + 1}
+                    </span>
                   </button>
                 ))}
               </div>

@@ -11,6 +11,8 @@ export interface GalleryPhoto {
   proxyUrl: string;
   webViewLink?: string;
   thumbnailLink?: string;
+  photoNumber?: number;
+  displayTitle?: string;
 }
 
 export interface GalleryEvent {

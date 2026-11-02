@@ -4478,6 +4478,37 @@ Recipient:        ${RECIPIENT_EMAIL}
         }
         pageToken = data.nextPageToken;
       } while (pageToken && allPhotos.length < 500);
+
+      // Extract photo number for natural numbering (1, 2, 3, 4...)
+      const extractPhotoNumber = (fileName: string): number => {
+        if (!fileName) return Number.MAX_SAFE_INTEGER;
+        const base = fileName.replace(/\.[^/.]+$/, '').trim();
+        // Leading number: e.g. "1", "01", "1.jpg", "1_camp", "1 - camp"
+        const lead = base.match(/^(\d+)/);
+        if (lead) return parseInt(lead[1], 10);
+        // Trailing number: e.g. "photo_1", "img 2", "p-03"
+        const trail = base.match(/(?:_|-|\s)(\d+)$/);
+        if (trail) return parseInt(trail[1], 10);
+        // Any embedded digits: e.g. "camp2026_photo3"
+        const any = base.match(/(\d+)/);
+        if (any) return parseInt(any[1], 10);
+        return Number.MAX_SAFE_INTEGER;
+      };
+
+      // Sort strictly as per numbering: 1, 2, 3...
+      allPhotos.sort((a, b) => {
+        const numA = extractPhotoNumber(a.name);
+        const numB = extractPhotoNumber(b.name);
+        if (numA !== numB) return numA - numB;
+        return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+      });
+
+      // Assign sequential photoNumber and displayTitle
+      allPhotos.forEach((p, idx) => {
+        const num = extractPhotoNumber(p.name);
+        p.photoNumber = num !== Number.MAX_SAFE_INTEGER ? num : idx + 1;
+        p.displayTitle = `Photo ${p.photoNumber}`;
+      });
     } catch (err) {
       console.warn('[Gallery] Error querying photos in folder:', folderId, err);
     }
@@ -4700,6 +4731,54 @@ Recipient:        ${RECIPIENT_EMAIL}
       return res.json({ success: true, folderId: targetFolderId, count: photos.length, photos });
     } catch (err: any) {
       return res.status(500).json({ error: err.message || 'Error fetching photos', photos: [] });
+    }
+  });
+
+  // GET /api/gallery/event/:folderId/photo/:number
+  // Call photos as per numbering (e.g. /api/gallery/event/:folderId/photo/1, 2, 3...)
+  app.get('/api/gallery/event/:folderId/photo/:number', async (req, res) => {
+    try {
+      const { folderId, number } = req.params;
+      const targetNum = parseInt(number, 10);
+      if (isNaN(targetNum) || targetNum < 1) {
+        return res.status(400).json({ error: 'Valid positive photo number is required (e.g. 1, 2, 3...)' });
+      }
+
+      const token = await getValidServerDriveToken();
+      if (!token) {
+        return res.status(503).json({ error: 'Google Drive is disconnected.' });
+      }
+
+      let resolvedFolderId = folderId;
+      const adminDb = getAdminFirestore();
+      if (adminDb && !folderId.startsWith('1')) {
+        try {
+          const evtDoc = await adminDb.collection('Events').doc(folderId).get();
+          if (evtDoc.exists && evtDoc.data()?.driveFolderId) {
+            resolvedFolderId = evtDoc.data()!.driveFolderId;
+          }
+        } catch {}
+      }
+
+      const photos = await fetchAllPhotosFromDriveFolder(resolvedFolderId, token);
+      if (photos.length === 0) {
+        return res.status(404).json({ error: 'No photos found in event folder' });
+      }
+
+      const matched = photos.find((p) => p.photoNumber === targetNum) || photos[targetNum - 1];
+      if (!matched) {
+        return res.status(404).json({
+          error: `Photo #${targetNum} not found in this album. Total photos: ${photos.length}`
+        });
+      }
+
+      if (req.query.format === 'json' || req.headers.accept?.includes('application/json')) {
+        return res.json({ success: true, photoNumber: matched.photoNumber, photo: matched, totalPhotos: photos.length });
+      }
+
+      return res.redirect(matched.proxyUrl);
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Error fetching photo by number' });
     }
   });
 

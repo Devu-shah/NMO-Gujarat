@@ -255,14 +255,6 @@ export const GallerySection: React.FC<GallerySectionProps> = ({ onOpenFullGaller
             </button>
           </div>
         )}
-
-        {/* Read-Only Access Note conforming to strict permissions specification */}
-        <div className="mt-8 p-3.5 rounded-xl bg-slate-50 border border-slate-200 text-center text-xs text-slate-500 flex items-center justify-center gap-2">
-          <Camera className="w-4 h-4 text-slate-400 shrink-0" />
-          <span>
-            Photographs are curated and synced from official NMO photographic archives. Modification or photo uploads are restricted to authorized administrators.
-          </span>
-        </div>
       </div>
 
       {/* Lightbox Modal with Dynamic Left & Right Scroll Arrows */}
@@ -354,7 +346,7 @@ export const GallerySection: React.FC<GallerySectionProps> = ({ onOpenFullGaller
                     key={photo.id || idx}
                     type="button"
                     onClick={() => setCurrentPhotoIndex(idx)}
-                    className={`h-14 w-20 shrink-0 rounded-lg overflow-hidden border-2 transition-all cursor-pointer ${
+                    className={`relative h-14 w-20 shrink-0 rounded-lg overflow-hidden border-2 transition-all cursor-pointer ${
                       currentPhotoIndex === idx
                         ? 'border-red-600 scale-105 shadow-md shadow-red-700/50'
                         : 'border-slate-700 opacity-60 hover:opacity-100 hover:border-slate-500'
@@ -369,6 +361,9 @@ export const GallerySection: React.FC<GallerySectionProps> = ({ onOpenFullGaller
                         e.currentTarget.src = '/assets/nmo/backgrounds/hero-fallback.svg';
                       }}
                     />
+                    <span className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-black/80 text-[9px] font-mono text-white font-bold leading-none">
+                      {photo.photoNumber || idx + 1}
+                    </span>
                   </button>
                 ))}
               </div>
