@@ -317,14 +317,8 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, [currentUser?.membershipNumber]);
 
-  // Collection 1: "Users" (Empty clean initial state, no random fake records)
-  const [users, setUsers] = useState<NMOUserRecord[]>(() => {
-    try {
-      const saved = localStorage.getItem(LOCAL_STORAGE_USERS_KEY);
-      if (saved) return JSON.parse(saved);
-    } catch {}
-    return [];
-  });
+  // Collection 1: "Users" (In-memory state managed via Firestore authentication & admin queries)
+  const [users, setUsers] = useState<NMOUserRecord[]>([]);
 
   const usersRef = useRef<NMOUserRecord[]>(users);
   useEffect(() => {
@@ -352,13 +346,8 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return [];
   });
 
-  const [auditLogs, setAuditLogs] = useState<NMOAuditLog[]>(() => {
-    try {
-      const saved = localStorage.getItem(LOCAL_STORAGE_AUDIT_KEY);
-      if (saved) return JSON.parse(saved);
-    } catch {}
-    return [];
-  });
+  // Collection 3: "AuditLogs" (In-memory state synced with Firestore AuditLogs)
+  const [auditLogs, setAuditLogs] = useState<NMOAuditLog[]>([]);
 
   // Emergency Maintenance / 500 Server Error Lockdown State
   const [emergencyLockdown, setEmergencyLockdownState] = useState<boolean>(() => {
@@ -369,14 +358,8 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return false;
   });
 
-  // Application Error Logs State
-  const [errorLogs, setErrorLogs] = useState<NMOErrorLog[]>(() => {
-    try {
-      const saved = localStorage.getItem('nmo_error_logs_v1');
-      if (saved) return JSON.parse(saved);
-    } catch {}
-    return [];
-  });
+  // Application Error Logs State (In-memory state synced with Firestore / server)
+  const [errorLogs, setErrorLogs] = useState<NMOErrorLog[]>([]);
 
   // Collection: "Cities" state from Database
   const [dbCities, setDbCities] = useState<string[]>(() => {
@@ -423,13 +406,7 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
   };
 
-  // Sync state to local storage
-  useEffect(() => {
-    try {
-      localStorage.setItem(LOCAL_STORAGE_USERS_KEY, JSON.stringify(users));
-    } catch {}
-  }, [users]);
-
+  // Sync public, non-sensitive state to local storage
   useEffect(() => {
     try {
       localStorage.setItem(LOCAL_STORAGE_EVENTS_KEY, JSON.stringify(events));
@@ -441,12 +418,6 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       localStorage.setItem(LOCAL_STORAGE_IMPORTS_KEY, JSON.stringify(importLogs));
     } catch {}
   }, [importLogs]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(LOCAL_STORAGE_AUDIT_KEY, JSON.stringify(auditLogs));
-    } catch {}
-  }, [auditLogs]);
 
   // Real-time synchronization of emergency maintenance / 500 lockdown status
   useEffect(() => {
@@ -571,9 +542,6 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               }
               return fetchedUsers;
             });
-            try {
-              localStorage.setItem(LOCAL_STORAGE_USERS_KEY, JSON.stringify(fetchedUsers));
-            } catch {}
           }
         } catch (usersErr) {
           console.debug('Notice loading Users collection:', usersErr);
@@ -939,9 +907,6 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (!next.some((u) => u.membershipNumber === officialMemNo)) {
           next.push(verifiedAdmin);
         }
-        try {
-          localStorage.setItem(LOCAL_STORAGE_USERS_KEY, JSON.stringify(next));
-        } catch {}
         return next;
       });
 
@@ -1024,9 +989,6 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setUsers((prev) => {
       const next = prev.map((u) => (u.membershipNumber === officialMemNo ? updatedMemberRecord : u));
-      try {
-        localStorage.setItem(LOCAL_STORAGE_USERS_KEY, JSON.stringify(next));
-      } catch {}
       return next;
     });
 
@@ -1079,9 +1041,6 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setCurrentUser(updatedUser);
       setUsers((prev) => {
         const next = prev.map((u) => (u.membershipNumber === cleanNo ? updatedUser : u));
-        try {
-          localStorage.setItem(LOCAL_STORAGE_USERS_KEY, JSON.stringify(next));
-        } catch {}
         return next;
       });
     }
@@ -1261,15 +1220,12 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       throw new Error(`Failed to save member to database: ${err.message || 'Unknown error'}`);
     }
 
-    // Update local state and localStorage cache immediately
+    // Update local state immediately
     setUsers((prev) => {
       const exists = prev.some((u) => u.membershipNumber === memNo);
       const next = exists
         ? prev.map((u) => (u.membershipNumber === memNo ? (safeData as NMOUserRecord) : u))
         : [safeData as NMOUserRecord, ...prev];
-      try {
-        localStorage.setItem(LOCAL_STORAGE_USERS_KEY, JSON.stringify(next));
-      } catch {}
       return next;
     });
 
@@ -1306,9 +1262,6 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setUsers((prev) => {
       const next = prev.map((u) => (u.membershipNumber === cleanNo ? (safeData as NMOUserRecord) : u));
-      try {
-        localStorage.setItem(LOCAL_STORAGE_USERS_KEY, JSON.stringify(next));
-      } catch {}
       return next;
     });
 
@@ -1328,9 +1281,6 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const cleanNo = membershipNumber.trim().toUpperCase();
     setUsers((prev) => {
       const next = prev.filter((u) => u.membershipNumber !== cleanNo);
-      try {
-        localStorage.setItem(LOCAL_STORAGE_USERS_KEY, JSON.stringify(next));
-      } catch {}
       return next;
     });
 
@@ -1358,9 +1308,6 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     // Update local state immediately
     setUsers(preserved);
-    try {
-      localStorage.setItem(LOCAL_STORAGE_USERS_KEY, JSON.stringify(preserved));
-    } catch {}
 
     const CHUNK_SIZE = 400;
     try {
@@ -1446,9 +1393,6 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     setUsers([masterAdmin]);
-    try {
-      localStorage.setItem(LOCAL_STORAGE_USERS_KEY, JSON.stringify([masterAdmin]));
-    } catch {}
 
     const CHUNK_SIZE = 400;
     try {
@@ -1516,9 +1460,6 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setUsers((prev) => {
       const next = prev.filter((u) => !cleanSet.has(u.membershipNumber.trim().toUpperCase()));
-      try {
-        localStorage.setItem(LOCAL_STORAGE_USERS_KEY, JSON.stringify(next));
-      } catch {}
       return next;
     });
 
@@ -2421,9 +2362,6 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
     setAuditLogs((prev) => {
       const updated = [newLog, ...prev.slice(0, 499)];
-      try {
-        localStorage.setItem(LOCAL_STORAGE_AUDIT_KEY, JSON.stringify(updated));
-      } catch {}
       return updated;
     });
 
@@ -2451,9 +2389,6 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
     setAuditLogs((prev) => {
       const updated = [newLog, ...prev.slice(0, 499)];
-      try {
-        localStorage.setItem(LOCAL_STORAGE_AUDIT_KEY, JSON.stringify(updated));
-      } catch {}
       return updated;
     });
 
@@ -2524,9 +2459,6 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setErrorLogs((prev) => {
       const updated = [errorRecord, ...prev.slice(0, 149)];
-      try {
-        localStorage.setItem('nmo_error_logs_v1', JSON.stringify(updated));
-      } catch {}
       return updated;
     });
 
@@ -2550,9 +2482,6 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           ? { ...err, resolved: true, resolvedAt: new Date().toISOString(), resolvedBy: currentUser?.name || 'Super Admin' }
           : err
       );
-      try {
-        localStorage.setItem('nmo_error_logs_v1', JSON.stringify(updated));
-      } catch {}
       return updated;
     });
 
@@ -2580,9 +2509,6 @@ export const NMOProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const clearResolvedErrorLogs = async () => {
     setErrorLogs((prev) => {
       const updated = prev.filter((err) => !err.resolved);
-      try {
-        localStorage.setItem('nmo_error_logs_v1', JSON.stringify(updated));
-      } catch {}
       return updated;
     });
 

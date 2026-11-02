@@ -492,6 +492,71 @@ async function startServer() {
   app.use(cookieParser());
 
   // =========================================================================
+  // CSRF Protection Middleware
+  // Protects all state-changing HTTP methods (POST, PUT, DELETE, PATCH)
+  // Rejects unauthenticated cookie-based cross-site requests
+  // =========================================================================
+  const csrfProtection: express.RequestHandler = (req, res, next) => {
+    // Safe idempotent methods do not mutate state
+    if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+      return next();
+    }
+
+    // Google Drive webhook push notifications from Google Cloud
+    if (req.path === '/api/drive/webhook') {
+      return next();
+    }
+
+    // Requests with explicit Authorization header (Bearer tokens) are immune to CSRF
+    const authHeader = req.headers['authorization'];
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      return next();
+    }
+
+    // Custom anti-CSRF headers (AJAX/Fetch standard defense)
+    const customHeader = req.headers['x-csrf-token'] || req.headers['x-requested-with'];
+    if (customHeader) {
+      return next();
+    }
+
+    // Verify Origin or Referer header against authorized application domains
+    const origin = (req.headers['origin'] || req.headers['referer']) as string | undefined;
+    if (origin) {
+      try {
+        const originUrl = new URL(Array.isArray(origin) ? origin[0] : origin);
+        const host = originUrl.hostname.toLowerCase();
+        const allowedHosts = [
+          'localhost',
+          '127.0.0.1',
+          'nmo-gujarat.web.app',
+          'nmo-gujarat.firebaseapp.com',
+          'nmo-gujarat.onrender.com'
+        ];
+        if (
+          allowedHosts.includes(host) ||
+          host.endsWith('.web.app') ||
+          host.endsWith('.firebaseapp.com') ||
+          host.endsWith('.onrender.com') ||
+          (req.headers.host && originUrl.host === req.headers.host)
+        ) {
+          return next();
+        }
+      } catch {}
+    }
+
+    // If request contains state cookies without origin or anti-CSRF token, reject
+    if (req.cookies && (req.cookies[SUPER_ADMIN_COOKIE_NAME] || req.cookies['nmo_member_id'])) {
+      return res.status(403).json({
+        error: 'csrf_validation_failed',
+        message: 'Cross-Site Request Forgery (CSRF) validation failed.'
+      });
+    }
+
+    return next();
+  };
+  app.use(csrfProtection);
+
+  // =========================================================================
   // Cryptographic Server-Side Admin Session & Authorization Infrastructure
   // Zero-trust verification: strictly validates HMAC session tokens or Firebase ID tokens
   // =========================================================================
@@ -1127,8 +1192,11 @@ async function startServer() {
         errors.push('A valid 10-15 digit mobile number is required.');
       }
 
-      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-      if (!cleanEmail || !emailRegex.test(cleanEmail)) {
+      const isSafeEmail =
+        Boolean(cleanEmail) &&
+        cleanEmail.length <= 254 &&
+        /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+$/.test(cleanEmail);
+      if (!isSafeEmail) {
         errors.push('A valid email address is required.');
       }
 
@@ -2113,23 +2181,29 @@ Recipient:        ${RECIPIENT_EMAIL}
   function getOAuthRedirectUri(req: express.Request): string {
     if (process.env.GOOGLE_DRIVE_REDIRECT_URI) {
       const uri = process.env.GOOGLE_DRIVE_REDIRECT_URI.trim();
-      // Refuse misconfigured GOOGLE_DRIVE_REDIRECT_URI targeting Firebase Auth handler
-      if (!uri.includes('__/auth/handler') && !uri.includes('firebaseapp.com') && !uri.includes('web.app')) {
-        return uri;
-      }
-      console.warn(`[Drive OAuth] Ignoring misconfigured GOOGLE_DRIVE_REDIRECT_URI ("${uri}") pointing to Firebase. Using Render backend callback.`);
+      try {
+        const parsed = new URL(uri);
+        const host = parsed.hostname.toLowerCase();
+        const isFirebaseDomain = host === 'firebaseapp.com' || host.endsWith('.firebaseapp.com') || host === 'web.app' || host.endsWith('.web.app');
+        if (!parsed.pathname.includes('__/auth/handler') && !isFirebaseDomain) {
+          return uri;
+        }
+      } catch {}
+      console.warn('[Drive OAuth] Ignoring misconfigured GOOGLE_DRIVE_REDIRECT_URI pointing to Firebase. Using Render backend callback.');
     }
     const renderExternal = (process.env.RENDER_EXTERNAL_URL || process.env.BACKEND_URL || '').trim().replace(/\/+$/, '');
     if (renderExternal) {
       return `${renderExternal}/api/auth/google/callback`;
     }
     const forwardedProto = (req.headers['x-forwarded-proto'] as string)?.split(',')[0]?.trim() || req.protocol;
-    const forwardedHost = (req.headers['x-forwarded-host'] as string)?.split(',')[0]?.trim() || req.headers.host;
+    const rawForwardedHost = (req.headers['x-forwarded-host'] as string)?.split(',')[0]?.trim() || req.headers.host;
 
-    if (forwardedHost) {
+    if (rawForwardedHost) {
+      const hostOnly = rawForwardedHost.split(':')[0].toLowerCase();
+      const isFirebaseDomain = hostOnly === 'web.app' || hostOnly.endsWith('.web.app') || hostOnly === 'firebaseapp.com' || hostOnly.endsWith('.firebaseapp.com');
       // If the request came through a proxy, make sure we do not route OAuth callback to Firebase Hosting
-      if (!forwardedHost.includes('web.app') && !forwardedHost.includes('firebaseapp.com')) {
-        return `${forwardedProto}://${forwardedHost}/api/auth/google/callback`;
+      if (!isFirebaseDomain) {
+        return `${forwardedProto}://${rawForwardedHost}/api/auth/google/callback`;
       }
     }
     if (process.env.NODE_ENV === 'production') {
@@ -2254,7 +2328,11 @@ Recipient:        ${RECIPIENT_EMAIL}
     }
 
     if (oauthError) {
-      console.warn('[Google OAuth Callback] Authorization returned error:', oauthError);
+      console.warn('[Google OAuth Callback] Authorization was not completed or was cancelled by user.');
+      const safeErrorMsg =
+        oauthError === 'access_denied'
+          ? 'Access was denied or cancelled by user.'
+          : 'Authentication could not be completed. Please try again.';
       res.setHeader('Content-Type', 'text/html');
       return res.status(400).send(`
         <!DOCTYPE html>
@@ -2263,13 +2341,13 @@ Recipient:        ${RECIPIENT_EMAIL}
           <body style="font-family: system-ui, sans-serif; padding: 40px; text-align: center; background: #0f172a; color: #f8fafc;">
             <div style="max-width: 440px; margin: 0 auto; background: #1e293b; padding: 32px; border-radius: 16px; border: 1px solid #334155;">
               <h3 style="color: #f87171; margin-top: 0;">Authorization Error</h3>
-              <p style="color: #94a3b8; font-size: 13px;">${escapeHtml(oauthError)}</p>
+              <p style="color: #94a3b8; font-size: 13px;">${safeErrorMsg}</p>
               <p style="font-size: 12px; color: #64748b;">Closing window...</p>
             </div>
             <script>
               try {
                 if (window.opener && !window.opener.closed) {
-                  window.opener.postMessage({ type: 'GOOGLE_DRIVE_AUTH_ERROR', error: '${escapeHtml(oauthError)}' }, '*');
+                  window.opener.postMessage({ type: 'GOOGLE_DRIVE_AUTH_ERROR', error: 'Authentication cancelled' }, '*');
                   setTimeout(() => window.close(), 1500);
                 } else {
                   setTimeout(() => window.location.href = '/admin/super', 2000);
@@ -3269,6 +3347,26 @@ Recipient:        ${RECIPIENT_EMAIL}
   // Google Drive Member Certificates API
   // Calls Drive by Membership ID and shows ONLY the member's certificates
   // =========================================================================
+  function isValidDriveId(id: unknown): id is string {
+    return typeof id === 'string' && /^[a-zA-Z0-9_-]{5,128}$/.test(id.trim());
+  }
+
+  function buildSafeDriveApiUrl(fileId: string, searchParams?: Record<string, string>): string {
+    if (!isValidDriveId(fileId)) {
+      throw new Error('Invalid Google Drive ID format');
+    }
+    const cleanId = encodeURIComponent(fileId.trim());
+    const safeUrl = new URL(`https://www.googleapis.com/drive/v3/files/${cleanId}`);
+    if (searchParams) {
+      for (const [k, v] of Object.entries(searchParams)) {
+        if (v !== undefined && v !== null) {
+          safeUrl.searchParams.set(k, v);
+        }
+      }
+    }
+    return safeUrl.toString();
+  }
+
   async function getValidServerDriveToken(): Promise<string | null> {
     let session = await getDurableDriveSession();
     if (!session && process.env.GOOGLE_DRIVE_REFRESH_TOKEN) {
@@ -4364,7 +4462,7 @@ Recipient:        ${RECIPIENT_EMAIL}
         pageToken = data.nextPageToken;
       } while (pageToken && allPhotos.length < 500);
     } catch (err) {
-      console.warn(`[Gallery] Error querying photos in folder ${folderId}:`, err);
+      console.warn('[Gallery] Error querying photos in folder:', folderId, err);
     }
 
     return allPhotos;
@@ -5424,7 +5522,7 @@ Recipient:        ${RECIPIENT_EMAIL}
             });
           }
         } catch (e: any) {
-          console.warn(`[Reconcile Event Folders] Failed for event ${evt.id}:`, e.message);
+          console.warn('[Reconcile Event Folders] Failed for event:', evt.id, e?.message);
         }
       }
 
@@ -5673,10 +5771,10 @@ Recipient:        ${RECIPIENT_EMAIL}
 
       // Delete file from Google Drive
       const token = await getValidServerDriveToken();
-      if (token && fileId) {
+      if (token && fileId && isValidDriveId(fileId)) {
         try {
           console.log(`[User Delete Cert] Deleting file ${fileId} from Google Drive...`);
-          await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`, {
+          await fetch(buildSafeDriveApiUrl(fileId), {
             method: 'DELETE',
             headers: { Authorization: `Bearer ${token}` }
           });
@@ -5744,7 +5842,8 @@ Recipient:        ${RECIPIENT_EMAIL}
 
       // Check if folder with same name already exists in target parent
       const cleanFolderName = name.trim();
-      const checkQuery = `'${targetParent}' in parents and mimeType = 'application/vnd.google-apps.folder' and name = '${cleanFolderName.replace(/'/g, "\\'")}' and trashed = false`;
+      const safeEscapedFolderName = cleanFolderName.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+      const checkQuery = `'${targetParent}' in parents and mimeType = 'application/vnd.google-apps.folder' and name = '${safeEscapedFolderName}' and trashed = false`;
       const checkRes = await fetch(
         `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(checkQuery)}&fields=files(id,name,webViewLink,createdTime)&pageSize=1`,
         { headers: { Authorization: `Bearer ${token}` } }
@@ -6024,10 +6123,12 @@ Recipient:        ${RECIPIENT_EMAIL}
             // Explicit overwrite confirmed: remove previous file to prevent duplicates
             const fileToDelete = existingFileId || existingForThisEvent.id;
             console.log(`[Drive Upload] Replacing existing certificate file ${fileToDelete} for ${verifiedMemberNo} in event ${eventId}...`);
-            await fetch(`https://www.googleapis.com/drive/v3/files/${fileToDelete}`, {
-              method: 'DELETE',
-              headers: { Authorization: `Bearer ${token}` }
-            }).catch(() => {});
+            if (isValidDriveId(fileToDelete)) {
+              await fetch(buildSafeDriveApiUrl(fileToDelete), {
+                method: 'DELETE',
+                headers: { Authorization: `Bearer ${token}` }
+              }).catch(() => {});
+            }
           } else {
             // Safe retry handling: If the certificate already exists in Google Drive for this event,
             // report success and return the existing verified certificate record.
@@ -6804,11 +6905,15 @@ Recipient:        ${RECIPIENT_EMAIL}
         });
       }
 
+      if (!isValidDriveId(fileId)) {
+        return res.status(400).json({ error: 'invalid_id', message: 'Invalid certificate file ID format.' });
+      }
+
       // Fetch metadata first to get correct filename, mimeType, properties, and trashed status
-      const metaResp = await fetch(
-        `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,mimeType,size,properties,trashed`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
+      const metaUrl = buildSafeDriveApiUrl(fileId, {
+        fields: 'id,name,mimeType,size,properties,trashed'
+      });
+      const metaResp = await fetch(metaUrl, { headers: { Authorization: `Bearer ${token}` } });
 
       if (!metaResp.ok) {
         console.warn(`[File Proxy] File ${fileId} not found in Google Drive (status: ${metaResp.status}). Updating database to missing...`);
@@ -6927,10 +7032,8 @@ Recipient:        ${RECIPIENT_EMAIL}
       const isDownload = req.query.download === 'true';
 
       // Stream file content
-      const mediaResp = await fetch(
-        `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
+      const mediaUrl = buildSafeDriveApiUrl(fileId, { alt: 'media' });
+      const mediaResp = await fetch(mediaUrl, { headers: { Authorization: `Bearer ${token}` } });
 
       if (!mediaResp.ok) {
         console.warn(`[File Proxy] Media stream failed for ${fileId} (status: ${mediaResp.status}). Marking missing in database...`);
@@ -7018,8 +7121,12 @@ Recipient:        ${RECIPIENT_EMAIL}
         return res.status(503).json({ error: 'Google Drive storage is disconnected.' });
       }
 
+      if (!isValidDriveId(fileId)) {
+        return res.status(400).json({ error: 'invalid_id', message: 'Invalid file ID format.' });
+      }
+
       console.log(`[Drive Delete] Attempting to delete file ${fileId} from Google Drive...`);
-      const deleteResp = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
+      const deleteResp = await fetch(buildSafeDriveApiUrl(fileId), {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` }
       });
@@ -7058,8 +7165,8 @@ Recipient:        ${RECIPIENT_EMAIL}
       }
 
       const { driveFileId, adminUid, adminName, certId, eventId, eventTitle, membershipNumber, memberName } = req.body;
-      if (!driveFileId) {
-        return res.status(400).json({ error: 'driveFileId is required' });
+      if (!driveFileId || !isValidDriveId(driveFileId)) {
+        return res.status(400).json({ error: 'invalid_id', message: 'Valid driveFileId is required.' });
       }
 
       const token = await getValidServerDriveToken();
@@ -7068,10 +7175,8 @@ Recipient:        ${RECIPIENT_EMAIL}
       }
 
       // 2. Fetch current file metadata from Google Drive
-      const metaResp = await fetch(
-        `https://www.googleapis.com/drive/v3/files/${driveFileId}?fields=id,name,parents,properties`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
+      const metaUrl = buildSafeDriveApiUrl(driveFileId, { fields: 'id,name,parents,properties' });
+      const metaResp = await fetch(metaUrl, { headers: { Authorization: `Bearer ${token}` } });
       if (!metaResp.ok) {
         const errText = await metaResp.text().catch(() => '');
         return res.status(metaResp.status).json({
@@ -7121,10 +7226,14 @@ Recipient:        ${RECIPIENT_EMAIL}
       const isAlreadyInApproved = currentParents.includes(approvedFolderId);
       if (!isAlreadyInApproved) {
         const removeParents = currentParents.filter((p) => p !== approvedFolderId).join(',');
-        let patchUrl = `https://www.googleapis.com/drive/v3/files/${driveFileId}?addParents=${encodeURIComponent(approvedFolderId)}&fields=id,name,parents,properties`;
+        const patchParams: Record<string, string> = {
+          addParents: approvedFolderId,
+          fields: 'id,name,parents,properties'
+        };
         if (removeParents) {
-          patchUrl += `&removeParents=${encodeURIComponent(removeParents)}`;
+          patchParams.removeParents = removeParents;
         }
+        const patchUrl = buildSafeDriveApiUrl(driveFileId, patchParams);
 
         console.log(`[Drive Approve] Moving file ${driveFileId} into approved folder ${approvedFolderId} (removing parents: ${removeParents})...`);
         const patchResp = await fetch(patchUrl, {
@@ -7160,7 +7269,7 @@ Recipient:        ${RECIPIENT_EMAIL}
         console.log(`[Drive Approve] Successfully verified file ${driveFileId} is in approved folder ${approvedFolderId}`);
       } else {
         // Just update properties if already in approved folder
-        await fetch(`https://www.googleapis.com/drive/v3/files/${driveFileId}`, {
+        await fetch(buildSafeDriveApiUrl(driveFileId), {
           method: 'PATCH',
           headers: {
             Authorization: `Bearer ${token}`,
@@ -7255,8 +7364,8 @@ Recipient:        ${RECIPIENT_EMAIL}
       }
 
       const { driveFileId, rejectionReason, adminUid, adminName, certId, deleteFile } = req.body;
-      if (!driveFileId) {
-        return res.status(400).json({ error: 'driveFileId is required' });
+      if (!driveFileId || typeof driveFileId !== 'string' || !isValidDriveId(driveFileId)) {
+        return res.status(400).json({ error: 'Valid driveFileId is required' });
       }
 
       const token = await getValidServerDriveToken();
@@ -7266,7 +7375,7 @@ Recipient:        ${RECIPIENT_EMAIL}
 
       if (deleteFile) {
         // If caller explicitly requested deletion with rejection
-        const deleteResp = await fetch(`https://www.googleapis.com/drive/v3/files/${driveFileId}`, {
+        const deleteResp = await fetch(buildSafeDriveApiUrl(driveFileId), {
           method: 'DELETE',
           headers: { Authorization: `Bearer ${token}` }
         });
@@ -7280,7 +7389,7 @@ Recipient:        ${RECIPIENT_EMAIL}
         }
       } else {
         // Update file properties on Google Drive with rejection metadata
-        await fetch(`https://www.googleapis.com/drive/v3/files/${driveFileId}`, {
+        await fetch(buildSafeDriveApiUrl(driveFileId), {
           method: 'PATCH',
           headers: {
             Authorization: `Bearer ${token}`,
@@ -7360,8 +7469,8 @@ Recipient:        ${RECIPIENT_EMAIL}
       }
 
       const { driveFileId, certId, eventId, membershipNumber, adminUid, adminName } = req.body;
-      if (!driveFileId) {
-        return res.status(400).json({ error: 'driveFileId is required' });
+      if (!driveFileId || typeof driveFileId !== 'string' || !isValidDriveId(driveFileId)) {
+        return res.status(400).json({ error: 'Valid driveFileId is required' });
       }
 
       const token = await getValidServerDriveToken();
@@ -7402,7 +7511,7 @@ Recipient:        ${RECIPIENT_EMAIL}
 
       // Check Google Drive file properties if available
       try {
-        const fileMetaRes = await fetch(`https://www.googleapis.com/drive/v3/files/${driveFileId}?fields=id,name,properties`, {
+        const fileMetaRes = await fetch(buildSafeDriveApiUrl(driveFileId, { fields: 'id,name,properties' }), {
           headers: { Authorization: `Bearer ${token}` }
         });
         if (fileMetaRes.ok) {
@@ -7428,7 +7537,7 @@ Recipient:        ${RECIPIENT_EMAIL}
 
       // 3. Delete from Google Drive
       // If deletion fails, report error and do not falsely report success
-      const deleteResp = await fetch(`https://www.googleapis.com/drive/v3/files/${driveFileId}`, {
+      const deleteResp = await fetch(buildSafeDriveApiUrl(driveFileId), {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` }
       });

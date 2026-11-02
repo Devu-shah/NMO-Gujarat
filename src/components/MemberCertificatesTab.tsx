@@ -40,16 +40,7 @@ import { apiUrl } from '../lib/api';
 export const MemberCertificatesTab: React.FC = () => {
   const { currentMember, currentUser, events } = useNMO();
 
-  const [certificates, setCertificates] = useState<DriveCertificateFile[]>(() => {
-    try {
-      const savedMem = currentMember?.membershipNumber || currentUser?.membershipNumber || localStorage.getItem('nmo_user_membership_number') || '';
-      if (savedMem) {
-        const cached = sessionStorage.getItem(`nmo_member_certs_${savedMem.trim().toUpperCase()}`);
-        if (cached) return JSON.parse(cached);
-      }
-    } catch {}
-    return [];
-  });
+  const [certificates, setCertificates] = useState<DriveCertificateFile[]>([]);
   const [statusFilter, setStatusFilter] = useState<'all' | 'approved' | 'pending' | 'rejected' | 'missing'>('all');
   const [isLoadingCerts, setIsLoadingCerts] = useState<boolean>(false);
   const [isBackgroundSyncing, setIsBackgroundSyncing] = useState<boolean>(false);
@@ -244,9 +235,6 @@ export const MemberCertificatesTab: React.FC = () => {
             });
             if (!hasChanged) return prev; // Persistent reference preserved
           }
-          try {
-            sessionStorage.setItem(`nmo_member_certs_${cleanMem}`, JSON.stringify(strictlyFiltered));
-          } catch {}
           return strictlyFiltered;
         });
       } else if (strictlyFiltered.length === 0 && certificates.length === 0) {

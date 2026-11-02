@@ -51,67 +51,58 @@ export function sanitizeTel(phone?: string | null): string {
 
 /**
  * Sanitizes URLs for links and navigation.
- * Strictly permits only http, https, mailto, tel, blob, and relative paths.
- * Blocks javascript:, vbscript:, and data: schemes.
+ * Uses strict positive allowlist (https, http, mailto, tel, blob, and relative paths).
+ * Disallows javascript:, vbscript:, data:, and unrecognized protocols.
  */
 export function sanitizeUrl(url?: string | null): string {
   if (!url || typeof url !== 'string') return '#';
   const clean = url.trim();
-  const lower = clean.toLowerCase();
 
-  // Explicit blocklist for dangerous schemes
-  if (
-    lower.startsWith('javascript:') ||
-    lower.startsWith('vbscript:') ||
-    lower.startsWith('data:')
-  ) {
-    return '#';
-  }
-
-  // Allowed schemes
-  if (
-    lower.startsWith('https://') ||
-    lower.startsWith('http://') ||
-    lower.startsWith('mailto:') ||
-    lower.startsWith('tel:') ||
-    lower.startsWith('blob:') ||
-    lower.startsWith('/') ||
-    lower.startsWith('#')
-  ) {
+  // Strictly allow relative paths and page anchors (disallowing protocol-relative // and /\)
+  if (clean.startsWith('/') && !clean.startsWith('//') && !clean.startsWith('/\\')) {
     return clean;
   }
+  if (clean.startsWith('#')) {
+    return clean;
+  }
+
+  // Parse absolute URLs using standard URL parser with strict safe protocol allowlist
+  try {
+    const parsed = new URL(clean);
+    const safeProtocols = ['https:', 'http:', 'mailto:', 'tel:', 'blob:'];
+    if (safeProtocols.includes(parsed.protocol)) {
+      return parsed.toString();
+    }
+  } catch {}
 
   return '#';
 }
 
 /**
  * Sanitizes image source URLs.
- * Strictly permits only https, http, data:image/, blob, and relative asset paths.
- * Blocks javascript:, vbscript:, and non-image data: schemes.
+ * Strictly permits only https, http, blob, safe data:image/ URIs, and relative asset paths.
  */
 export function sanitizeImageUrl(url?: string | null): string {
   if (!url || typeof url !== 'string') return '';
   const clean = url.trim();
-  const lower = clean.toLowerCase();
 
-  if (
-    lower.startsWith('javascript:') ||
-    lower.startsWith('vbscript:') ||
-    lower.startsWith('data:text') ||
-    lower.startsWith('data:application')
-  ) {
-    return '';
-  }
-
-  if (
-    lower.startsWith('https://') ||
-    lower.startsWith('http://') ||
-    lower.startsWith('data:image/') ||
-    lower.startsWith('blob:') ||
-    lower.startsWith('/')
-  ) {
+  // Strictly allow relative paths (disallowing protocol-relative // and /\)
+  if (clean.startsWith('/') && !clean.startsWith('//') && !clean.startsWith('/\\')) {
     return clean;
   }
+
+  // Strictly allow verified base64 data:image URIs
+  if (/^data:image\/(?:png|jpeg|jpg|webp|gif|svg\+xml);base64,[A-Za-z0-9+/=]+$/.test(clean)) {
+    return clean;
+  }
+
+  // Parse absolute URLs using standard URL parser with strict safe protocol allowlist
+  try {
+    const parsed = new URL(clean);
+    if (parsed.protocol === 'https:' || parsed.protocol === 'http:' || parsed.protocol === 'blob:') {
+      return parsed.toString();
+    }
+  } catch {}
 
   return '';
 }
