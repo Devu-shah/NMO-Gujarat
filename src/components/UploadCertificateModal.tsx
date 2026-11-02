@@ -80,8 +80,16 @@ export const UploadCertificateModal: React.FC<UploadCertificateModalProps> = ({
 
     setSelectedFile(file);
     if (file.type.startsWith('image/')) {
-      const objectUrl = URL.createObjectURL(file);
-      setPreviewUrl(objectUrl);
+      const reader = new FileReader();
+      reader.onload = (loadEvt) => {
+        const result = loadEvt.target?.result;
+        if (typeof result === 'string' && /^data:image\/(?:png|jpeg|jpg);base64,[A-Za-z0-9+/=]+$/.test(result)) {
+          setPreviewUrl(result);
+        } else {
+          setPreviewUrl(null);
+        }
+      };
+      reader.readAsDataURL(file);
     } else {
       setPreviewUrl(null);
     }

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import Papa from 'papaparse';
-import * as XLSX from 'xlsx';
+import ExcelJS from 'exceljs';
 import { db } from '../../lib/firebase';
 import { doc, writeBatch } from 'firebase/firestore';
 import { useNMO, isProtectedAdminUser } from '../../context/NMOContext';
@@ -199,12 +199,44 @@ export const MemberDataImport: React.FC<MemberDataImportProps> = ({ initialMode 
     const reader = new FileReader();
 
     if (uploadedFile.name.endsWith('.xlsx') || uploadedFile.name.endsWith('.xls')) {
-      reader.onload = (evt) => {
+      reader.onload = async (evt) => {
         try {
-          const data = new Uint8Array(evt.target?.result as ArrayBuffer);
-          const workbook = XLSX.read(data, { type: 'array' });
-          const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
-          const json = XLSX.utils.sheet_to_json(firstSheet, { defval: '' });
+          const buffer = evt.target?.result as ArrayBuffer;
+          const workbook = new ExcelJS.Workbook();
+          await workbook.xlsx.load(buffer);
+          const firstSheet = workbook.worksheets[0];
+          if (!firstSheet) {
+            throw new Error('No worksheets found in Excel file');
+          }
+
+          const json: Record<string, any>[] = [];
+          let headers: string[] = [];
+
+          firstSheet.eachRow((row, rowNumber) => {
+            if (rowNumber === 1) {
+              const rawHeaders = Array.isArray(row.values) ? row.values.slice(1) : [];
+              headers = rawHeaders.map((v) => (v != null ? String(v).trim() : ''));
+            } else {
+              const rawValues = Array.isArray(row.values) ? row.values.slice(1) : [];
+              const rowObj: Record<string, any> = {};
+              let hasAnyValue = false;
+              headers.forEach((header, index) => {
+                if (header) {
+                  let val = rawValues[index];
+                  if (val != null && typeof val === 'object') {
+                    if ('result' in val) val = (val as any).result;
+                    else if ('text' in val) val = (val as any).text;
+                  }
+                  rowObj[header] = val != null ? String(val).trim() : '';
+                  if (rowObj[header] !== '') hasAnyValue = true;
+                }
+              });
+              if (hasAnyValue) {
+                json.push(rowObj);
+              }
+            }
+          });
+
           handleParsedRawRows(json, uploadedFile.name);
         } catch (err: any) {
           alert('Error parsing Excel: ' + err.message);
